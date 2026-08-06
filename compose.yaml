@@ -1,0 +1,19 @@
+services:
+  database:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: holdfast_events
+      POSTGRES_USER: holdfast_bot
+      POSTGRES_PASSWORD: local_development_only
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - holdfast_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U holdfast_bot -d holdfast_events"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  holdfast_postgres_data:
