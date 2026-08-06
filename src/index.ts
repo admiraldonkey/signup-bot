@@ -109,6 +109,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             SELECT COUNT(*)::int
             FROM information_schema.tables
             WHERE table_schema = 'public'
+            AND table_type = 'BASE TABLE'
           ) AS table_count
       `);
 
@@ -125,7 +126,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           `Database time: <t:${Math.floor(
             row.database_time.getTime() / 1000,
           )}:F>`,
-          `Public tables: **${row.table_count}**`,
+          `Application tables: **${row.table_count}**`,
           `Stored events: **${row.event_count}**`,
         ].join("\n"),
       );
