@@ -8,6 +8,20 @@
       "when": 1786025277655,
       "tag": "0000_initial-event-schema",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1786043015918,
+      "tag": "0001_add-event-audiences-and-timezones",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786053178711,
+      "tag": "0002_use-event-specific-ping-roles",
+      "breakpoints": true
     }
   ]
 }

@@ -139,6 +139,53 @@ export const eventTypes = pgTable(
   ],
 );
 
+export const eventAudiences = pgTable(
+  "event_audiences",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+
+    ownerGuildId: integer("owner_guild_id")
+      .notNull()
+      .references(() => discordGuilds.id, {
+        onDelete: "cascade",
+      }),
+
+    code: varchar("code", {
+      length: 32,
+    }).notNull(),
+
+    name: varchar("name", {
+      length: 100,
+    }).notNull(),
+
+    defaultTimezone: varchar("default_timezone", {
+      length: 64,
+    }).notNull(),
+
+    active: boolean("active").notNull().default(true),
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("event_audiences_owner_code_unique").on(
+      table.ownerGuildId,
+      table.code,
+    ),
+
+    index("event_audiences_owner_guild_idx").on(table.ownerGuildId),
+  ],
+);
+
 /*
  * Recurring event configurations.
  *
@@ -283,6 +330,20 @@ export const events = pgTable(
       .notNull()
       .references(() => eventTypes.id, { onDelete: "restrict" }),
 
+    audienceId: integer("audience_id").references(() => eventAudiences.id, {
+      onDelete: "set null",
+    }),
+
+    /*
+     * The IANA timezone used when the organiser entered the event time.
+     * startsAt remains the authoritative absolute instant.
+     */
+    timezone: varchar("timezone", {
+      length: 64,
+    })
+      .notNull()
+      .default("Europe/London"),
+
     name: varchar("name", { length: 150 }).notNull(),
 
     description: text("description"),
@@ -290,6 +351,10 @@ export const events = pgTable(
     startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
 
     endsAt: timestamp("ends_at", { withTimezone: true }),
+
+    showDetailedDeadline: boolean("show_detailed_deadline")
+      .notNull()
+      .default(false),
 
     attendanceOpensAt: timestamp("attendance_opens_at", {
       withTimezone: true,
@@ -319,6 +384,43 @@ export const events = pgTable(
     index("events_owner_starts_at_idx").on(table.ownerGuildId, table.startsAt),
     index("events_status_starts_at_idx").on(table.status, table.startsAt),
     index("events_template_idx").on(table.templateId),
+    index("events_audience_idx").on(table.audienceId),
+  ],
+);
+
+export const eventPingRoles = pgTable(
+  "event_ping_roles",
+  {
+    eventId: integer("event_id")
+      .notNull()
+      .references(() => events.id, {
+        onDelete: "cascade",
+      }),
+
+    discordRoleId: text("discord_role_id").notNull(),
+
+    /*
+     * Preserve the displayed name even if the Discord role is later
+     * renamed or deleted.
+     */
+    roleName: varchar("role_name", {
+      length: 100,
+    }).notNull(),
+
+    sortOrder: integer("sort_order").notNull().default(0),
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.eventId, table.discordRoleId],
+    }),
+
+    index("event_ping_roles_event_idx").on(table.eventId),
   ],
 );
 

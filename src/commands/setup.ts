@@ -8,7 +8,12 @@ import {
 import { asc, eq } from "drizzle-orm";
 
 import { db } from "../db/client.js";
-import { discordGuilds, eventTypes, guildSettings } from "../db/schema.js";
+import {
+  discordGuilds,
+  eventAudiences,
+  eventTypes,
+  guildSettings,
+} from "../db/schema.js";
 
 const DEFAULT_EVENT_TYPES = [
   {
@@ -86,6 +91,11 @@ export async function handleSetupCommand(
 
   if (subcommand === "configure") {
     await configureGuild(interaction);
+    return;
+  }
+
+  if (subcommand === "regions") {
+    await configureEventRegions(interaction);
     return;
   }
 
@@ -197,9 +207,6 @@ async function configureGuild(
     throw new Error("The setup configure command requires a Discord server.");
   }
 
-  /*
-   * Confirm that /setup initialise has already created the guild record.
-   */
   const [configuredGuild] = await db
     .select({
       id: discordGuilds.id,
@@ -218,10 +225,6 @@ async function configureGuild(
     return;
   }
 
-  /*
-   * Resolve the selected options through the guild itself rather than
-   * trusting only the interaction payload.
-   */
   const selectedAdminRole = interaction.options.getRole(
     "event-admin-role",
     true,
@@ -237,30 +240,18 @@ async function configureGuild(
     true,
   );
 
-  const selectedPingRole = interaction.options.getRole("ping-role", true);
-
-  const [
-    eventAdminRole,
-    attendanceChannel,
-    roleRequestChannel,
-    pingRole,
-    botMember,
-  ] = await Promise.all([
-    guild.roles.fetch(selectedAdminRole.id),
-    guild.channels.fetch(selectedAttendanceChannel.id),
-    guild.channels.fetch(selectedRoleRequestChannel.id),
-    guild.roles.fetch(selectedPingRole.id),
-    guild.members.fetchMe(),
-  ]);
+  const [eventAdminRole, attendanceChannel, roleRequestChannel, botMember] =
+    await Promise.all([
+      guild.roles.fetch(selectedAdminRole.id),
+      guild.channels.fetch(selectedAttendanceChannel.id),
+      guild.channels.fetch(selectedRoleRequestChannel.id),
+      guild.members.fetchMe(),
+    ]);
 
   const issues: string[] = [];
 
   if (!eventAdminRole) {
     issues.push("The selected event-admin role could not be found.");
-  }
-
-  if (!pingRole) {
-    issues.push("The selected ping role could not be found.");
   }
 
   if (!attendanceChannel) {
@@ -283,42 +274,20 @@ async function configureGuild(
     return;
   }
 
-  /*
-   * The null checks above allow TypeScript to narrow these values.
-   */
-  if (
-    !eventAdminRole ||
-    !pingRole ||
-    !attendanceChannel ||
-    !roleRequestChannel
-  ) {
+  if (!eventAdminRole || !attendanceChannel || !roleRequestChannel) {
     throw new Error(
       "Discord configuration values unexpectedly became unavailable.",
     );
   }
 
-  /*
-   * The @everyone role has the same ID as the guild.
-   */
   if (eventAdminRole.id === guild.id) {
     issues.push("The event-admin role cannot be the `@everyone` role.");
-  }
-
-  if (pingRole.id === guild.id) {
-    issues.push("The event ping role cannot be the `@everyone` role.");
   }
 
   if (eventAdminRole.managed) {
     issues.push(
       "The event-admin role is managed by Discord or an integration " +
         "and is not suitable for bot administration.",
-    );
-  }
-
-  if (pingRole.managed) {
-    issues.push(
-      "The ping role is managed by Discord or an integration " +
-        "and cannot be used as the event notification role.",
     );
   }
 
@@ -334,9 +303,6 @@ async function configureGuild(
     );
   }
 
-  /*
-   * Check effective permissions, including channel overwrites.
-   */
   for (const [channel, label] of [
     [attendanceChannel, "attendance channel"],
     [roleRequestChannel, "role-request channel"],
@@ -354,25 +320,6 @@ async function configureGuild(
           ".",
       );
     }
-  }
-
-  /*
-   * A role can be pinged if it is publicly mentionable, or if the bot has
-   * the channel permission that permits mentioning otherwise restricted
-   * roles.
-   */
-  const attendancePermissions = attendanceChannel.permissionsFor(botMember);
-
-  const botCanMentionPingRole =
-    pingRole.mentionable ||
-    attendancePermissions.has(PermissionFlagsBits.MentionEveryone);
-
-  if (!botCanMentionPingRole) {
-    issues.push(
-      `The bot cannot mention ${pingRole.name}. Either make the role ` +
-        "mentionable or grant the bot “Mention @everyone, @here, and " +
-        "All Roles” in the attendance channel.",
-    );
   }
 
   if (issues.length > 0) {
@@ -399,7 +346,6 @@ async function configureGuild(
       eventAdminRoleId: eventAdminRole.id,
       defaultAttendanceChannelId: attendanceChannel.id,
       defaultRoleRequestChannelId: roleRequestChannel.id,
-      defaultPingRoleId: pingRole.id,
       updatedAt: now,
     })
     .onConflictDoUpdate({
@@ -408,7 +354,6 @@ async function configureGuild(
         eventAdminRoleId: eventAdminRole.id,
         defaultAttendanceChannelId: attendanceChannel.id,
         defaultRoleRequestChannelId: roleRequestChannel.id,
-        defaultPingRoleId: pingRole.id,
         updatedAt: now,
       },
     });
@@ -420,9 +365,103 @@ async function configureGuild(
       `**Event admins:** <@&${eventAdminRole.id}>`,
       `**Attendance channel:** <#${attendanceChannel.id}>`,
       `**Role-request channel:** <#${roleRequestChannel.id}>`,
-      `**Attendance ping:** <@&${pingRole.id}>`,
       "",
-      "These are server defaults. Event templates may override them later.",
+      "Ping roles are selected separately for each event.",
+      "These channels remain the server defaults and may later be overridden by event templates.",
+    ].join("\n"),
+    allowedMentions: {
+      parse: [],
+    },
+  });
+}
+
+async function configureEventRegions(
+  interaction: ChatInputCommandInteraction,
+): Promise<void> {
+  const discordGuildId = interaction.guildId;
+
+  if (!discordGuildId) {
+    throw new Error("The setup regions command requires a Discord server.");
+  }
+
+  const [configuredGuild] = await db
+    .select({
+      id: discordGuilds.id,
+      name: discordGuilds.name,
+      timezone: discordGuilds.timezone,
+    })
+    .from(discordGuilds)
+    .where(eq(discordGuilds.discordGuildId, discordGuildId))
+    .limit(1);
+
+  if (!configuredGuild) {
+    await interaction.editReply(
+      "This server has not been initialised. " +
+        "Run `/setup initialise` first.",
+    );
+
+    return;
+  }
+
+  const audiences = [
+    {
+      code: "eu",
+      name: "EU",
+      defaultTimezone: "Europe/London",
+    },
+    {
+      code: "na",
+      name: "NA",
+      defaultTimezone: "America/New_York",
+    },
+    {
+      code: "global",
+      name: "EU & NA / Global",
+      defaultTimezone: configuredGuild.timezone,
+    },
+  ] as const;
+
+  const now = new Date();
+
+  await db.transaction(async (transaction) => {
+    for (const audience of audiences) {
+      await transaction
+        .insert(eventAudiences)
+        .values({
+          ownerGuildId: configuredGuild.id,
+          code: audience.code,
+          name: audience.name,
+          defaultTimezone: audience.defaultTimezone,
+          active: true,
+          updatedAt: now,
+        })
+        .onConflictDoUpdate({
+          target: [eventAudiences.ownerGuildId, eventAudiences.code],
+          set: {
+            name: audience.name,
+            defaultTimezone: audience.defaultTimezone,
+            active: true,
+            updatedAt: now,
+          },
+        });
+    }
+  });
+
+  await interaction.editReply({
+    content: [
+      "✅ Event regions configured.",
+      "",
+      "**EU**",
+      "Default timezone: `Europe/London`",
+      "",
+      "**NA**",
+      "Default timezone: `America/New_York`",
+      "",
+      "**EU & NA / Global**",
+      `Default timezone: \`${configuredGuild.timezone}\``,
+      "",
+      "Ping roles are selected separately when each event is created.",
+      "Event admins can override the regional timezone for individual events.",
     ].join("\n"),
     allowedMentions: {
       parse: [],
@@ -464,7 +503,6 @@ async function showSetupStatus(
       eventAdminRoleId: guildSettings.eventAdminRoleId,
       attendanceChannelId: guildSettings.defaultAttendanceChannelId,
       roleRequestChannelId: guildSettings.defaultRoleRequestChannelId,
-      pingRoleId: guildSettings.defaultPingRoleId,
     })
     .from(guildSettings)
     .where(eq(guildSettings.guildId, guild.id))
@@ -480,6 +518,17 @@ async function showSetupStatus(
     .where(eq(eventTypes.ownerGuildId, guild.id))
     .orderBy(asc(eventTypes.name));
 
+  const configuredAudiences = await db
+    .select({
+      code: eventAudiences.code,
+      name: eventAudiences.name,
+      defaultTimezone: eventAudiences.defaultTimezone,
+      active: eventAudiences.active,
+    })
+    .from(eventAudiences)
+    .where(eq(eventAudiences.ownerGuildId, guild.id))
+    .orderBy(asc(eventAudiences.name));
+
   const eventTypeLines =
     configuredEventTypes.length > 0
       ? configuredEventTypes.map(
@@ -490,18 +539,27 @@ async function showSetupStatus(
         )
       : ["• None"];
 
+  const audienceLines =
+    configuredAudiences.length > 0
+      ? configuredAudiences.map(
+          (audience) =>
+            `• ${audience.name}: ` +
+            `\`${audience.defaultTimezone}\`` +
+            `${audience.active ? "" : " — disabled"}`,
+        )
+      : ["• Not configured; run `/setup regions`."];
+
   const hasCompleteDefaults = Boolean(
     settings?.eventAdminRoleId &&
     settings.attendanceChannelId &&
-    settings.roleRequestChannelId &&
-    settings.pingRoleId,
+    settings.roleRequestChannelId,
   );
 
   await interaction.editReply({
     content: [
       `**Server:** ${guild.name}`,
       `**Enabled:** ${guild.enabled ? "Yes" : "No"}`,
-      `**Timezone:** ${guild.timezone}`,
+      `**Server timezone:** ${guild.timezone}`,
       `**Default configuration:** ${
         hasCompleteDefaults ? "Complete" : "Incomplete"
       }`,
@@ -522,9 +580,10 @@ async function showSetupStatus(
           ? `<#${settings.roleRequestChannelId}>`
           : "Not set"
       }`,
-      `• Ping role: ${
-        settings?.pingRoleId ? `<@&${settings.pingRoleId}>` : "Not set"
-      }`,
+      `• Ping roles: Selected per event`,
+      "",
+      "**Event regions:**",
+      ...audienceLines,
       "",
       "**Event types:**",
       ...eventTypeLines,
