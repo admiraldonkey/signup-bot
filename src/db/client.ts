@@ -21,22 +21,15 @@ function readBoolean(value: string | undefined): boolean {
 
 const databaseTlsEnabled = readBoolean(process.env.DATABASE_TLS);
 
+const connectionUrl = new URL(databaseUrl);
+
+connectionUrl.searchParams.set(
+  "sslmode",
+  databaseTlsEnabled ? "verify-full" : "disable",
+);
+
 export const pool = new Pool({
-  connectionString: databaseUrl,
-
-  /*
-   * Northflank has TLS enabled on the addon, so validate the certificate
-   * using the certificate authorities installed in the container.
-   */
-  ssl: databaseTlsEnabled
-    ? {
-        rejectUnauthorized: true,
-      }
-    : undefined,
-
-  /*
-   * Small bot so restrict db connections.
-   */
+  connectionString: connectionUrl.toString(),
   max: 5,
   connectionTimeoutMillis: 10_000,
   idleTimeoutMillis: 30_000,
