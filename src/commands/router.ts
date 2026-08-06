@@ -3,6 +3,7 @@ import { type ChatInputCommandInteraction, MessageFlags } from "discord.js";
 import { handleDbCheckCommand } from "./dbcheck.js";
 import { handlePingCommand } from "./ping.js";
 import { handleSetupCommand } from "./setup.js";
+import { handleEventCommand } from "./event.js";
 
 export async function handleChatInputCommand(
   interaction: ChatInputCommandInteraction,
@@ -19,6 +20,10 @@ export async function handleChatInputCommand(
 
     case "setup":
       await handleSetupCommand(interaction);
+      return;
+
+    case "event":
+      await handleEventCommand(interaction);
       return;
 
     default:

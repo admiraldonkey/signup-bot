@@ -6,6 +6,9 @@ import { commandDefinitions } from "./commands/definitions.js";
 import { handleChatInputCommand } from "./commands/router.js";
 import { pool } from "./db/client.js";
 import { runMigrations } from "./db/migrate.js";
+import { handleAttendanceButton } from "./interactions/attendance-button.js";
+
+import { handleEventAutocomplete } from "./interactions/event-autocomplete.js";
 
 const token = process.env.DISCORD_TOKEN;
 const guildId = process.env.DISCORD_GUILD_ID;
@@ -38,6 +41,62 @@ client.once(Events.ClientReady, async (readyClient) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  /*
+   * Autocomplete has its own response method and error handling.
+   */
+  if (interaction.isAutocomplete()) {
+    try {
+      await handleEventAutocomplete(interaction);
+    } catch (error) {
+      console.error(
+        `Autocomplete for ${interaction.commandName} failed:`,
+        error,
+      );
+
+      if (!interaction.responded) {
+        await interaction.respond([]).catch((responseError: unknown) => {
+          console.error(
+            "Failed to send empty autocomplete response:",
+            responseError,
+          );
+        });
+      }
+    }
+
+    return;
+  }
+
+  /*
+   * Buttons are global interactions. The handler returns false if
+   * the custom ID belongs to some future, unrelated feature.
+   */
+  if (interaction.isButton()) {
+    try {
+      await handleAttendanceButton(interaction);
+    } catch (error) {
+      console.error(`Button ${interaction.customId} failed:`, error);
+
+      const content =
+        "❌ Your response could not be completed. " +
+        "The event administrators can check the bot logs.";
+
+      try {
+        if (interaction.deferred || interaction.replied) {
+          await interaction.editReply(content);
+        } else {
+          await interaction.reply({
+            content,
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+      } catch (responseError) {
+        console.error("Failed to send button error response:", responseError);
+      }
+    }
+
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) {
     return;
   }
