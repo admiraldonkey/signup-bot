@@ -1,38 +1,26 @@
-import { type ButtonInteraction, type Message, MessageFlags } from "discord.js";
-import { and, eq, sql } from "drizzle-orm";
+import { type ButtonInteraction, MessageFlags } from "discord.js";
+import { and, eq } from "drizzle-orm";
 
 import { db } from "../db/client.js";
+import { attendanceResponses, events } from "../db/schema.js";
 import {
-  attendanceResponses,
-  discordGuilds,
-  eventAudiences,
-  eventMessages,
-  events,
-  eventTypes,
-} from "../db/schema.js";
-import {
-  type AttendanceCounts,
-  type AttendanceStatus,
-  buildAttendanceButtons,
-  buildAttendanceEmbed,
-  EMPTY_ATTENDANCE_COUNTS,
   parseAttendanceCustomId,
+  type AttendanceStatus,
 } from "../events/attendance-message.js";
+import {
+  getAttendanceEventForInteraction,
+  refreshAttendanceMessage,
+} from "../events/attendance-refresh.js";
 
-/*
- * Message edits are throttled by Discord message ID.
- *
- * If 50 users respond at nearly the same time, their database writes
- * happen immediately but the public message is edited once after the
- * short interval rather than 50 times.
- */
 const attendanceRefreshTimers = new Map<string, NodeJS.Timeout>();
 
 const ATTENDANCE_REFRESH_DELAY_MS = 750;
 
 const STATUS_CONFIRMATIONS: Record<AttendanceStatus, string> = {
   attending: "You are marked as **attending**.",
+
   tentative: "You are marked as **tentative**.",
+
   not_attending: "You are marked as **not attending**.",
 };
 
@@ -49,7 +37,7 @@ export async function handleAttendanceButton(
     flags: MessageFlags.Ephemeral,
   });
 
-  if (!interaction.guildId) {
+  if (!interaction.inCachedGuild()) {
     await interaction.editReply(
       "Attendance buttons can only be used inside a server.",
     );
@@ -57,9 +45,10 @@ export async function handleAttendanceButton(
     return true;
   }
 
-  const event = await findAttendanceEvent(
+  const event = await getAttendanceEventForInteraction(
     parsed.eventId,
     interaction.guildId,
+    interaction.channelId,
     interaction.message.id,
   );
 
@@ -76,25 +65,32 @@ export async function handleAttendanceButton(
   if (event.status !== "open") {
     await interaction.editReply("Attendance is no longer open for this event.");
 
-    scheduleAttendanceRefresh(
-      event.eventId,
-      interaction.guildId,
-      interaction.message,
-    );
+    scheduleAttendanceRefresh(interaction.guild, event.eventId);
 
     return true;
   }
 
-  if (event.attendanceClosesAt && event.attendanceClosesAt <= now) {
+  /*
+   * Until the scheduler exists, a click after the deadline can
+   * perform the overdue state transition itself.
+   */
+  if (
+    (event.attendanceClosesAt && event.attendanceClosesAt <= now) ||
+    event.startsAt <= now
+  ) {
+    await db
+      .update(events)
+      .set({
+        status: "closed",
+        updatedAt: now,
+      })
+      .where(and(eq(events.id, event.eventId), eq(events.status, "open")));
+
     await interaction.editReply(
       "The attendance deadline for this event has passed.",
     );
 
-    scheduleAttendanceRefresh(
-      event.eventId,
-      interaction.guildId,
-      interaction.message,
-    );
+    scheduleAttendanceRefresh(interaction.guild, event.eventId);
 
     return true;
   }
@@ -103,6 +99,7 @@ export async function handleAttendanceButton(
     .insert(attendanceResponses)
     .values({
       eventId: event.eventId,
+
       discordUserId: interaction.user.id,
 
       sourceGuildId: event.guildDatabaseId,
@@ -113,6 +110,7 @@ export async function handleAttendanceButton(
     })
     .onConflictDoUpdate({
       target: [attendanceResponses.eventId, attendanceResponses.discordUserId],
+
       set: {
         sourceGuildId: event.guildDatabaseId,
 
@@ -122,167 +120,35 @@ export async function handleAttendanceButton(
       },
     });
 
-  /*
-   * Confirm immediately. The public totals refresh asynchronously,
-   * avoiding unnecessary delay for the member pressing the button.
-   */
   await interaction.editReply(STATUS_CONFIRMATIONS[parsed.status]);
 
-  scheduleAttendanceRefresh(
-    event.eventId,
-    interaction.guildId,
-    interaction.message,
-  );
+  scheduleAttendanceRefresh(interaction.guild, event.eventId);
 
   return true;
 }
 
-async function findAttendanceEvent(
-  eventId: number,
-  discordGuildId: string,
-  discordMessageId: string,
-) {
-  const [event] = await db
-    .select({
-      eventId: events.id,
-      audienceName: eventAudiences.name,
-
-      timezone: events.timezone,
-      showDetailedDeadline: events.showDetailedDeadline,
-      name: events.name,
-      description: events.description,
-      eventTypeName: eventTypes.name,
-      startsAt: events.startsAt,
-
-      attendanceClosesAt: events.attendanceClosesAt,
-
-      status: events.status,
-
-      guildDatabaseId: discordGuilds.id,
-    })
-    .from(events)
-    .innerJoin(eventTypes, eq(eventTypes.id, events.eventTypeId))
-    .innerJoin(eventAudiences, eq(eventAudiences.id, events.audienceId))
-    .innerJoin(
-      eventMessages,
-      and(
-        eq(eventMessages.eventId, events.id),
-        eq(eventMessages.kind, "attendance"),
-      ),
-    )
-    .innerJoin(discordGuilds, eq(discordGuilds.id, eventMessages.guildId))
-    .where(
-      and(
-        eq(events.id, eventId),
-
-        eq(eventMessages.messageId, discordMessageId),
-
-        eq(discordGuilds.discordGuildId, discordGuildId),
-      ),
-    )
-    .limit(1);
-
-  return event ?? null;
-}
-
-async function getAttendanceCounts(eventId: number): Promise<AttendanceCounts> {
-  const rows = await db
-    .select({
-      status: attendanceResponses.status,
-
-      count: sql<number>`count(*)::int`,
-    })
-    .from(attendanceResponses)
-    .where(eq(attendanceResponses.eventId, eventId))
-    .groupBy(attendanceResponses.status);
-
-  const counts: AttendanceCounts = {
-    ...EMPTY_ATTENDANCE_COUNTS,
-  };
-
-  for (const row of rows) {
-    counts[row.status] = row.count;
-  }
-
-  return counts;
-}
-
 function scheduleAttendanceRefresh(
+  guild: ButtonInteraction<"cached">["guild"],
   eventId: number,
-  discordGuildId: string,
-  message: Message,
 ): void {
-  /*
-   * A refresh is already due for this specific Discord message.
-   * Its database query will include all responses committed before it runs.
-   */
-  if (attendanceRefreshTimers.has(message.id)) {
+  const refreshKey = `${guild.id}:${eventId}`;
+
+  if (attendanceRefreshTimers.has(refreshKey)) {
     return;
   }
 
   const timer = setTimeout(() => {
-    attendanceRefreshTimers.delete(message.id);
+    attendanceRefreshTimers.delete(refreshKey);
 
-    void refreshAttendanceMessage(eventId, discordGuildId, message).catch(
-      (error: unknown) => {
-        console.error(
-          `Failed to refresh attendance message ${message.id}:`,
-          error,
-        );
-      },
-    );
+    void refreshAttendanceMessage(guild, eventId).catch((error: unknown) => {
+      console.error(
+        `Failed to refresh attendance for event ${eventId}:`,
+        error,
+      );
+    });
   }, ATTENDANCE_REFRESH_DELAY_MS);
 
-  /*
-   * This housekeeping timer should not keep Node alive during shutdown.
-   */
   timer.unref();
 
-  attendanceRefreshTimers.set(message.id, timer);
-}
-
-async function refreshAttendanceMessage(
-  eventId: number,
-  discordGuildId: string,
-  message: Message,
-): Promise<void> {
-  const event = await findAttendanceEvent(eventId, discordGuildId, message.id);
-
-  if (!event) {
-    return;
-  }
-
-  const counts = await getAttendanceCounts(eventId);
-
-  const attendanceClosed =
-    event.status !== "open" ||
-    (event.attendanceClosesAt !== null &&
-      event.attendanceClosesAt <= new Date());
-
-  await message.edit({
-    embeds: [
-      buildAttendanceEmbed(
-        {
-          id: event.eventId,
-          audienceName: event.audienceName,
-
-          timezone: event.timezone,
-          showDetailedDeadline: event.showDetailedDeadline,
-          name: event.name,
-          description: event.description,
-          eventTypeName: event.eventTypeName,
-          startsAt: event.startsAt,
-
-          attendanceClosesAt: event.attendanceClosesAt,
-
-          status: event.status,
-        },
-        counts,
-      ),
-    ],
-
-    components: [
-      buildAttendanceButtons(event.eventId, counts, attendanceClosed),
-    ],
-  });
+  attendanceRefreshTimers.set(refreshKey, timer);
 }

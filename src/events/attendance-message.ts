@@ -106,23 +106,50 @@ export function buildAttendanceEmbed(
     "Use the buttons below to record your attendance.";
 
   const deadlineValue =
-    closingTimestamp === null || scheduledClosingText === null
-      ? "No automatic deadline"
-      : event.showDetailedDeadline
-        ? [
-            `<t:${closingTimestamp}:F>`,
-            `<t:${closingTimestamp}:R>`,
-            "",
-            `Scheduled as: **${scheduledClosingText}**`,
-          ].join("\n")
-        : `<t:${closingTimestamp}:R>`;
+    event.status === "cancelled"
+      ? "Event cancelled"
+      : event.status === "closed"
+        ? "Closed"
+        : event.status === "completed"
+          ? "Closed"
+          : closingTimestamp === null || scheduledClosingText === null
+            ? "No automatic deadline"
+            : event.showDetailedDeadline
+              ? [`<t:${closingTimestamp}:F>`, `<t:${closingTimestamp}:R>`].join(
+                  "\n",
+                )
+              : `<t:${closingTimestamp}:R>`;
+
+  function getEventTitle(event: AttendanceEventDisplay): string {
+    switch (event.status) {
+      case "closed":
+        return `🔒 ${event.name}`;
+
+      case "cancelled":
+        return `🚫 ${event.name}`;
+
+      case "completed":
+        return `✅ ${event.name}`;
+
+      default:
+        return event.name;
+    }
+  }
+
+  const startDisplayValue =
+    event.status === "cancelled"
+      ? ["🚫 **Event cancelled**"].join("\n")
+      : [
+          `<t:${startTimestamp}:F> (your local time)`,
+          `<t:${startTimestamp}:R>`,
+        ].join("\n");
 
   return new EmbedBuilder()
-    .setTitle(event.name)
+    .setTitle(getEventTitle(event))
     .setDescription(description)
     .addFields(
       {
-        name: "Event type",
+        name: "Event Type",
         value: event.eventTypeName,
         inline: true,
       },
@@ -132,23 +159,23 @@ export function buildAttendanceEmbed(
         inline: true,
       },
       {
-        name: "Organiser timezone",
+        name: "Host Timezone",
         value: `\`${event.timezone}\``,
         inline: true,
       },
       {
-        name: "Starts — your local time",
-        value: [
-          `<t:${startTimestamp}:F>`,
-          `<t:${startTimestamp}:R>`,
-          "",
-          `Scheduled as: **${scheduledStartText}**`,
-        ].join("\n"),
+        name: "Scheduled Time",
+        value: [scheduledStartText, "\n"].join("\n"),
         inline: false,
       },
       {
-        name: "Sign-ups close",
-        value: deadlineValue,
+        name: "Starts At",
+        value: startDisplayValue,
+        inline: false,
+      },
+      {
+        name: "Sign-ups Close",
+        value: [deadlineValue, "\n"].join("\n"),
         inline: !event.showDetailedDeadline,
       },
       {
@@ -158,6 +185,13 @@ export function buildAttendanceEmbed(
           `❔ **Tentative:** ${counts.tentative}`,
           `❌ **Not attending:** ${counts.not_attending}`,
         ].join("\n"),
+      },
+      {
+        name: "Status",
+        value: event.status
+          .replace("_", " ")
+          .replace(/\b\w/g, (character) => character.toUpperCase()),
+        inline: true,
       },
     )
     .setFooter({
