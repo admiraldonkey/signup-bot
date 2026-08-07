@@ -6,7 +6,7 @@ import {
   PermissionFlagsBits,
   type Role,
 } from "discord.js";
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, sql } from "drizzle-orm";
 import { DateTime } from "luxon";
 
 import {
@@ -15,6 +15,7 @@ import {
 } from "../auth/event-admin.js";
 import { db } from "../db/client.js";
 import {
+  attendanceResponses,
   eventAudiences,
   eventMessages,
   eventPingRoles,
@@ -26,9 +27,15 @@ import {
   buildAttendanceEmbed,
   EMPTY_ATTENDANCE_COUNTS,
 } from "../events/attendance-message.js";
+import {
+  refreshAttendanceMessage,
+  type AttendanceRefreshResult,
+} from "../events/attendance-refresh.js";
 import { isValidEventTimezone } from "../time/timezones.js";
 
 const EVENT_DATE_FORMAT = "yyyy-MM-dd HH:mm";
+
+type CachedCommandInteraction = ChatInputCommandInteraction<"cached">;
 
 export async function handleEventCommand(
   interaction: ChatInputCommandInteraction,
@@ -48,17 +55,43 @@ export async function handleEventCommand(
 
   const subcommand = interaction.options.getSubcommand();
 
-  if (subcommand === "create") {
-    await createEvent(interaction);
-    return;
-  }
+  switch (subcommand) {
+    case "create":
+      await createEvent(interaction);
+      return;
 
-  throw new Error(`Unknown event subcommand: ${subcommand}`);
+    case "list":
+      await listEvents(interaction);
+      return;
+
+    case "close":
+      await closeEvent(interaction);
+      return;
+
+    case "reopen":
+      await reopenEvent(interaction);
+      return;
+
+    case "cancel":
+      await cancelEvent(interaction);
+      return;
+
+    case "refresh":
+      await refreshEvent(interaction);
+      return;
+
+    default:
+      throw new Error(`Unknown event subcommand: ${subcommand}`);
+  }
 }
 
-async function createEvent(
-  interaction: ChatInputCommandInteraction<"cached">,
-): Promise<void> {
+/*
+ * Shared event-admin authorisation
+ */
+
+async function getAuthorisedConfiguration(
+  interaction: CachedCommandInteraction,
+) {
   const configuration = await getGuildConfiguration(interaction.guildId);
 
   if (!configuration) {
@@ -67,7 +100,7 @@ async function createEvent(
         "Run `/setup initialise` first.",
     );
 
-    return;
+    return null;
   }
 
   if (!configuration.enabled) {
@@ -75,7 +108,7 @@ async function createEvent(
       "Event management is currently disabled for this server.",
     );
 
-    return;
+    return null;
   }
 
   if (
@@ -83,9 +116,25 @@ async function createEvent(
   ) {
     await interaction.editReply(
       "You need the configured Event Admin role " +
-        "or the Manage Server permission to create events.",
+        "or the Manage Server permission to manage events.",
     );
 
+    return null;
+  }
+
+  return configuration;
+}
+
+/*
+ * /event create
+ */
+
+async function createEvent(
+  interaction: CachedCommandInteraction,
+): Promise<void> {
+  const configuration = await getAuthorisedConfiguration(interaction);
+
+  if (!configuration) {
     return;
   }
 
@@ -122,7 +171,9 @@ async function createEvent(
   const [eventType] = await db
     .select({
       id: eventTypes.id,
+
       name: eventTypes.name,
+
       code: eventTypes.code,
     })
     .from(eventTypes)
@@ -144,7 +195,7 @@ async function createEvent(
   }
 
   /*
-   * Region and timezone
+   * Region
    */
 
   const audienceIdText = interaction.options.getString("region", true);
@@ -163,8 +214,11 @@ async function createEvent(
   const [audience] = await db
     .select({
       id: eventAudiences.id,
+
       code: eventAudiences.code,
+
       name: eventAudiences.name,
+
       defaultTimezone: eventAudiences.defaultTimezone,
     })
     .from(eventAudiences)
@@ -184,6 +238,10 @@ async function createEvent(
 
     return;
   }
+
+  /*
+   * Timezone
+   */
 
   const timezoneOverride = interaction.options.getString("timezone")?.trim();
 
@@ -208,7 +266,7 @@ async function createEvent(
   }
 
   /*
-   * Event fields
+   * Ordinary event fields
    */
 
   const name = interaction.options.getString("name", true).trim();
@@ -230,19 +288,19 @@ async function createEvent(
     interaction.options.getBoolean("detailed-deadline") ?? false;
 
   /*
-   * Ping roles
+   * Per-event ping roles
    */
 
   const selectedPingRoles = [
     interaction.options.getRole("ping-role-1", true),
+
     interaction.options.getRole("ping-role-2"),
+
     interaction.options.getRole("ping-role-3"),
+
     interaction.options.getRole("ping-role-4"),
   ].filter((role): role is Role => role !== null);
 
-  /*
-   * Remove duplicated selections while preserving order.
-   */
   const pingRoles = [
     ...new Map(selectedPingRoles.map((role) => [role.id, role])).values(),
   ];
@@ -266,6 +324,7 @@ async function createEvent(
         "",
         "Do not select `@everyone` or roles managed by Discord integrations.",
       ].join("\n"),
+
       allowedMentions: {
         parse: [],
       },
@@ -275,7 +334,7 @@ async function createEvent(
   }
 
   /*
-   * Date and time validation
+   * Parse event time
    */
 
   const parsedStart = parseEventDateTime(dateText, timeText, eventTimezone);
@@ -314,7 +373,7 @@ async function createEvent(
   });
 
   /*
-   * Attendance channel validation
+   * Attendance channel
    */
 
   const attendanceChannel = await interaction.guild.channels.fetch(
@@ -387,6 +446,7 @@ async function createEvent(
         "",
         "Make the roles mentionable, or grant the bot “Mention @everyone, @here, and All Roles” in the attendance channel.",
       ].join("\n"),
+
       allowedMentions: {
         parse: [],
       },
@@ -396,7 +456,7 @@ async function createEvent(
   }
 
   /*
-   * Event creation
+   * Create the database records and Discord message.
    */
 
   let createdEventId: number | null = null;
@@ -496,7 +556,9 @@ async function createEvent(
 
     const eventDisplay = {
       ...createdEvent,
+
       audienceName: audience.name,
+
       eventTypeName: eventType.name,
     };
 
@@ -511,6 +573,7 @@ async function createEvent(
 
       allowedMentions: {
         parse: [],
+
         roles: pingRoles.map((role) => role.id),
       },
     });
@@ -585,6 +648,554 @@ async function createEvent(
   }
 }
 
+/*
+ * /event list
+ */
+
+async function listEvents(
+  interaction: CachedCommandInteraction,
+): Promise<void> {
+  const configuration = await getAuthorisedConfiguration(interaction);
+
+  if (!configuration) {
+    return;
+  }
+
+  const upcomingEvents = await db
+    .select({
+      id: events.id,
+
+      name: events.name,
+
+      status: events.status,
+
+      startsAt: events.startsAt,
+
+      audienceName: eventAudiences.name,
+    })
+    .from(events)
+    .leftJoin(eventAudiences, eq(eventAudiences.id, events.audienceId))
+    .where(
+      and(
+        eq(events.ownerGuildId, configuration.guildId),
+        gte(events.startsAt, new Date()),
+      ),
+    )
+    .orderBy(asc(events.startsAt))
+    .limit(10);
+
+  if (upcomingEvents.length === 0) {
+    await interaction.editReply(
+      "There are no upcoming events stored for this server.",
+    );
+
+    return;
+  }
+
+  const eventIds = upcomingEvents.map((event) => event.id);
+
+  const attendanceRows = await db
+    .select({
+      eventId: attendanceResponses.eventId,
+
+      status: attendanceResponses.status,
+
+      count: sql<number>`count(*)::int`,
+    })
+    .from(attendanceResponses)
+    .where(inArray(attendanceResponses.eventId, eventIds))
+    .groupBy(attendanceResponses.eventId, attendanceResponses.status);
+
+  const countsByEvent = new Map<
+    number,
+    {
+      attending: number;
+      tentative: number;
+      notAttending: number;
+    }
+  >();
+
+  for (const row of attendanceRows) {
+    const current = countsByEvent.get(row.eventId) ?? {
+      attending: 0,
+      tentative: 0,
+      notAttending: 0,
+    };
+
+    switch (row.status) {
+      case "attending":
+        current.attending = row.count;
+        break;
+
+      case "tentative":
+        current.tentative = row.count;
+        break;
+
+      case "not_attending":
+        current.notAttending = row.count;
+        break;
+    }
+
+    countsByEvent.set(row.eventId, current);
+  }
+
+  const lines = upcomingEvents.flatMap((event) => {
+    const counts = countsByEvent.get(event.id) ?? {
+      attending: 0,
+      tentative: 0,
+      notAttending: 0,
+    };
+
+    const timestamp = Math.floor(event.startsAt.getTime() / 1000);
+
+    return [
+      `**#${event.id} — ${event.name}**`,
+      `${event.audienceName ?? "Unspecified"} • ${formatEventStatus(
+        event.status,
+      )} • <t:${timestamp}:F>`,
+      `✅ ${counts.attending}  ❔ ${counts.tentative}  ❌ ${counts.notAttending}`,
+      "",
+    ];
+  });
+
+  await interaction.editReply({
+    content: [
+      "**Upcoming events**",
+      "",
+      ...lines,
+      "Use the event ID with `/event close`, `/event reopen`, `/event cancel` or `/event refresh`.",
+    ].join("\n"),
+
+    allowedMentions: {
+      parse: [],
+    },
+  });
+}
+
+/*
+ * /event close
+ */
+
+async function closeEvent(
+  interaction: CachedCommandInteraction,
+): Promise<void> {
+  const configuration = await getAuthorisedConfiguration(interaction);
+
+  if (!configuration) {
+    return;
+  }
+
+  const eventId = interaction.options.getInteger("event-id", true);
+
+  const event = await findOwnedEvent(configuration.guildId, eventId);
+
+  if (!event) {
+    await interaction.editReply(
+      `Event #${eventId} was not found in this server.`,
+    );
+
+    return;
+  }
+
+  if (event.status === "cancelled") {
+    await interaction.editReply(
+      `Event #${eventId} is cancelled and cannot be closed.`,
+    );
+
+    return;
+  }
+
+  if (event.status === "completed") {
+    await interaction.editReply(`Event #${eventId} is already completed.`);
+
+    return;
+  }
+
+  if (event.status === "closed") {
+    await interaction.editReply(`Event #${eventId} is already closed.`);
+
+    return;
+  }
+
+  const now = new Date();
+
+  await db
+    .update(events)
+    .set({
+      status: "closed",
+
+      attendanceClosesAt: now,
+
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(events.id, eventId),
+        eq(events.ownerGuildId, configuration.guildId),
+      ),
+    );
+
+  const refreshResult = await refreshAttendanceMessage(
+    interaction.guild,
+    eventId,
+  );
+
+  await interaction.editReply({
+    content: [
+      `🔒 **${event.name}** (#${event.id}) is now closed for attendance.`,
+      formatRefreshResult(refreshResult),
+    ].join("\n"),
+
+    allowedMentions: {
+      parse: [],
+    },
+  });
+}
+
+/*
+ * /event reopen
+ */
+
+async function reopenEvent(
+  interaction: CachedCommandInteraction,
+): Promise<void> {
+  const configuration = await getAuthorisedConfiguration(interaction);
+
+  if (!configuration) {
+    return;
+  }
+
+  const eventId = interaction.options.getInteger("event-id", true);
+
+  const closeMinutesBefore =
+    interaction.options.getInteger("close-minutes-before") ?? 0;
+
+  const event = await findOwnedEvent(configuration.guildId, eventId);
+
+  if (!event) {
+    await interaction.editReply(
+      `Event #${eventId} was not found in this server.`,
+    );
+
+    return;
+  }
+
+  if (event.status === "cancelled") {
+    await interaction.editReply(
+      "A cancelled event cannot currently be reopened. " +
+        "Cancellation is treated as a final administrative state.",
+    );
+
+    return;
+  }
+
+  if (event.status === "completed") {
+    await interaction.editReply("A completed event cannot be reopened.");
+
+    return;
+  }
+
+  const now = new Date();
+
+  if (event.startsAt <= now) {
+    await interaction.editReply(
+      "Attendance cannot be reopened because the event has already started.",
+    );
+
+    return;
+  }
+
+  const newClosingTime = new Date(
+    event.startsAt.getTime() - closeMinutesBefore * 60_000,
+  );
+
+  if (newClosingTime <= now) {
+    await interaction.editReply(
+      "That closing deadline would already be in the past. " +
+        "Use a smaller `close-minutes-before` value.",
+    );
+
+    return;
+  }
+
+  await db
+    .update(events)
+    .set({
+      status: "open",
+
+      attendanceClosesAt: newClosingTime,
+
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(events.id, eventId),
+        eq(events.ownerGuildId, configuration.guildId),
+      ),
+    );
+
+  const refreshResult = await refreshAttendanceMessage(
+    interaction.guild,
+    eventId,
+  );
+
+  const closingTimestamp = Math.floor(newClosingTime.getTime() / 1000);
+
+  await interaction.editReply({
+    content: [
+      `🔓 **${event.name}** (#${event.id}) is open for attendance again.`,
+      `New closing deadline: <t:${closingTimestamp}:F> (<t:${closingTimestamp}:R>)`,
+      formatRefreshResult(refreshResult),
+    ].join("\n"),
+
+    allowedMentions: {
+      parse: [],
+    },
+  });
+}
+
+/*
+ * /event cancel
+ */
+
+async function cancelEvent(
+  interaction: CachedCommandInteraction,
+): Promise<void> {
+  const configuration = await getAuthorisedConfiguration(interaction);
+
+  if (!configuration) {
+    return;
+  }
+
+  const eventId = interaction.options.getInteger("event-id", true);
+
+  const event = await findOwnedEvent(configuration.guildId, eventId);
+
+  if (!event) {
+    await interaction.editReply(
+      `Event #${eventId} was not found in this server.`,
+    );
+
+    return;
+  }
+
+  if (event.status === "cancelled") {
+    await interaction.editReply(`Event #${eventId} is already cancelled.`);
+
+    return;
+  }
+
+  if (event.status === "completed") {
+    await interaction.editReply("A completed event cannot be cancelled.");
+
+    return;
+  }
+
+  await db
+    .update(events)
+    .set({
+      status: "cancelled",
+
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(events.id, eventId),
+        eq(events.ownerGuildId, configuration.guildId),
+      ),
+    );
+
+  const refreshResult = await refreshAttendanceMessage(
+    interaction.guild,
+    eventId,
+  );
+
+  await interaction.editReply({
+    content: [
+      `🚫 **${event.name}** (#${event.id}) has been cancelled.`,
+      "Existing attendance responses have been retained.",
+      formatRefreshResult(refreshResult),
+    ].join("\n"),
+
+    allowedMentions: {
+      parse: [],
+    },
+  });
+}
+
+/*
+ * /event refresh
+ */
+
+async function refreshEvent(
+  interaction: CachedCommandInteraction,
+): Promise<void> {
+  const configuration = await getAuthorisedConfiguration(interaction);
+
+  if (!configuration) {
+    return;
+  }
+
+  const eventId = interaction.options.getInteger("event-id", true);
+
+  let event = await findOwnedEvent(configuration.guildId, eventId);
+
+  if (!event) {
+    await interaction.editReply(
+      `Event #${eventId} was not found in this server.`,
+    );
+
+    return;
+  }
+
+  const now = new Date();
+
+  /*
+   * We do not have the scheduler yet. If an open event is already
+   * beyond its deadline, an admin refresh can perform that overdue
+   * transition before rebuilding the message.
+   */
+  if (
+    event.status === "open" &&
+    ((event.attendanceClosesAt && event.attendanceClosesAt <= now) ||
+      event.startsAt <= now)
+  ) {
+    const [updatedEvent] = await db
+      .update(events)
+      .set({
+        status: "closed",
+
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(events.id, eventId),
+          eq(events.ownerGuildId, configuration.guildId),
+        ),
+      )
+      .returning({
+        id: events.id,
+
+        name: events.name,
+
+        status: events.status,
+
+        startsAt: events.startsAt,
+
+        attendanceClosesAt: events.attendanceClosesAt,
+      });
+
+    if (updatedEvent) {
+      event = updatedEvent;
+    }
+  }
+
+  const refreshResult = await refreshAttendanceMessage(
+    interaction.guild,
+    eventId,
+  );
+
+  if (!refreshResult.ok) {
+    await interaction.editReply(
+      [
+        `The database record for **${event.name}** (#${event.id}) exists, but its Discord attendance message could not be refreshed.`,
+        "",
+        formatRefreshResult(refreshResult),
+      ].join("\n"),
+    );
+
+    return;
+  }
+
+  await interaction.editReply({
+    content: [
+      `🔄 **${event.name}** (#${event.id}) was rebuilt from the database.`,
+      `Attendance message: ${refreshResult.messageUrl}`,
+    ].join("\n"),
+
+    allowedMentions: {
+      parse: [],
+    },
+  });
+}
+
+/*
+ * Shared database helpers
+ */
+
+async function findOwnedEvent(guildDatabaseId: number, eventId: number) {
+  const [event] = await db
+    .select({
+      id: events.id,
+
+      name: events.name,
+
+      status: events.status,
+
+      startsAt: events.startsAt,
+
+      attendanceClosesAt: events.attendanceClosesAt,
+    })
+    .from(events)
+    .where(
+      and(eq(events.id, eventId), eq(events.ownerGuildId, guildDatabaseId)),
+    )
+    .limit(1);
+
+  return event ?? null;
+}
+
+function formatRefreshResult(result: AttendanceRefreshResult): string {
+  if (result.ok) {
+    return `Attendance message updated: ${result.messageUrl}`;
+  }
+
+  switch (result.reason) {
+    case "not-linked":
+      return (
+        "⚠️ No attendance message is linked to this event. " +
+        "The database change was still saved."
+      );
+
+    case "channel-unavailable":
+      return (
+        "⚠️ The stored attendance channel is unavailable. " +
+        "The database change was still saved."
+      );
+
+    case "message-unavailable":
+      return (
+        "⚠️ The stored attendance message could not be fetched. " +
+        "It may have been manually deleted. The database change was still saved."
+      );
+  }
+}
+
+function formatEventStatus(
+  status: "scheduled" | "open" | "closed" | "cancelled" | "completed",
+): string {
+  switch (status) {
+    case "scheduled":
+      return "Scheduled";
+
+    case "open":
+      return "Open";
+
+    case "closed":
+      return "Closed";
+
+    case "cancelled":
+      return "Cancelled";
+
+    case "completed":
+      return "Completed";
+  }
+}
+
+/*
+ * Existing date/time parser
+ */
+
 type ParsedEventDateTime =
   | {
       ok: true;
@@ -604,13 +1215,16 @@ function parseEventDateTime(
 
   const parsed = DateTime.fromFormat(input, EVENT_DATE_FORMAT, {
     zone: timezone,
+
     locale: "en-GB",
+
     setZone: true,
   });
 
   if (!parsed.isValid) {
     return {
       ok: false,
+
       error:
         parsed.invalidExplanation ?? "the supplied value could not be parsed",
     };
@@ -619,6 +1233,7 @@ function parseEventDateTime(
   if (parsed.toFormat(EVENT_DATE_FORMAT) !== input) {
     return {
       ok: false,
+
       error:
         "use a real date and a 24-hour time in " +
         "`YYYY-MM-DD` and `HH:mm` format",
@@ -628,6 +1243,7 @@ function parseEventDateTime(
   if (parsed.getPossibleOffsets().length > 1) {
     return {
       ok: false,
+
       error:
         "that local time occurs twice because of the " +
         "daylight-saving clock change; choose an unambiguous time",

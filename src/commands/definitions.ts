@@ -200,5 +200,74 @@ export const commandDefinitions = [
               "Show the full sign-up deadline instead of only relative time.",
             ),
         ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("list")
+        .setDescription("Lists the next scheduled events for this server."),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("close")
+        .setDescription("Closes attendance for an event.")
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The ID of the event to close.")
+            .setMinValue(1)
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("reopen")
+        .setDescription("Reopens attendance for an event.")
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The ID of the event to reopen.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("close-minutes-before")
+            .setDescription(
+              "New closing deadline. Defaults to the event start.",
+            )
+            .setMinValue(0)
+            .setMaxValue(1440),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("cancel")
+        .setDescription("Cancels an event and disables its attendance buttons.")
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The ID of the event to cancel.")
+            .setMinValue(1)
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("refresh")
+        .setDescription(
+          "Rebuilds an event's attendance message from the database.",
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The ID of the event to refresh.")
+            .setMinValue(1)
+            .setRequired(true),
+        ),
     ),
 ].map((command) => command.toJSON());
