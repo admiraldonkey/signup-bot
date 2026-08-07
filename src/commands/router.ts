@@ -4,6 +4,7 @@ import { handleDbCheckCommand } from "./dbcheck.js";
 import { handlePingCommand } from "./ping.js";
 import { handleSetupCommand } from "./setup.js";
 import { handleEventCommand } from "./event.js";
+import { handleAttendanceCommand } from "./attendance.js";
 
 export async function handleChatInputCommand(
   interaction: ChatInputCommandInteraction,
@@ -24,6 +25,10 @@ export async function handleChatInputCommand(
 
     case "event":
       await handleEventCommand(interaction);
+      return;
+
+    case "attendance":
+      await handleAttendanceCommand(interaction);
       return;
 
     default:
