@@ -11,6 +11,7 @@ import {
   getAttendanceEventForInteraction,
   refreshAttendanceMessage,
 } from "../events/attendance-refresh.js";
+import { markAttendanceCloseCompleted } from "../scheduler/action-maintenance.js";
 
 const attendanceRefreshTimers = new Map<string, NodeJS.Timeout>();
 
@@ -85,6 +86,8 @@ export async function handleAttendanceButton(
         updatedAt: now,
       })
       .where(and(eq(events.id, event.eventId), eq(events.status, "open")));
+
+    await markAttendanceCloseCompleted(event.eventId, now);
 
     await interaction.editReply(
       "The attendance deadline for this event has passed.",

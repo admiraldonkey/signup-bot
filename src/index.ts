@@ -9,6 +9,10 @@ import { runMigrations } from "./db/migrate.js";
 import { handleAttendanceButton } from "./interactions/attendance-button.js";
 
 import { handleEventAutocomplete } from "./interactions/event-autocomplete.js";
+import {
+  startEventScheduler,
+  stopEventScheduler,
+} from "./scheduler/event-scheduler.js";
 
 const token = process.env.DISCORD_TOKEN;
 const guildId = process.env.DISCORD_GUILD_ID;
@@ -33,6 +37,7 @@ client.once(Events.ClientReady, async (readyClient) => {
 
     console.log(`Logged in as ${readyClient.user.tag}`);
     console.log(`Registered commands in ${guild.name}`);
+    startEventScheduler(readyClient);
   } catch (error) {
     console.error("Failed to register guild commands:", error);
     process.exitCode = 1;
@@ -143,6 +148,8 @@ async function shutDown(signal: string): Promise<void> {
   shuttingDown = true;
 
   console.log(`Received ${signal}; shutting down cleanly.`);
+
+  stopEventScheduler();
 
   client.destroy();
 
