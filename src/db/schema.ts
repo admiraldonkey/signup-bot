@@ -506,6 +506,91 @@ export const attendanceResponses = pgTable(
 );
 
 /*
+ * To track whether an event's actual attendance has been recorded
+ */
+
+export const eventAttendanceReports = pgTable("event_attendance_reports", {
+  eventId: integer("event_id")
+    .primaryKey()
+    .references(() => events.id, {
+      onDelete: "cascade",
+    }),
+
+  /*
+   * Examples:
+   * manual
+   * paste
+   * external_bot
+   * file
+   */
+  source: varchar("source", {
+    length: 32,
+  })
+    .notNull()
+    .default("manual"),
+
+  /*
+   * Optional human-readable information such as the source bot
+   * or imported message ID.
+   */
+  sourceReference: text("source_reference"),
+
+  recordedByUserId: text("recorded_by_user_id").notNull(),
+
+  recordedAt: timestamp("recorded_at", {
+    withTimezone: true,
+  })
+    .notNull()
+    .defaultNow(),
+
+  updatedAt: timestamp("updated_at", {
+    withTimezone: true,
+  })
+    .notNull()
+    .defaultNow(),
+});
+
+/*
+ * People who were present at an event
+ */
+
+export const actualAttendanceRecords = pgTable(
+  "actual_attendance_records",
+  {
+    eventId: integer("event_id")
+      .notNull()
+      .references(() => events.id, {
+        onDelete: "cascade",
+      }),
+
+    discordUserId: text("discord_user_id").notNull(),
+
+    /*
+     * Useful if the member later leaves Discord/the server.
+     * The Discord ID remains authoritative.
+     */
+    displayNameSnapshot: varchar("display_name_snapshot", {
+      length: 100,
+    }),
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.eventId, table.discordUserId],
+    }),
+
+    index("actual_attendance_user_idx").on(table.discordUserId),
+
+    index("actual_attendance_event_idx").on(table.eventId),
+  ],
+);
+
+/*
  * Role choices copied from the template into one actual event.
  *
  * Copying them preserves event history and lets admins customise one

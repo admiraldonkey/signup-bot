@@ -210,6 +210,20 @@ export const commandDefinitions = [
 
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("responses")
+        .setDescription("Shows members grouped by their signup response.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event whose responses should be shown.")
+            .setMinValue(1)
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("close")
         .setDescription("Closes attendance for an event.")
         .addIntegerOption((option) =>
@@ -266,6 +280,98 @@ export const commandDefinitions = [
           option
             .setName("event-id")
             .setDescription("The ID of the event to refresh.")
+            .setMinValue(1)
+            .setRequired(true),
+        ),
+    ),
+  new SlashCommandBuilder()
+    .setName("attendance")
+    .setDescription("Records and audits actual event attendance.")
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("record")
+        .setDescription("Replaces an event's recorded actual attendance.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event whose attendance is being recorded.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("attendees")
+            .setDescription(
+              "Discord mentions/IDs, or 'none' if nobody attended.",
+            )
+            .setMaxLength(6000)
+            .setRequired(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("source-reference")
+            .setDescription(
+              "Optional note describing where the attendance came from.",
+            )
+            .setMaxLength(500),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("add")
+        .setDescription("Adds one person to an event's actual attendance.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event to update.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addUserOption((option) =>
+          option
+            .setName("user")
+            .setDescription("The attendee to add.")
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("remove")
+        .setDescription("Removes one person from an event's actual attendance.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event to update.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addUserOption((option) =>
+          option
+            .setName("user")
+            .setDescription("The attendee to remove.")
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("compare")
+        .setDescription("Compares actual attendance with signup responses.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event to compare.")
             .setMinValue(1)
             .setRequired(true),
         ),

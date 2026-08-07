@@ -32,6 +32,7 @@ import {
   type AttendanceRefreshResult,
 } from "../events/attendance-refresh.js";
 import { isValidEventTimezone } from "../time/timezones.js";
+import { handleEventResponses } from "./event-responses.js";
 
 const EVENT_DATE_FORMAT = "yyyy-MM-dd HH:mm";
 
@@ -62,6 +63,10 @@ export async function handleEventCommand(
 
     case "list":
       await listEvents(interaction);
+      return;
+
+    case "responses":
+      await handleEventResponses(interaction);
       return;
 
     case "close":
