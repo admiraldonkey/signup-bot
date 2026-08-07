@@ -21,6 +21,7 @@ import {
   eventPingRoles,
   events,
   eventTypes,
+  scheduledActions,
 } from "../db/schema.js";
 import {
   buildAttendanceButtons,
@@ -33,6 +34,11 @@ import {
 } from "../events/attendance-refresh.js";
 import { isValidEventTimezone } from "../time/timezones.js";
 import { handleEventResponses } from "./event-responses.js";
+import {
+  cancelEventScheduledActions,
+  markAttendanceCloseCompleted,
+  scheduleAttendanceClose,
+} from "../scheduler/action-maintenance.js";
 
 const EVENT_DATE_FORMAT = "yyyy-MM-dd HH:mm";
 
@@ -538,6 +544,36 @@ async function createEvent(
         })),
       );
 
+      await transaction.insert(scheduledActions).values([
+        {
+          eventId: event.id,
+
+          actionKey: "close_attendance",
+
+          dueAt: attendanceClosesAt.toJSDate(),
+
+          status: "pending",
+
+          attemptCount: 0,
+
+          updatedAt: new Date(),
+        },
+
+        {
+          eventId: event.id,
+
+          actionKey: "complete_event",
+
+          dueAt: endsAt.toJSDate(),
+
+          status: "pending",
+
+          attemptCount: 0,
+
+          updatedAt: new Date(),
+        },
+      ]);
+
       return event;
     });
 
@@ -845,6 +881,8 @@ async function closeEvent(
     eventId,
   );
 
+  await markAttendanceCloseCompleted(eventId, now);
+
   await interaction.editReply({
     content: [
       `🔒 **${event.name}** (#${event.id}) is now closed for attendance.`,
@@ -939,6 +977,8 @@ async function reopenEvent(
       ),
     );
 
+  await scheduleAttendanceClose(eventId, newClosingTime);
+
   const refreshResult = await refreshAttendanceMessage(
     interaction.guild,
     eventId,
@@ -1009,6 +1049,8 @@ async function cancelEvent(
         eq(events.ownerGuildId, configuration.guildId),
       ),
     );
+
+  await cancelEventScheduledActions(eventId);
 
   const refreshResult = await refreshAttendanceMessage(
     interaction.guild,
@@ -1089,6 +1131,8 @@ async function refreshEvent(
 
         attendanceClosesAt: events.attendanceClosesAt,
       });
+
+    await markAttendanceCloseCompleted(eventId, now);
 
     if (updatedEvent) {
       event = updatedEvent;
