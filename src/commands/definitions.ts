@@ -375,5 +375,90 @@ export const commandDefinitions = [
             .setMinValue(1)
             .setRequired(true),
         ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("user")
+        .setDescription("Shows attendance reliability for a specific member.")
+
+        .addUserOption((option) =>
+          option
+            .setName("user")
+            .setDescription(
+              "The member whose attendance history should be shown.",
+            )
+            .setRequired(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("event-type")
+            .setDescription("Optionally restrict the report to one event type.")
+            .setAutocomplete(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("since")
+            .setDescription(
+              "Only include events on or after this date (YYYY-MM-DD).",
+            )
+            .setMinLength(10)
+            .setMaxLength(10),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("until")
+            .setDescription(
+              "Only include events on or before this date (YYYY-MM-DD).",
+            )
+            .setMinLength(10)
+            .setMaxLength(10),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("issues")
+        .setDescription("Lists members with attendance/sign-up mismatches.")
+
+        .addStringOption((option) =>
+          option
+            .setName("event-type")
+            .setDescription("Optionally restrict the report to one event type.")
+            .setAutocomplete(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("since")
+            .setDescription(
+              "Only include events on or after this date (YYYY-MM-DD).",
+            )
+            .setMinLength(10)
+            .setMaxLength(10),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("until")
+            .setDescription(
+              "Only include events on or before this date (YYYY-MM-DD).",
+            )
+            .setMinLength(10)
+            .setMaxLength(10),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("limit")
+            .setDescription(
+              "Maximum number of members to show. Defaults to 15.",
+            )
+            .setMinValue(1)
+            .setMaxValue(25),
+        ),
     ),
 ].map((command) => command.toJSON());

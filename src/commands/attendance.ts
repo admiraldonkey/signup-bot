@@ -17,6 +17,10 @@ import {
   events,
 } from "../db/schema.js";
 import { formatUserMentions } from "../attendance/format.js";
+import {
+  handleAttendanceIssuesReport,
+  handleAttendanceUserReport,
+} from "./attendance-reporting.js";
 
 type CachedInteraction = ChatInputCommandInteraction<"cached">;
 
@@ -53,6 +57,14 @@ export async function handleAttendanceCommand(
 
     case "compare":
       await compareAttendance(interaction);
+      return;
+
+    case "user":
+      await handleAttendanceUserReport(interaction);
+      return;
+
+    case "issues":
+      await handleAttendanceIssuesReport(interaction);
       return;
 
     default:

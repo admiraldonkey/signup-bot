@@ -7,7 +7,7 @@ import { handleChatInputCommand } from "./commands/router.js";
 import { pool } from "./db/client.js";
 import { runMigrations } from "./db/migrate.js";
 import { handleAttendanceButton } from "./interactions/attendance-button.js";
-
+import { handleAttendanceAutocomplete } from "./interactions/attendance-autocomplete.js";
 import { handleEventAutocomplete } from "./interactions/event-autocomplete.js";
 import {
   startEventScheduler,
@@ -51,7 +51,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
    */
   if (interaction.isAutocomplete()) {
     try {
-      await handleEventAutocomplete(interaction);
+      if (interaction.commandName === "event") {
+        await handleEventAutocomplete(interaction);
+        return;
+      }
+
+      if (interaction.commandName === "attendance") {
+        await handleAttendanceAutocomplete(interaction);
+        return;
+      }
+
+      await interaction.respond([]);
     } catch (error) {
       console.error(
         `Autocomplete for ${interaction.commandName} failed:`,
