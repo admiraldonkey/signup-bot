@@ -17,6 +17,8 @@ export async function getGuildConfiguration(discordGuildId: string) {
       attendanceChannelId: guildSettings.defaultAttendanceChannelId,
 
       roleRequestChannelId: guildSettings.defaultRoleRequestChannelId,
+
+      botLogChannelId: guildSettings.botLogChannelId,
     })
     .from(discordGuilds)
     .leftJoin(guildSettings, eq(guildSettings.guildId, discordGuilds.id))

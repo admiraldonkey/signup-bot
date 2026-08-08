@@ -21,6 +21,7 @@ import {
   handleAttendanceIssuesReport,
   handleAttendanceUserReport,
 } from "./attendance-reporting.js";
+import { writeAuditLog } from "../audit/audit-log.js";
 
 type CachedInteraction = ChatInputCommandInteraction<"cached">;
 
@@ -95,6 +96,24 @@ async function getAuthorisedContext(interaction: CachedInteraction) {
   if (
     !memberCanManageEvents(interaction.member, configuration.eventAdminRoleId)
   ) {
+    await writeAuditLog({
+      guildId: configuration.guildId,
+
+      guild: interaction.guild,
+
+      actorUserId: interaction.user.id,
+
+      action: "command.denied",
+
+      outcome: "denied",
+
+      summary: `Denied /event ${interaction.options.getSubcommand()} command attempt.`,
+
+      targetType: "command",
+
+      targetId: `/event ${interaction.options.getSubcommand()}`,
+    });
+
     await interaction.editReply(
       "You need the configured Event Admin role " +
         "or the Manage Server permission to manage attendance.",
@@ -287,6 +306,31 @@ async function recordAttendance(interaction: CachedInteraction): Promise<void> {
       parse: [],
     },
   });
+  await writeAuditLog({
+    guildId: configuration.guildId,
+
+    guild: interaction.guild,
+
+    actorUserId: interaction.user.id,
+
+    action: "attendance.record",
+
+    outcome: "success",
+
+    summary: `Replaced actual attendance for "${event.name}" (#${event.id}) with ${attendanceValues.length} attendee(s).`,
+
+    targetType: "event",
+
+    targetId: String(event.id),
+
+    details: {
+      attendeeCount: attendanceValues.length,
+
+      source: "paste",
+
+      sourceReference,
+    },
+  });
 }
 
 async function addAttendee(interaction: CachedInteraction): Promise<void> {
@@ -386,6 +430,27 @@ async function addAttendee(interaction: CachedInteraction): Promise<void> {
       parse: [],
     },
   });
+  await writeAuditLog({
+    guildId: configuration.guildId,
+
+    guild: interaction.guild,
+
+    actorUserId: interaction.user.id,
+
+    action: "attendance.add",
+
+    outcome: "success",
+
+    summary: `Added ${member.displayName} to the actual attendance for "${event.name}" (#${event.id}).`,
+
+    targetType: "event",
+
+    targetId: String(event.id),
+
+    details: {
+      attendeeUserId: user.id,
+    },
+  });
 }
 
 async function removeAttendee(interaction: CachedInteraction): Promise<void> {
@@ -467,6 +532,27 @@ async function removeAttendee(interaction: CachedInteraction): Promise<void> {
 
     allowedMentions: {
       parse: [],
+    },
+  });
+  await writeAuditLog({
+    guildId: configuration.guildId,
+
+    guild: interaction.guild,
+
+    actorUserId: interaction.user.id,
+
+    action: "attendance.remove",
+
+    outcome: "success",
+
+    summary: `Removed <@${user.id}> from the actual attendance for "${event.name}" (#${event.id}).`,
+
+    targetType: "event",
+
+    targetId: String(event.id),
+
+    details: {
+      attendeeUserId: user.id,
     },
   });
 }

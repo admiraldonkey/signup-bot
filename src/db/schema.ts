@@ -9,6 +9,7 @@ import {
   timestamp,
   uniqueIndex,
   varchar,
+  jsonb,
 } from "drizzle-orm/pg-core";
 
 /*
@@ -89,6 +90,8 @@ export const guildSettings = pgTable("guild_settings", {
   defaultAttendanceChannelId: text("default_attendance_channel_id"),
 
   defaultRoleRequestChannelId: text("default_role_request_channel_id"),
+
+  botLogChannelId: text("bot_log_channel_id"),
 
   defaultPingRoleId: text("default_ping_role_id"),
 
@@ -740,5 +743,60 @@ export const scheduledActions = pgTable(
       table.actionKey,
     ),
     index("scheduled_actions_status_due_idx").on(table.status, table.dueAt),
+  ],
+);
+
+export const auditLogs = pgTable(
+  "audit_logs",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+
+    guildId: integer("guild_id")
+      .notNull()
+      .references(() => discordGuilds.id, {
+        onDelete: "cascade",
+      }),
+
+    /*
+     * Null represents an automatic/system action.
+     */
+    actorUserId: text("actor_user_id"),
+
+    action: varchar("action", {
+      length: 64,
+    }).notNull(),
+
+    /*
+     * success | denied | failure | system
+     *
+     * Kept as varchar rather than an enum so adding new audit
+     * outcomes doesn't require a database migration.
+     */
+    outcome: varchar("outcome", {
+      length: 16,
+    }).notNull(),
+
+    summary: text("summary").notNull(),
+
+    targetType: varchar("target_type", {
+      length: 32,
+    }),
+
+    targetId: text("target_id"),
+
+    details: jsonb("details").$type<Record<string, unknown>>(),
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("audit_logs_guild_created_idx").on(table.guildId, table.createdAt),
+
+    index("audit_logs_actor_idx").on(table.actorUserId),
+
+    index("audit_logs_action_idx").on(table.action),
   ],
 );

@@ -5,6 +5,7 @@ import { handlePingCommand } from "./ping.js";
 import { handleSetupCommand } from "./setup.js";
 import { handleEventCommand } from "./event.js";
 import { handleAttendanceCommand } from "./attendance.js";
+import { handleAuditCommand } from "./audit.js";
 
 export async function handleChatInputCommand(
   interaction: ChatInputCommandInteraction,
@@ -29,6 +30,10 @@ export async function handleChatInputCommand(
 
     case "attendance":
       await handleAttendanceCommand(interaction);
+      return;
+
+    case "audit":
+      await handleAuditCommand(interaction);
       return;
 
     default:

@@ -39,6 +39,7 @@ import {
   markAttendanceCloseCompleted,
   scheduleAttendanceClose,
 } from "../scheduler/action-maintenance.js";
+import { writeAuditLog } from "../audit/audit-log.js";
 
 const EVENT_DATE_FORMAT = "yyyy-MM-dd HH:mm";
 
@@ -125,6 +126,24 @@ async function getAuthorisedConfiguration(
   if (
     !memberCanManageEvents(interaction.member, configuration.eventAdminRoleId)
   ) {
+    await writeAuditLog({
+      guildId: configuration.guildId,
+
+      guild: interaction.guild,
+
+      actorUserId: interaction.user.id,
+
+      action: "command.denied",
+
+      outcome: "denied",
+
+      summary: `Denied /event ${interaction.options.getSubcommand()} command attempt.`,
+
+      targetType: "command",
+
+      targetId: `/event ${interaction.options.getSubcommand()}`,
+    });
+
     await interaction.editReply(
       "You need the configured Event Admin role " +
         "or the Manage Server permission to manage events.",
@@ -663,6 +682,34 @@ async function createEvent(
         parse: [],
       },
     });
+
+    await writeAuditLog({
+      guildId: configuration.guildId,
+
+      guild: interaction.guild,
+
+      actorUserId: interaction.user.id,
+
+      action: "event.create",
+
+      outcome: "success",
+
+      summary: `Created event "${createdEvent.name}" (#${createdEvent.id}).`,
+
+      targetType: "event",
+
+      targetId: String(createdEvent.id),
+
+      details: {
+        eventType: eventType.code,
+
+        region: audience.code,
+
+        startsAt: createdEvent.startsAt.toISOString(),
+
+        pingRoleIds: pingRoles.map((role) => role.id),
+      },
+    });
   } catch (error) {
     if (sentMessage) {
       await sentMessage.delete().catch((deleteError: unknown) => {
@@ -893,6 +940,23 @@ async function closeEvent(
       parse: [],
     },
   });
+  await writeAuditLog({
+    guildId: configuration.guildId,
+
+    guild: interaction.guild,
+
+    actorUserId: interaction.user.id,
+
+    action: "event.close",
+
+    outcome: "success",
+
+    summary: `Closed attendance for "${event.name}" (#${event.id}).`,
+
+    targetType: "event",
+
+    targetId: String(event.id),
+  });
 }
 
 /*
@@ -997,6 +1061,27 @@ async function reopenEvent(
       parse: [],
     },
   });
+  await writeAuditLog({
+    guildId: configuration.guildId,
+
+    guild: interaction.guild,
+
+    actorUserId: interaction.user.id,
+
+    action: "event.reopen",
+
+    outcome: "success",
+
+    summary: `Reopened attendance for "${event.name}" (#${event.id}).`,
+
+    targetType: "event",
+
+    targetId: String(event.id),
+
+    details: {
+      attendanceClosesAt: newClosingTime.toISOString(),
+    },
+  });
 }
 
 /*
@@ -1067,6 +1152,24 @@ async function cancelEvent(
     allowedMentions: {
       parse: [],
     },
+  });
+
+  await writeAuditLog({
+    guildId: configuration.guildId,
+
+    guild: interaction.guild,
+
+    actorUserId: interaction.user.id,
+
+    action: "event.cancel",
+
+    outcome: "success",
+
+    summary: `Cancelled "${event.name}" (#${event.id}).`,
+
+    targetType: "event",
+
+    targetId: String(event.id),
   });
 }
 
@@ -1165,6 +1268,24 @@ async function refreshEvent(
     allowedMentions: {
       parse: [],
     },
+  });
+
+  await writeAuditLog({
+    guildId: configuration.guildId,
+
+    guild: interaction.guild,
+
+    actorUserId: interaction.user.id,
+
+    action: "event.refresh",
+
+    outcome: "success",
+
+    summary: `Refreshed the Discord attendance message for "${event.name}" (#${event.id}).`,
+
+    targetType: "event",
+
+    targetId: String(event.id),
   });
 }
 

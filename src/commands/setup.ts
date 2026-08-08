@@ -14,6 +14,10 @@ import {
   eventTypes,
   guildSettings,
 } from "../db/schema.js";
+import {
+  auditDeniedCommandAttempt,
+  writeAuditLog,
+} from "../audit/audit-log.js";
 
 const DEFAULT_EVENT_TYPES = [
   {
@@ -96,6 +100,18 @@ export async function handleSetupCommand(
 
   if (subcommand === "regions") {
     await configureEventRegions(interaction);
+    return;
+  }
+
+  if (subcommand === "logging") {
+    await configureLogging(interaction);
+
+    return;
+  }
+
+  if (subcommand === "logging-disable") {
+    await disableLogging(interaction);
+
     return;
   }
 
@@ -373,6 +389,24 @@ async function configureGuild(
       parse: [],
     },
   });
+  await writeAuditLog({
+    guildId: configuredGuild.id,
+
+    guild,
+
+    actorUserId: interaction.user.id,
+
+    action: "setup.configure",
+
+    outcome: "success",
+
+    summary:
+      "Updated the server's event administration channels and Event Admin role.",
+
+    targetType: "guild",
+
+    targetId: guild.id,
+  });
 }
 
 async function configureEventRegions(
@@ -467,6 +501,23 @@ async function configureEventRegions(
       parse: [],
     },
   });
+  await writeAuditLog({
+    guildId: configuredGuild.id,
+
+    guild: interaction.guild,
+
+    actorUserId: interaction.user.id,
+
+    action: "setup.regions",
+
+    outcome: "success",
+
+    summary: "Created or refreshed the configured event regions.",
+
+    targetType: "guild",
+
+    targetId: interaction.guildId,
+  });
 }
 
 async function showSetupStatus(
@@ -502,6 +553,7 @@ async function showSetupStatus(
     .select({
       eventAdminRoleId: guildSettings.eventAdminRoleId,
       attendanceChannelId: guildSettings.defaultAttendanceChannelId,
+      botLogChannelId: guildSettings.botLogChannelId,
       roleRequestChannelId: guildSettings.defaultRoleRequestChannelId,
     })
     .from(guildSettings)
@@ -580,6 +632,11 @@ async function showSetupStatus(
           ? `<#${settings.roleRequestChannelId}>`
           : "Not set"
       }`,
+      `• Bot log channel: ${
+        settings?.botLogChannelId
+          ? `<#${settings.botLogChannelId}>`
+          : "Disabled"
+      }`,
       `• Ping roles: Selected per event`,
       "",
       "**Event regions:**",
@@ -592,4 +649,194 @@ async function showSetupStatus(
       parse: [],
     },
   });
+}
+
+async function configureLogging(
+  interaction: ChatInputCommandInteraction,
+): Promise<void> {
+  const guild = interaction.guild;
+
+  const discordGuildId = interaction.guildId;
+
+  if (!guild || !discordGuildId) {
+    throw new Error("The setup logging command requires a Discord server.");
+  }
+
+  const [configuredGuild] = await db
+    .select({
+      id: discordGuilds.id,
+
+      name: discordGuilds.name,
+    })
+    .from(discordGuilds)
+    .where(eq(discordGuilds.discordGuildId, discordGuildId))
+    .limit(1);
+
+  if (!configuredGuild) {
+    await interaction.editReply(
+      "This server has not been initialised. " +
+        "Run `/setup initialise` first.",
+    );
+
+    return;
+  }
+
+  const selectedChannel = interaction.options.getChannel("channel", true);
+
+  const channel = await guild.channels.fetch(selectedChannel.id);
+
+  if (!channel || !isSupportedPostingChannel(channel)) {
+    await interaction.editReply(
+      "The audit-log destination must be a text or announcement channel.",
+    );
+
+    return;
+  }
+
+  const botMember = guild.members.me ?? (await guild.members.fetchMe());
+
+  const permissions = channel.permissionsFor(botMember);
+
+  const missingPermissions = REQUIRED_POSTING_PERMISSIONS.filter(
+    ({ permission }) => !permissions.has(permission),
+  ).map(({ label }) => label);
+
+  if (missingPermissions.length > 0) {
+    await interaction.editReply(
+      [
+        "The audit-log channel could not be configured because the bot is missing:",
+        "",
+        ...missingPermissions.map((permission) => `• ${permission}`),
+      ].join("\n"),
+    );
+
+    return;
+  }
+
+  const now = new Date();
+
+  await db
+    .update(guildSettings)
+    .set({
+      botLogChannelId: channel.id,
+
+      updatedAt: now,
+    })
+    .where(eq(guildSettings.guildId, configuredGuild.id));
+
+  await writeAuditLog({
+    guildId: configuredGuild.id,
+
+    guild,
+
+    actorUserId: interaction.user.id,
+
+    action: "setup.logging.configure",
+
+    outcome: "success",
+
+    summary: `Configured the bot audit-log channel as #${channel.name}.`,
+
+    targetType: "channel",
+
+    targetId: channel.id,
+  });
+
+  await interaction.editReply({
+    content: [
+      "✅ Audit logging configured.",
+      "",
+      `**Log channel:** <#${channel.id}>`,
+      "",
+      "Administrative changes will be stored in PostgreSQL and mirrored here.",
+    ].join("\n"),
+
+    allowedMentions: {
+      parse: [],
+    },
+  });
+}
+
+async function disableLogging(
+  interaction: ChatInputCommandInteraction,
+): Promise<void> {
+  const guild = interaction.guild;
+
+  const discordGuildId = interaction.guildId;
+
+  if (!guild || !discordGuildId) {
+    throw new Error(
+      "The setup logging-disable command requires a Discord server.",
+    );
+  }
+
+  const [configuredGuild] = await db
+    .select({
+      id: discordGuilds.id,
+
+      name: discordGuilds.name,
+
+      logChannelId: guildSettings.botLogChannelId,
+    })
+    .from(discordGuilds)
+    .leftJoin(guildSettings, eq(guildSettings.guildId, discordGuilds.id))
+    .where(eq(discordGuilds.discordGuildId, discordGuildId))
+    .limit(1);
+
+  if (!configuredGuild) {
+    await interaction.editReply("This server has not been initialised.");
+
+    return;
+  }
+
+  if (!configuredGuild.logChannelId) {
+    await interaction.editReply(
+      "Discord audit-log mirroring is already disabled.",
+    );
+
+    return;
+  }
+
+  const previousLogChannelId = configuredGuild.logChannelId;
+
+  await db
+    .update(guildSettings)
+    .set({
+      botLogChannelId: null,
+
+      updatedAt: new Date(),
+    })
+    .where(eq(guildSettings.guildId, configuredGuild.id));
+
+  await writeAuditLog({
+    guildId: configuredGuild.id,
+
+    guild,
+
+    actorUserId: interaction.user.id,
+
+    action: "setup.logging.disable",
+
+    outcome: "success",
+
+    summary:
+      "Disabled Discord audit-log mirroring. Database auditing remains enabled.",
+
+    targetType: "channel",
+
+    targetId: previousLogChannelId,
+
+    /*
+     * Send one final entry to the old log channel.
+     */
+    mirrorChannelId: previousLogChannelId,
+  });
+
+  await interaction.editReply(
+    [
+      "✅ Discord audit-log mirroring has been disabled.",
+      "",
+      "Audit entries will continue to be stored in PostgreSQL.",
+    ].join("\n"),
+  );
 }

@@ -4,6 +4,7 @@ import { and, eq, inArray, lt, lte, sql } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { discordGuilds, events, scheduledActions } from "../db/schema.js";
 import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
+import { writeAuditLog } from "../audit/audit-log.js";
 
 const POLL_INTERVAL_MS = 15_000;
 
@@ -232,6 +233,26 @@ async function executeCloseAttendance(
   await refreshEventMessage(client, event.discordGuildId, eventId);
 
   console.log(`Automatically closed attendance for event ${eventId}.`);
+
+  const guild = await client.guilds.fetch(event.discordGuildId);
+
+  await writeAuditLog({
+    guildId: event.guildDatabaseId,
+
+    guild,
+
+    actorUserId: null,
+
+    action: "scheduler.close_attendance",
+
+    outcome: "success",
+
+    summary: `Automatically closed attendance for event #${eventId}.`,
+
+    targetType: "event",
+
+    targetId: String(eventId),
+  });
 }
 
 async function executeCompleteEvent(
@@ -292,6 +313,26 @@ async function executeCompleteEvent(
   await refreshEventMessage(client, event.discordGuildId, eventId);
 
   console.log(`Marked event ${eventId} as completed.`);
+
+  const guild = await client.guilds.fetch(event.discordGuildId);
+
+  await writeAuditLog({
+    guildId: event.guildDatabaseId,
+
+    guild,
+
+    actorUserId: null,
+
+    action: "scheduler.complete_event",
+
+    outcome: "success",
+
+    summary: `Automatically marked event #${eventId} as completed.`,
+
+    targetType: "event",
+
+    targetId: String(eventId),
+  });
 }
 
 async function loadScheduledEvent(eventId: number) {
@@ -300,6 +341,8 @@ async function loadScheduledEvent(eventId: number) {
       id: events.id,
 
       status: events.status,
+
+      guildDatabaseId: events.ownerGuildId,
 
       discordGuildId: discordGuilds.discordGuildId,
     })

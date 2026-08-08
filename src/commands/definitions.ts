@@ -72,6 +72,29 @@ export const commandDefinitions = [
 
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("logging")
+        .setDescription("Sets the channel used for bot audit logs.")
+
+        .addChannelOption((option) =>
+          option
+            .setName("channel")
+            .setDescription("The channel that should receive audit logs.")
+            .addChannelTypes(
+              ChannelType.GuildText,
+              ChannelType.GuildAnnouncement,
+            )
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("logging-disable")
+        .setDescription("Disables Discord audit-log mirroring."),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("status")
         .setDescription("Shows the server's current bot configuration."),
     ),
@@ -459,6 +482,50 @@ export const commandDefinitions = [
             )
             .setMinValue(1)
             .setMaxValue(25),
+        ),
+    ),
+
+  new SlashCommandBuilder()
+    .setName("audit")
+    .setDescription("Views the bot's administrative audit trail.")
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("recent")
+        .setDescription("Shows recent administrative actions.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("limit")
+            .setDescription("Number of entries to show. Defaults to 10.")
+            .setMinValue(1)
+            .setMaxValue(20),
+        )
+
+        .addUserOption((option) =>
+          option
+            .setName("user")
+            .setDescription("Only show actions performed by this user."),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("outcome")
+            .setDescription("Only show entries with this outcome.")
+            .addChoices(
+              {
+                name: "Success",
+                value: "success",
+              },
+              {
+                name: "Denied",
+                value: "denied",
+              },
+              {
+                name: "Failure",
+                value: "failure",
+              },
+            ),
         ),
     ),
 ].map((command) => command.toJSON());
