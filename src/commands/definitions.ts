@@ -306,7 +306,154 @@ export const commandDefinitions = [
             .setMinValue(1)
             .setRequired(true),
         ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("reminder-add")
+        .setDescription("Adds a scheduled custom reminder to an event.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event to add the reminder to.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("relative-to")
+            .setDescription("The event time the reminder is relative to.")
+            .addChoices(
+              {
+                name: "Signup close",
+                value: "signup_close",
+              },
+              {
+                name: "Event start",
+                value: "event_start",
+              },
+            )
+            .setRequired(true),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("minutes-before")
+            .setDescription(
+              "How many minutes before the selected time to send it.",
+            )
+            .setMinValue(0)
+            .setMaxValue(10080)
+            .setRequired(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("message")
+            .setDescription("The custom reminder message.")
+            .setMaxLength(1800)
+            .setRequired(true),
+        )
+
+        .addChannelOption((option) =>
+          option
+            .setName("channel")
+            .setDescription(
+              "Destination channel. Defaults to the event attendance channel.",
+            )
+            .addChannelTypes(
+              ChannelType.GuildText,
+              ChannelType.GuildAnnouncement,
+            ),
+        )
+
+        .addBooleanOption((option) =>
+          option
+            .setName("ping-event-roles")
+            .setDescription(
+              "Ping the event's configured roles. Defaults to Yes.",
+            ),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("reminder-list")
+        .setDescription("Lists reminders configured for an event.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event whose reminders should be shown.")
+            .setMinValue(1)
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("reminder-remove")
+        .setDescription("Removes a reminder that has not yet been sent.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event containing the reminder.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("reminder-id")
+            .setDescription("The reminder ID shown by reminder-list.")
+            .setMinValue(1)
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("announce")
+        .setDescription("Sends an immediate custom announcement for an event.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event this announcement relates to.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("message")
+            .setDescription("The announcement message.")
+            .setMaxLength(1800)
+            .setRequired(true),
+        )
+
+        .addChannelOption((option) =>
+          option
+            .setName("channel")
+            .setDescription(
+              "Destination channel. Defaults to the event attendance channel.",
+            )
+            .addChannelTypes(
+              ChannelType.GuildText,
+              ChannelType.GuildAnnouncement,
+            ),
+        )
+
+        .addBooleanOption((option) =>
+          option
+            .setName("ping-event-roles")
+            .setDescription("Ping the event's roles. Defaults to No."),
+        ),
     ),
+
   new SlashCommandBuilder()
     .setName("attendance")
     .setDescription("Records and audits actual event attendance.")

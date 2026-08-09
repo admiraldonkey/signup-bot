@@ -746,6 +746,68 @@ export const scheduledActions = pgTable(
   ],
 );
 
+export const eventReminders = pgTable(
+  "event_reminders",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+
+    eventId: integer("event_id")
+      .notNull()
+      .references(() => events.id, {
+        onDelete: "cascade",
+      }),
+
+    /*
+     * Initially supported:
+     * event_start
+     * signup_close
+     *
+     * Kept as varchar so future references such as
+     * role_requests_open can be added without an enum migration.
+     */
+    timingReference: varchar("timing_reference", {
+      length: 32,
+    }).notNull(),
+
+    minutesBefore: integer("minutes_before").notNull(),
+
+    message: text("message").notNull(),
+
+    /*
+     * Store the resolved destination rather than relying on the
+     * server default still being the same when the reminder fires.
+     */
+    channelId: text("channel_id").notNull(),
+
+    pingEventRoles: boolean("ping_event_roles").notNull().default(true),
+
+    enabled: boolean("enabled").notNull().default(true),
+
+    createdByUserId: text("created_by_user_id").notNull(),
+
+    sentAt: timestamp("sent_at", {
+      withTimezone: true,
+    }),
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("event_reminders_event_idx").on(table.eventId),
+
+    index("event_reminders_enabled_idx").on(table.eventId, table.enabled),
+  ],
+);
+
 export const auditLogs = pgTable(
   "audit_logs",
   {

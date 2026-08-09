@@ -36,6 +36,13 @@
       "when": 1786222185599,
       "tag": "0004_add-audit-logging",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786293727949,
+      "tag": "0005_add-event-reminders",
+      "breakpoints": true
     }
   ]
 }
