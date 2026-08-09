@@ -2,9 +2,17 @@ import { type Client } from "discord.js";
 import { and, eq, inArray, lt, lte, sql } from "drizzle-orm";
 
 import { db } from "../db/client.js";
-import { discordGuilds, events, scheduledActions } from "../db/schema.js";
+import {
+  discordGuilds,
+  events,
+  scheduledActions,
+  eventReminders,
+} from "../db/schema.js";
 import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
 import { writeAuditLog } from "../audit/audit-log.js";
+import { sendEventCustomMessage } from "../events/event-custom-message.js";
+import { REMINDER_ACTION_PREFIX } from "../reminders/reminder-scheduling.js";
+import { reschedulePendingEventReminders } from "../reminders/reminder-scheduling.js";
 
 const POLL_INTERVAL_MS = 15_000;
 
@@ -183,6 +191,20 @@ async function executeAction(
     attemptCount: number;
   },
 ): Promise<void> {
+  if (action.actionKey.startsWith(REMINDER_ACTION_PREFIX)) {
+    const reminderId = Number(
+      action.actionKey.slice(REMINDER_ACTION_PREFIX.length),
+    );
+
+    if (!Number.isSafeInteger(reminderId) || reminderId <= 0) {
+      throw new Error(`Invalid event reminder action key: ${action.actionKey}`);
+    }
+
+    await executeEventReminder(client, action.eventId, reminderId);
+
+    return;
+  }
+
   switch (action.actionKey) {
     case "close_attendance":
       await executeCloseAttendance(client, action.eventId);
@@ -235,7 +257,7 @@ async function executeCloseAttendance(
   console.log(`Automatically closed attendance for event ${eventId}.`);
 
   const guild = await client.guilds.fetch(event.discordGuildId);
-
+  await reschedulePendingEventReminders(eventId);
   await writeAuditLog({
     guildId: event.guildDatabaseId,
 
@@ -454,4 +476,137 @@ async function handleActionFailure(
       updatedAt: now,
     })
     .where(eq(scheduledActions.id, action.id));
+}
+
+async function executeEventReminder(
+  client: Client<true>,
+  eventId: number,
+  reminderId: number,
+): Promise<void> {
+  const [reminder] = await db
+    .select({
+      id: eventReminders.id,
+
+      eventId: eventReminders.eventId,
+
+      message: eventReminders.message,
+
+      channelId: eventReminders.channelId,
+
+      pingEventRoles: eventReminders.pingEventRoles,
+
+      enabled: eventReminders.enabled,
+
+      sentAt: eventReminders.sentAt,
+
+      timingReference: eventReminders.timingReference,
+
+      eventName: events.name,
+
+      eventStatus: events.status,
+
+      guildDatabaseId: events.ownerGuildId,
+
+      discordGuildId: discordGuilds.discordGuildId,
+    })
+    .from(eventReminders)
+    .innerJoin(events, eq(events.id, eventReminders.eventId))
+    .innerJoin(discordGuilds, eq(discordGuilds.id, events.ownerGuildId))
+    .where(
+      and(
+        eq(eventReminders.id, reminderId),
+
+        eq(eventReminders.eventId, eventId),
+      ),
+    )
+    .limit(1);
+
+  if (!reminder) {
+    return;
+  }
+
+  if (!reminder.enabled || reminder.sentAt) {
+    return;
+  }
+
+  if (
+    reminder.eventStatus === "cancelled" ||
+    reminder.eventStatus === "completed"
+  ) {
+    return;
+  }
+
+  /*
+   * Don't send a stale "signups close soon" reminder if an admin
+   * has already manually closed signups.
+   */
+  if (
+    reminder.timingReference === "signup_close" &&
+    reminder.eventStatus !== "open"
+  ) {
+    return;
+  }
+
+  const guild = await client.guilds.fetch(reminder.discordGuildId);
+
+  const sent = await sendEventCustomMessage({
+    guild,
+
+    eventId: reminder.eventId,
+
+    eventName: reminder.eventName,
+
+    channelId: reminder.channelId,
+
+    message: reminder.message,
+
+    pingEventRoles: reminder.pingEventRoles,
+
+    hideMentions: true,
+  });
+
+  const now = new Date();
+
+  await db
+    .update(eventReminders)
+    .set({
+      sentAt: now,
+
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(eventReminders.id, reminder.id),
+
+        eq(eventReminders.enabled, true),
+      ),
+    );
+
+  await writeAuditLog({
+    guildId: reminder.guildDatabaseId,
+
+    guild,
+
+    actorUserId: null,
+
+    action: "scheduler.event_reminder",
+
+    outcome: "success",
+
+    summary: `Sent reminder #${reminder.id} for "${reminder.eventName}" (#${reminder.eventId}).`,
+
+    targetType: "event",
+
+    targetId: String(reminder.eventId),
+
+    details: {
+      reminderId: reminder.id,
+
+      channelId: sent.channelId,
+
+      messageId: sent.messageId,
+    },
+  });
+
+  console.log(`Sent reminder ${reminder.id} for event ${reminder.eventId}.`);
 }

@@ -40,6 +40,13 @@ import {
   scheduleAttendanceClose,
 } from "../scheduler/action-maintenance.js";
 import { writeAuditLog } from "../audit/audit-log.js";
+import {
+  addEventReminder,
+  announceEvent,
+  listEventReminders,
+  removeEventReminder,
+} from "./event-reminders.js";
+import { reschedulePendingEventReminders } from "../reminders/reminder-scheduling.js";
 
 const EVENT_DATE_FORMAT = "yyyy-MM-dd HH:mm";
 
@@ -90,6 +97,22 @@ export async function handleEventCommand(
 
     case "refresh":
       await refreshEvent(interaction);
+      return;
+
+    case "reminder-add":
+      await addEventReminder(interaction);
+      return;
+
+    case "reminder-list":
+      await listEventReminders(interaction);
+      return;
+
+    case "reminder-remove":
+      await removeEventReminder(interaction);
+      return;
+
+    case "announce":
+      await announceEvent(interaction);
       return;
 
     default:
@@ -929,6 +952,7 @@ async function closeEvent(
   );
 
   await markAttendanceCloseCompleted(eventId, now);
+  await reschedulePendingEventReminders(eventId);
 
   await interaction.editReply({
     content: [
@@ -1042,6 +1066,7 @@ async function reopenEvent(
     );
 
   await scheduleAttendanceClose(eventId, newClosingTime);
+  await reschedulePendingEventReminders(eventId);
 
   const refreshResult = await refreshAttendanceMessage(
     interaction.guild,
@@ -1236,6 +1261,7 @@ async function refreshEvent(
       });
 
     await markAttendanceCloseCompleted(eventId, now);
+    await reschedulePendingEventReminders(eventId);
 
     if (updatedEvent) {
       event = updatedEvent;
