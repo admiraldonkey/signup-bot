@@ -1,5 +1,5 @@
 import { ChannelType, type Guild } from "discord.js";
-import { and, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 import {
@@ -9,6 +9,7 @@ import {
   eventMessages,
   events,
   eventTypes,
+  eventPingRoles,
 } from "../db/schema.js";
 import {
   type AttendanceCounts,
@@ -184,12 +185,35 @@ export async function refreshAttendanceMessage(
 
   const counts = await getAttendanceCounts(event.eventId);
 
+  const pingRoles = await db
+    .select({
+      discordRoleId: eventPingRoles.discordRoleId,
+    })
+    .from(eventPingRoles)
+    .where(eq(eventPingRoles.eventId, event.eventId))
+    .orderBy(asc(eventPingRoles.sortOrder));
+
+  const pingRoleContent = pingRoles
+    .map((role) => `<@&${role.discordRoleId}>`)
+    .join(" ");
+
   const attendanceClosed =
     event.status !== "open" ||
     (event.attendanceClosesAt !== null &&
       event.attendanceClosesAt <= new Date());
 
   await message.edit({
+    content: pingRoleContent,
+
+    allowedMentions: {
+      /*
+       * Keep the visible role mentions in the existing signup
+       * message without generating a fresh notification merely
+       * because an admin edited/refreshed the event.
+       */
+      parse: [],
+    },
+
     embeds: [
       buildAttendanceEmbed(
         {
