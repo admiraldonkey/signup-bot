@@ -47,6 +47,7 @@ import {
   removeEventReminder,
 } from "./event-reminders.js";
 import { reschedulePendingEventReminders } from "../reminders/reminder-scheduling.js";
+import { editEvent } from "./event-edit.js";
 
 const EVENT_DATE_FORMAT = "yyyy-MM-dd HH:mm";
 
@@ -97,6 +98,10 @@ export async function handleEventCommand(
 
     case "refresh":
       await refreshEvent(interaction);
+      return;
+
+    case "edit":
+      await editEvent(interaction);
       return;
 
     case "reminder-add":

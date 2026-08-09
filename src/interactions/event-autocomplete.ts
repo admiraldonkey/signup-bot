@@ -15,7 +15,7 @@ export async function handleEventAutocomplete(
 
   const subcommand = interaction.options.getSubcommand(false);
 
-  if (subcommand !== "create") {
+  if (subcommand !== "create" && subcommand !== "edit") {
     await interaction.respond([]);
     return;
   }
@@ -37,6 +37,15 @@ export async function handleEventAutocomplete(
       })),
     );
 
+    return;
+  }
+
+  /*
+   * Region and event-type autocomplete currently belongs only
+   * to event creation.
+   */
+  if (subcommand !== "create") {
+    await interaction.respond([]);
     return;
   }
 

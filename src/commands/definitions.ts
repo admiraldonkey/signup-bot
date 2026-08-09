@@ -452,6 +452,113 @@ export const commandDefinitions = [
             .setName("ping-event-roles")
             .setDescription("Ping the event's roles. Defaults to No."),
         ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("edit")
+        .setDescription("Edits the details or schedule of an existing event.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event to edit.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("name")
+            .setDescription("New event name.")
+            .setMaxLength(100),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("description")
+            .setDescription("New event description.")
+            .setMaxLength(1000),
+        )
+
+        .addBooleanOption((option) =>
+          option
+            .setName("clear-description")
+            .setDescription(
+              "Remove the custom description and restore the default attendance instructions.",
+            ),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("date")
+            .setDescription("New event date in YYYY-MM-DD format.")
+            .setMinLength(10)
+            .setMaxLength(10),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("time")
+            .setDescription("New event time in HH:mm format.")
+            .setMinLength(5)
+            .setMaxLength(5),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("timezone")
+            .setDescription("New organiser timezone.")
+            .setAutocomplete(true),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("duration-minutes")
+            .setDescription("New event duration.")
+            .setMinValue(30)
+            .setMaxValue(480),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("close-minutes-before")
+            .setDescription("New signup-close offset before event start.")
+            .setMinValue(0)
+            .setMaxValue(1440),
+        )
+
+        .addBooleanOption((option) =>
+          option
+            .setName("detailed-deadline")
+            .setDescription("Whether to show the detailed signup deadline."),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("ping-role-1")
+            .setDescription(
+              "Replace event ping roles with this role and any roles below.",
+            ),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("ping-role-2")
+            .setDescription("Optional second event ping role."),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("ping-role-3")
+            .setDescription("Optional third event ping role."),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("ping-role-4")
+            .setDescription("Optional fourth event ping role."),
+        ),
     ),
 
   new SlashCommandBuilder()

@@ -77,6 +77,54 @@ export async function scheduleAttendanceClose(
     });
 }
 
+export async function scheduleEventCompletion(
+  eventId: number,
+  dueAt: Date,
+): Promise<void> {
+  const now = new Date();
+
+  await db
+    .insert(scheduledActions)
+    .values({
+      eventId,
+
+      actionKey: "complete_event",
+
+      dueAt,
+
+      status: "pending",
+
+      attemptCount: 0,
+
+      lockedAt: null,
+
+      completedAt: null,
+
+      lastError: null,
+
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: [scheduledActions.eventId, scheduledActions.actionKey],
+
+      set: {
+        dueAt,
+
+        status: "pending",
+
+        attemptCount: 0,
+
+        lockedAt: null,
+
+        completedAt: null,
+
+        lastError: null,
+
+        updatedAt: now,
+      },
+    });
+}
+
 export async function cancelEventScheduledActions(
   eventId: number,
 ): Promise<void> {
