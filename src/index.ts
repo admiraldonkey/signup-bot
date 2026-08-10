@@ -15,14 +15,9 @@ import {
 } from "./scheduler/event-scheduler.js";
 
 const token = process.env.DISCORD_TOKEN;
-const guildId = process.env.DISCORD_GUILD_ID;
 
 if (!token) {
   throw new Error("DISCORD_TOKEN is not configured.");
-}
-
-if (!guildId) {
-  throw new Error("DISCORD_GUILD_ID is not configured.");
 }
 
 const client = new Client({
