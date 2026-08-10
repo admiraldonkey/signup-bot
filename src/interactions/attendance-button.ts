@@ -89,7 +89,6 @@ export async function handleAttendanceButton(
       .where(and(eq(events.id, event.eventId), eq(events.status, "open")));
 
     await markAttendanceCloseCompleted(event.eventId, now);
-    await reschedulePendingEventReminders(event.eventId);
 
     await interaction.editReply(
       "The attendance deadline for this event has passed.",

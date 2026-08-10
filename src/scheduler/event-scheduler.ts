@@ -1,5 +1,5 @@
 import { type Client } from "discord.js";
-import { and, eq, inArray, lt, lte, sql } from "drizzle-orm";
+import { and, eq, inArray, lt, lte, sql, isNull, ne } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 import {
@@ -257,7 +257,7 @@ async function executeCloseAttendance(
   console.log(`Automatically closed attendance for event ${eventId}.`);
 
   const guild = await client.guilds.fetch(event.discordGuildId);
-  await reschedulePendingEventReminders(eventId);
+
   await writeAuditLog({
     guildId: event.guildDatabaseId,
 
@@ -499,11 +499,19 @@ async function executeEventReminder(
 
       sentAt: eventReminders.sentAt,
 
+      missedAt: eventReminders.missedAt,
+
       timingReference: eventReminders.timingReference,
+
+      minutesBefore: eventReminders.minutesBefore,
 
       eventName: events.name,
 
       eventStatus: events.status,
+
+      startsAt: events.startsAt,
+
+      attendanceClosesAt: events.attendanceClosesAt,
 
       guildDatabaseId: events.ownerGuildId,
 
@@ -525,7 +533,7 @@ async function executeEventReminder(
     return;
   }
 
-  if (!reminder.enabled || reminder.sentAt) {
+  if (!reminder.enabled || reminder.sentAt || reminder.missedAt) {
     return;
   }
 
@@ -536,9 +544,33 @@ async function executeEventReminder(
     return;
   }
 
+  const referenceTime =
+    reminder.timingReference === "event_start"
+      ? reminder.startsAt
+      : reminder.timingReference === "signup_close"
+        ? reminder.attendanceClosesAt
+        : null;
+
+  if (!referenceTime) {
+    throw new Error(`Reminder ${reminder.id} has no valid reference time.`);
+  }
+
+  const now = new Date();
+
   /*
-   * Don't send a stale "signups close soon" reminder if an admin
-   * has already manually closed signups.
+   * If the thing the reminder was warning about has already
+   * happened, sending it now would be misleading.
+   */
+  if (referenceTime <= now) {
+    await markEventReminderMissed(client, reminder, referenceTime);
+
+    return;
+  }
+
+  /*
+   * This normally means an admin manually closed signups early.
+   * reschedulePendingEventReminders() should already have cancelled
+   * the action, but retain this as a defensive check.
    */
   if (
     reminder.timingReference === "signup_close" &&
@@ -565,8 +597,9 @@ async function executeEventReminder(
     hideMentions: true,
   });
 
-  const now = new Date();
-
+  /*
+   * Reuse the same `now` declared above. Do not redeclare it here.
+   */
   await db
     .update(eventReminders)
     .set({
@@ -609,4 +642,110 @@ async function executeEventReminder(
   });
 
   console.log(`Sent reminder ${reminder.id} for event ${reminder.eventId}.`);
+}
+
+async function markEventReminderMissed(
+  client: Client<true>,
+  reminder: {
+    id: number;
+    eventId: number;
+    eventName: string;
+    guildDatabaseId: number;
+    discordGuildId: string;
+    timingReference: string;
+    minutesBefore: number;
+  },
+  referenceTime: Date,
+): Promise<void> {
+  const now = new Date();
+
+  const scheduledAt = new Date(
+    referenceTime.getTime() - reminder.minutesBefore * 60_000,
+  );
+
+  const reason =
+    "The reminder remained pending until after its useful reference time had passed.";
+
+  await db
+    .update(eventReminders)
+    .set({
+      missedAt: now,
+
+      missedReason: reason,
+
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(eventReminders.id, reminder.id),
+
+        isNull(eventReminders.sentAt),
+
+        isNull(eventReminders.missedAt),
+      ),
+    );
+
+  const remaining = await db
+    .select({
+      id: eventReminders.id,
+    })
+    .from(eventReminders)
+    .where(
+      and(
+        eq(eventReminders.eventId, reminder.eventId),
+
+        eq(eventReminders.enabled, true),
+
+        isNull(eventReminders.sentAt),
+
+        isNull(eventReminders.missedAt),
+
+        ne(eventReminders.id, reminder.id),
+      ),
+    );
+
+  /*
+   * `client` works here because executeEventReminder() explicitly
+   * passes its Discord client into this helper.
+   */
+  const guild = await client.guilds.fetch(reminder.discordGuildId);
+
+  const scheduledTimestamp = Math.floor(scheduledAt.getTime() / 1000);
+
+  await writeAuditLog({
+    guildId: reminder.guildDatabaseId,
+
+    guild,
+
+    actorUserId: null,
+
+    action: "scheduler.reminder_missed",
+
+    outcome: "failure",
+
+    summary: [
+      `Reminder #${reminder.id} for "${reminder.eventName}" (#${reminder.eventId}) was not sent before its useful window ended.`,
+      `Scheduled for <t:${scheduledTimestamp}:F>.`,
+      `${remaining.length} other unsent reminder(s) remain.`,
+      "Use `/event reminder-list` to review them, `/event reminder-add` to schedule another reminder, or `/event announce` to send an immediate message.",
+    ].join("\n"),
+
+    targetType: "event",
+
+    targetId: String(reminder.eventId),
+
+    details: {
+      reminderId: reminder.id,
+
+      scheduledAt: scheduledAt.toISOString(),
+
+      timingReference: reminder.timingReference,
+
+      remainingReminderCount: remaining.length,
+    },
+  });
+
+  console.warn(
+    `Reminder ${reminder.id} for event ${reminder.eventId} was missed.`,
+  );
 }

@@ -43,6 +43,7 @@ import { writeAuditLog } from "../audit/audit-log.js";
 import {
   addEventReminder,
   announceEvent,
+  editEventReminder,
   listEventReminders,
   removeEventReminder,
 } from "./event-reminders.js";
@@ -106,6 +107,10 @@ export async function handleEventCommand(
 
     case "reminder-add":
       await addEventReminder(interaction);
+      return;
+
+    case "reminder-edit":
+      await editEventReminder(interaction);
       return;
 
     case "reminder-list":
@@ -1266,7 +1271,6 @@ async function refreshEvent(
       });
 
     await markAttendanceCloseCompleted(eventId, now);
-    await reschedulePendingEventReminders(eventId);
 
     if (updatedEvent) {
       event = updatedEvent;

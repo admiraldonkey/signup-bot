@@ -43,6 +43,13 @@
       "when": 1786293727949,
       "tag": "0005_add-event-reminders",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786317701481,
+      "tag": "0006_add-reminder-missed-state",
+      "breakpoints": true
     }
   ]
 }

@@ -800,6 +800,12 @@ export const eventReminders = pgTable(
     })
       .notNull()
       .defaultNow(),
+
+    missedAt: timestamp("missed_at", {
+      withTimezone: true,
+    }),
+
+    missedReason: text("missed_reason"),
   },
   (table) => [
     index("event_reminders_event_idx").on(table.eventId),

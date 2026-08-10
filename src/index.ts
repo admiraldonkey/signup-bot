@@ -30,19 +30,17 @@ const client = new Client({
 });
 
 client.once(Events.ClientReady, async (readyClient) => {
-  try {
-    const guild = await readyClient.guilds.fetch(guildId);
+  for (const guild of readyClient.guilds.cache.values()) {
+    try {
+      await guild.commands.set(commandDefinitions);
 
-    await guild.commands.set(commandDefinitions);
-
-    console.log(`Logged in as ${readyClient.user.tag}`);
-    console.log(`Registered commands in ${guild.name}`);
-    startEventScheduler(readyClient);
-  } catch (error) {
-    console.error("Failed to register guild commands:", error);
-    process.exitCode = 1;
-    client.destroy();
+      console.log(`Registered commands in ${guild.name} (${guild.id}).`);
+    } catch (error) {
+      console.error(`Failed to register commands in guild ${guild.id}:`, error);
+    }
   }
+
+  startEventScheduler(readyClient);
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
