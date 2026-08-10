@@ -278,9 +278,11 @@ export async function listEventReminders(
 
     const status = reminder.sentAt
       ? "Sent"
-      : !reminder.enabled
-        ? "Removed"
-        : (action?.status ?? "Unknown");
+      : reminder.missedAt
+        ? "Missed"
+        : !reminder.enabled
+          ? "Removed"
+          : (action?.status ?? "Unknown");
 
     const due = action
       ? `<t:${Math.floor(action.dueAt.getTime() / 1000)}:f>`
@@ -288,6 +290,7 @@ export async function listEventReminders(
 
     return [
       `**#${reminder.id} — ${status}**`,
+      reminder.missedReason ? `Reason: ${reminder.missedReason}` : null,
       `${formatTimingReference(
         reminder.timingReference,
       )}, ${reminder.minutesBefore} minute(s) before`,
@@ -635,4 +638,325 @@ function truncate(value: string, maxLength: number): string {
   }
 
   return value.slice(0, maxLength - 1) + "…";
+}
+
+export async function editEventReminder(
+  interaction: CachedInteraction,
+): Promise<void> {
+  const context = await getReminderContext(interaction);
+
+  if (!context) {
+    return;
+  }
+
+  const eventId = interaction.options.getInteger("event-id", true);
+
+  const reminderId = interaction.options.getInteger("reminder-id", true);
+
+  const event = await findOwnedEvent(context.guildId, eventId);
+
+  if (!event) {
+    await interaction.editReply(
+      `Event #${eventId} was not found in this server.`,
+    );
+
+    return;
+  }
+
+  if (event.status === "cancelled" || event.status === "completed") {
+    await interaction.editReply(
+      "Reminders on cancelled or completed events cannot be edited.",
+    );
+
+    return;
+  }
+
+  const [reminder] = await db
+    .select({
+      id: eventReminders.id,
+
+      eventId: eventReminders.eventId,
+
+      timingReference: eventReminders.timingReference,
+
+      minutesBefore: eventReminders.minutesBefore,
+
+      message: eventReminders.message,
+
+      channelId: eventReminders.channelId,
+
+      pingEventRoles: eventReminders.pingEventRoles,
+
+      enabled: eventReminders.enabled,
+
+      sentAt: eventReminders.sentAt,
+
+      missedAt: eventReminders.missedAt,
+    })
+    .from(eventReminders)
+    .where(
+      and(
+        eq(eventReminders.id, reminderId),
+
+        eq(eventReminders.eventId, event.id),
+      ),
+    )
+    .limit(1);
+
+  if (!reminder) {
+    await interaction.editReply(
+      `Reminder #${reminderId} was not found on this event.`,
+    );
+
+    return;
+  }
+
+  if (!reminder.enabled) {
+    await interaction.editReply(
+      "That reminder has already been removed and cannot be edited.",
+    );
+
+    return;
+  }
+
+  if (reminder.sentAt) {
+    await interaction.editReply(
+      [
+        "That reminder has already been sent, so it cannot be edited.",
+        "",
+        "Use `/event announce` if a correction or follow-up message is required.",
+      ].join("\n"),
+    );
+
+    return;
+  }
+
+  if (reminder.missedAt) {
+    await interaction.editReply(
+      [
+        "That reminder was already marked as missed and cannot be edited.",
+        "",
+        "Use `/event reminder-add` to schedule a replacement, or `/event announce` to send a message immediately.",
+      ].join("\n"),
+    );
+
+    return;
+  }
+
+  const timingReferenceOption = interaction.options.getString("relative-to");
+
+  const minutesBeforeOption = interaction.options.getInteger("minutes-before");
+
+  const messageOptionRaw = interaction.options.getString("message");
+
+  const selectedChannel = interaction.options.getChannel("channel");
+
+  const pingEventRolesOption =
+    interaction.options.getBoolean("ping-event-roles");
+
+  const anyChangeRequested =
+    timingReferenceOption !== null ||
+    minutesBeforeOption !== null ||
+    messageOptionRaw !== null ||
+    selectedChannel !== null ||
+    pingEventRolesOption !== null;
+
+  if (!anyChangeRequested) {
+    await interaction.editReply("No reminder changes were supplied.");
+
+    return;
+  }
+
+  const newTimingReference = timingReferenceOption ?? reminder.timingReference;
+
+  if (
+    newTimingReference !== "signup_close" &&
+    newTimingReference !== "event_start"
+  ) {
+    await interaction.editReply("The reminder timing reference is invalid.");
+
+    return;
+  }
+
+  const newMinutesBefore = minutesBeforeOption ?? reminder.minutesBefore;
+
+  const newMessage =
+    messageOptionRaw !== null ? messageOptionRaw.trim() : reminder.message;
+
+  if (!newMessage) {
+    await interaction.editReply("The reminder message cannot be empty.");
+
+    return;
+  }
+
+  const newChannelId = selectedChannel?.id ?? reminder.channelId;
+
+  const newPingEventRoles = pingEventRolesOption ?? reminder.pingEventRoles;
+
+  const newDueAt = calculateReminderDueAt(
+    newTimingReference,
+    newMinutesBefore,
+    event,
+  );
+
+  if (!newDueAt) {
+    await interaction.editReply(
+      "That event does not have the required reference time.",
+    );
+
+    return;
+  }
+
+  if (newDueAt <= new Date()) {
+    const unix = Math.floor(newDueAt.getTime() / 1000);
+
+    await interaction.editReply(
+      [
+        "The edited reminder would already be due.",
+        "",
+        `Calculated time: <t:${unix}:F>`,
+        "",
+        "Choose a later timing or use `/event announce` to send a message immediately.",
+      ].join("\n"),
+    );
+
+    return;
+  }
+
+  try {
+    await validateEventMessageDestination(
+      interaction.guild,
+      event.id,
+      newChannelId,
+      newPingEventRoles,
+    );
+  } catch (error) {
+    await interaction.editReply(
+      error instanceof Error
+        ? error.message
+        : "The reminder destination could not be validated.",
+    );
+
+    return;
+  }
+
+  const now = new Date();
+
+  await db.transaction(async (transaction) => {
+    await transaction
+      .update(eventReminders)
+      .set({
+        timingReference: newTimingReference,
+
+        minutesBefore: newMinutesBefore,
+
+        message: newMessage,
+
+        channelId: newChannelId,
+
+        pingEventRoles: newPingEventRoles,
+
+        updatedAt: now,
+      })
+      .where(eq(eventReminders.id, reminder.id));
+
+    /*
+     * Reset/recreate the corresponding scheduler action using
+     * the newly-calculated time.
+     */
+    await transaction
+      .insert(scheduledActions)
+      .values({
+        eventId: event.id,
+
+        actionKey: buildReminderActionKey(reminder.id),
+
+        dueAt: newDueAt,
+
+        status: "pending",
+
+        attemptCount: 0,
+
+        lockedAt: null,
+
+        completedAt: null,
+
+        lastError: null,
+
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [scheduledActions.eventId, scheduledActions.actionKey],
+
+        set: {
+          dueAt: newDueAt,
+
+          status: "pending",
+
+          attemptCount: 0,
+
+          lockedAt: null,
+
+          completedAt: null,
+
+          lastError: null,
+
+          updatedAt: now,
+        },
+      });
+  });
+
+  await writeAuditLog({
+    guildId: context.guildId,
+
+    guild: interaction.guild,
+
+    actorUserId: interaction.user.id,
+
+    action: "event.reminder.edit",
+
+    outcome: "success",
+
+    summary: `Edited reminder #${reminder.id} for "${event.name}" (#${event.id}).`,
+
+    targetType: "event",
+
+    targetId: String(event.id),
+
+    details: {
+      reminderId: reminder.id,
+
+      timingReference: newTimingReference,
+
+      minutesBefore: newMinutesBefore,
+
+      dueAt: newDueAt.toISOString(),
+
+      channelId: newChannelId,
+
+      pingEventRoles: newPingEventRoles,
+
+      messageChanged: messageOptionRaw !== null,
+    },
+  });
+
+  const unix = Math.floor(newDueAt.getTime() / 1000);
+
+  await interaction.editReply({
+    content: [
+      `✅ Reminder **#${reminder.id}** updated for **${event.name}**.`,
+      "",
+      `**Sends:** <t:${unix}:F> (<t:${unix}:R>)`,
+      `**Relative to:** ${formatTimingReference(newTimingReference)}`,
+      `**Minutes before:** ${newMinutesBefore}`,
+      `**Destination:** <#${newChannelId}>`,
+      `**Ping event roles:** ${newPingEventRoles ? "Yes" : "No"}`,
+      "",
+      `**Message:** ${newMessage}`,
+    ].join("\n"),
+
+    allowedMentions: {
+      parse: [],
+    },
+  });
 }

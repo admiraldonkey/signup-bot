@@ -58,6 +58,8 @@ export async function reschedulePendingEventReminders(
       minutesBefore: eventReminders.minutesBefore,
 
       sentAt: eventReminders.sentAt,
+
+      missedAt: eventReminders.missedAt,
     })
     .from(eventReminders)
     .where(
@@ -65,19 +67,17 @@ export async function reschedulePendingEventReminders(
         eq(eventReminders.eventId, eventId),
 
         eq(eventReminders.enabled, true),
-
-        /*
-         * sentAt IS NULL without importing isNull can instead
-         * be left out here if you prefer and filtered below
-         * after selecting sentAt.
-         */
       ),
     );
 
   const now = new Date();
 
   for (const reminder of reminders) {
-    if (reminder.sentAt) {
+    /*
+     * A reminder which has already been sent or classified as
+     * missed must never be scheduled again.
+     */
+    if (reminder.sentAt || reminder.missedAt) {
       continue;
     }
 
@@ -96,6 +96,14 @@ export async function reschedulePendingEventReminders(
 
     const actionKey = buildReminderActionKey(reminder.id);
 
+    /*
+     * An early/manual signup closure makes a future
+     * signup-close reminder obsolete.
+     *
+     * Natural deadline expiry is handled by the scheduler itself,
+     * which can then distinguish "late but still useful" from
+     * genuinely missed.
+     */
     const signupReminderInvalid =
       reminder.timingReference === "signup_close" && event.status !== "open";
 
@@ -103,8 +111,7 @@ export async function reschedulePendingEventReminders(
       event.status === "cancelled" ||
       event.status === "completed" ||
       signupReminderInvalid ||
-      !dueAt ||
-      dueAt <= now;
+      !dueAt;
 
     if (shouldCancel) {
       await db
@@ -129,6 +136,13 @@ export async function reschedulePendingEventReminders(
       continue;
     }
 
+    /*
+     * If the calculated send time has already passed, schedule the
+     * action immediately. executeEventReminder() will decide whether
+     * the reminder is still useful or has genuinely been missed.
+     */
+    const effectiveDueAt = dueAt <= now ? now : dueAt;
+
     await db
       .insert(scheduledActions)
       .values({
@@ -136,7 +150,7 @@ export async function reschedulePendingEventReminders(
 
         actionKey,
 
-        dueAt,
+        dueAt: effectiveDueAt,
 
         status: "pending",
 
@@ -154,7 +168,7 @@ export async function reschedulePendingEventReminders(
         target: [scheduledActions.eventId, scheduledActions.actionKey],
 
         set: {
-          dueAt,
+          dueAt: effectiveDueAt,
 
           status: "pending",
 

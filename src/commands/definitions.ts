@@ -416,6 +416,81 @@ export const commandDefinitions = [
 
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("reminder-edit")
+        .setDescription("Edits a pending event reminder.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event containing the reminder.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("reminder-id")
+            .setDescription("The reminder ID shown by reminder-list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("relative-to")
+            .setDescription(
+              "Change what the reminder is scheduled relative to.",
+            )
+            .addChoices(
+              {
+                name: "Signup close",
+                value: "signup_close",
+              },
+              {
+                name: "Event start",
+                value: "event_start",
+              },
+            ),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("minutes-before")
+            .setDescription(
+              "Change how many minutes before the selected time it sends.",
+            )
+            .setMinValue(0)
+            .setMaxValue(10080),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("message")
+            .setDescription("Replace the reminder message.")
+            .setMaxLength(1800),
+        )
+
+        .addChannelOption((option) =>
+          option
+            .setName("channel")
+            .setDescription("Change the reminder destination channel.")
+            .addChannelTypes(
+              ChannelType.GuildText,
+              ChannelType.GuildAnnouncement,
+            ),
+        )
+
+        .addBooleanOption((option) =>
+          option
+            .setName("ping-event-roles")
+            .setDescription(
+              "Change whether the reminder pings the event roles.",
+            ),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("announce")
         .setDescription("Sends an immediate custom announcement for an event.")
 
