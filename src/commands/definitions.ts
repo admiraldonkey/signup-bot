@@ -59,6 +59,23 @@ export const commandDefinitions = [
               ChannelType.GuildAnnouncement,
             )
             .setRequired(true),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("event-organiser-role")
+            .setDescription(
+              "Role containing members who can organise events or claim cover.",
+            ),
+        )
+
+        .addChannelOption((option) =>
+          option
+            .setName("event-admin-channel")
+            .setDescription(
+              "Private channel for organiser and event administration messages.",
+            )
+            .addChannelTypes(ChannelType.GuildText),
         ),
     )
 

@@ -18,6 +18,10 @@ export async function getGuildConfiguration(discordGuildId: string) {
 
       roleRequestChannelId: guildSettings.defaultRoleRequestChannelId,
 
+      eventAdminChannelId: guildSettings.eventAdminChannelId,
+
+      eventOrganiserRoleId: guildSettings.eventOrganiserRoleId,
+
       botLogChannelId: guildSettings.botLogChannelId,
     })
     .from(discordGuilds)
