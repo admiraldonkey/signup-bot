@@ -217,6 +217,7 @@ async function configureGuild(
   interaction: ChatInputCommandInteraction,
 ): Promise<void> {
   const guild = interaction.guild;
+
   const discordGuildId = interaction.guildId;
 
   if (!guild || !discordGuildId) {
@@ -226,6 +227,7 @@ async function configureGuild(
   const [configuredGuild] = await db
     .select({
       id: discordGuilds.id,
+
       name: discordGuilds.name,
     })
     .from(discordGuilds)
@@ -241,6 +243,24 @@ async function configureGuild(
     return;
   }
 
+  const [existingSettings] = await db
+    .select({
+      organiserPrimaryResponseMinutes:
+        guildSettings.organiserPrimaryResponseMinutes,
+
+      organiserBackupResponseMinutes:
+        guildSettings.organiserBackupResponseMinutes,
+
+      organiserWarningMinutesBefore:
+        guildSettings.organiserWarningMinutesBefore,
+    })
+    .from(guildSettings)
+    .where(eq(guildSettings.guildId, configuredGuild.id))
+    .limit(1);
+
+  /*
+   * Existing required configuration.
+   */
   const selectedAdminRole = interaction.options.getRole(
     "event-admin-role",
     true,
@@ -256,16 +276,81 @@ async function configureGuild(
     true,
   );
 
-  const [eventAdminRole, attendanceChannel, roleRequestChannel, botMember] =
-    await Promise.all([
-      guild.roles.fetch(selectedAdminRole.id),
-      guild.channels.fetch(selectedAttendanceChannel.id),
-      guild.channels.fetch(selectedRoleRequestChannel.id),
-      guild.members.fetchMe(),
-    ]);
+  /*
+   * New optional configuration.
+   *
+   * These remain optional so existing servers are not forced to
+   * configure the organiser system immediately.
+   */
+  const selectedEventAdminChannel = interaction.options.getChannel(
+    "event-admin-channel",
+  );
+
+  const selectedEventOrganiserRole = interaction.options.getRole(
+    "event-organiser-role",
+  );
+
+  const primaryResponseMinutesOption = interaction.options.getInteger(
+    "organiser-primary-minutes",
+  );
+
+  const backupResponseMinutesOption = interaction.options.getInteger(
+    "organiser-backup-minutes",
+  );
+
+  const warningMinutesBeforeOption = interaction.options.getInteger(
+    "organiser-warning-minutes",
+  );
+
+  const organiserPrimaryResponseMinutes =
+    primaryResponseMinutesOption ??
+    existingSettings?.organiserPrimaryResponseMinutes ??
+    80;
+
+  const organiserBackupResponseMinutes =
+    backupResponseMinutesOption ??
+    existingSettings?.organiserBackupResponseMinutes ??
+    40;
+
+  const organiserWarningMinutesBefore =
+    warningMinutesBeforeOption ??
+    existingSettings?.organiserWarningMinutesBefore ??
+    15;
+
+  /*
+   * Fetch the real Discord objects rather than relying only on
+   * slash-command option data.
+   */
+  const [
+    eventAdminRole,
+    attendanceChannel,
+    roleRequestChannel,
+    eventAdminChannel,
+    eventOrganiserRole,
+    botMember,
+  ] = await Promise.all([
+    guild.roles.fetch(selectedAdminRole.id),
+
+    guild.channels.fetch(selectedAttendanceChannel.id),
+
+    guild.channels.fetch(selectedRoleRequestChannel.id),
+
+    selectedEventAdminChannel
+      ? guild.channels.fetch(selectedEventAdminChannel.id)
+      : Promise.resolve(null),
+
+    selectedEventOrganiserRole
+      ? guild.roles.fetch(selectedEventOrganiserRole.id)
+      : Promise.resolve(null),
+
+    guild.members.fetchMe(),
+  ]);
 
   const issues: string[] = [];
 
+  /*
+   * Required values must always resolve.
+   */
   if (!eventAdminRole) {
     issues.push("The selected event-admin role could not be found.");
   }
@@ -278,24 +363,67 @@ async function configureGuild(
     issues.push("The selected role-request channel could not be found.");
   }
 
+  /*
+   * Optional values only become errors if the administrator
+   * actually supplied the option but Discord could not resolve it.
+   */
+  if (selectedEventAdminChannel && !eventAdminChannel) {
+    issues.push(
+      "The selected event-administration channel could not be found.",
+    );
+  }
+
+  if (selectedEventOrganiserRole && !eventOrganiserRole) {
+    issues.push("The selected event-organiser role could not be found.");
+  }
+
+  if (
+    organiserWarningMinutesBefore > 0 &&
+    organiserWarningMinutesBefore >= organiserPrimaryResponseMinutes
+  ) {
+    issues.push(
+      "The organiser warning must occur before the primary response deadline.",
+    );
+  }
+
+  if (
+    organiserWarningMinutesBefore > 0 &&
+    organiserWarningMinutesBefore >= organiserBackupResponseMinutes
+  ) {
+    issues.push(
+      "The organiser warning must occur before the backup response deadline.",
+    );
+  }
+
   if (issues.length > 0) {
-    await interaction.editReply(
-      [
+    await interaction.editReply({
+      content: [
         "❌ The configuration could not be saved:",
         "",
         ...issues.map((issue) => `• ${issue}`),
       ].join("\n"),
-    );
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
 
     return;
   }
 
+  /*
+   * This check primarily helps TypeScript. We already returned
+   * above if any required Discord object was unavailable.
+   */
   if (!eventAdminRole || !attendanceChannel || !roleRequestChannel) {
     throw new Error(
       "Discord configuration values unexpectedly became unavailable.",
     );
   }
 
+  /*
+   * Validate Event Admin role.
+   */
   if (eventAdminRole.id === guild.id) {
     issues.push("The event-admin role cannot be the `@everyone` role.");
   }
@@ -307,6 +435,28 @@ async function configureGuild(
     );
   }
 
+  /*
+   * Validate optional Event Organiser role.
+   *
+   * It is perfectly valid for this to be the same role as the
+   * Event Admin role if a server wants that arrangement.
+   */
+  if (eventOrganiserRole) {
+    if (eventOrganiserRole.id === guild.id) {
+      issues.push("The event-organiser role cannot be the `@everyone` role.");
+    }
+
+    if (eventOrganiserRole.managed) {
+      issues.push(
+        "The event-organiser role is managed by Discord or an integration " +
+          "and is not suitable for organiser assignments.",
+      );
+    }
+  }
+
+  /*
+   * Validate the existing public posting channels.
+   */
   if (!isSupportedPostingChannel(attendanceChannel)) {
     issues.push(
       "The attendance destination must be a text or announcement channel.",
@@ -319,10 +469,41 @@ async function configureGuild(
     );
   }
 
-  for (const [channel, label] of [
-    [attendanceChannel, "attendance channel"],
-    [roleRequestChannel, "role-request channel"],
-  ] as const) {
+  /*
+   * The command definition only offers a normal text channel for
+   * event administration. Keep this runtime validation as defence
+   * in depth.
+   */
+  if (eventAdminChannel && !isSupportedPostingChannel(eventAdminChannel)) {
+    issues.push("The event-administration destination must be a text channel.");
+  }
+
+  /*
+   * Check the bot's effective permissions in all configured
+   * destinations.
+   */
+  const channelsToCheck = [
+    {
+      channel: attendanceChannel,
+
+      label: "attendance channel",
+    },
+    {
+      channel: roleRequestChannel,
+
+      label: "role-request channel",
+    },
+  ];
+
+  if (eventAdminChannel) {
+    channelsToCheck.push({
+      channel: eventAdminChannel,
+
+      label: "event-administration channel",
+    });
+  }
+
+  for (const { channel, label } of channelsToCheck) {
     const channelPermissions = channel.permissionsFor(botMember);
 
     const missingPermissions = REQUIRED_POSTING_PERMISSIONS.filter(
@@ -345,6 +526,7 @@ async function configureGuild(
         "",
         ...issues.map((issue) => `• ${issue}`),
       ].join("\n"),
+
       allowedMentions: {
         parse: [],
       },
@@ -355,40 +537,138 @@ async function configureGuild(
 
   const now = new Date();
 
+  /*
+   * The new organiser settings are optional.
+   *
+   * Using conditional object spreads here is important:
+   *
+   * - if supplied, save/update them;
+   * - if omitted, leave an existing value untouched.
+   *
+   * That means someone can later run /setup configure merely to
+   * change the attendance channel without accidentally deleting
+   * the Event Administration channel.
+   */
   await db
     .insert(guildSettings)
     .values({
       guildId: configuredGuild.id,
+
       eventAdminRoleId: eventAdminRole.id,
+
       defaultAttendanceChannelId: attendanceChannel.id,
+
       defaultRoleRequestChannelId: roleRequestChannel.id,
+
+      organiserPrimaryResponseMinutes,
+
+      organiserBackupResponseMinutes,
+
+      organiserWarningMinutesBefore,
+
+      ...(eventAdminChannel
+        ? {
+            eventAdminChannelId: eventAdminChannel.id,
+          }
+        : {}),
+
+      ...(eventOrganiserRole
+        ? {
+            eventOrganiserRoleId: eventOrganiserRole.id,
+          }
+        : {}),
+
       updatedAt: now,
     })
     .onConflictDoUpdate({
       target: guildSettings.guildId,
+
       set: {
         eventAdminRoleId: eventAdminRole.id,
+
         defaultAttendanceChannelId: attendanceChannel.id,
+
         defaultRoleRequestChannelId: roleRequestChannel.id,
+
+        organiserPrimaryResponseMinutes,
+
+        organiserBackupResponseMinutes,
+
+        organiserWarningMinutesBefore,
+
+        ...(eventAdminChannel
+          ? {
+              eventAdminChannelId: eventAdminChannel.id,
+            }
+          : {}),
+
+        ...(eventOrganiserRole
+          ? {
+              eventOrganiserRoleId: eventOrganiserRole.id,
+            }
+          : {}),
+
         updatedAt: now,
       },
     });
 
+  /*
+   * Build the response dynamically because the two new options
+   * are optional.
+   */
+  const responseLines = [
+    `✅ **${configuredGuild.name}** has been configured.`,
+    "",
+    `**Event admins:** <@&${eventAdminRole.id}>`,
+    `**Attendance channel:** <#${attendanceChannel.id}>`,
+    `**Role-request channel:** <#${roleRequestChannel.id}>`,
+  ];
+
+  if (eventAdminChannel) {
+    responseLines.push(
+      `**Event administration channel:** <#${eventAdminChannel.id}>`,
+    );
+  }
+
+  if (eventOrganiserRole) {
+    responseLines.push(
+      `**Event organiser role:** <@&${eventOrganiserRole.id}>`,
+    );
+  }
+
+  responseLines.push(
+    "",
+    "**Organiser escalation:**",
+    `• Primary response time: ${organiserPrimaryResponseMinutes} minute(s)`,
+    `• Backup response time: ${organiserBackupResponseMinutes} minute(s)`,
+    `• Admin warning: ${
+      organiserWarningMinutesBefore === 0
+        ? "Disabled"
+        : `${organiserWarningMinutesBefore} minute(s) before timeout`
+    }`,
+  );
+
+  if (!eventAdminChannel || !eventOrganiserRole) {
+    responseLines.push(
+      "",
+      "Any organiser setting not supplied by this command was left unchanged.",
+    );
+  }
+
+  responseLines.push(
+    "",
+    "Ping roles are selected separately for each event.",
+    "These channels remain the server defaults and may later be overridden by event templates.",
+  );
+
   await interaction.editReply({
-    content: [
-      `✅ **${configuredGuild.name}** has been configured.`,
-      "",
-      `**Event admins:** <@&${eventAdminRole.id}>`,
-      `**Attendance channel:** <#${attendanceChannel.id}>`,
-      `**Role-request channel:** <#${roleRequestChannel.id}>`,
-      "",
-      "Ping roles are selected separately for each event.",
-      "These channels remain the server defaults and may later be overridden by event templates.",
-    ].join("\n"),
+    content: responseLines.join("\n"),
+
     allowedMentions: {
       parse: [],
     },
   });
+
   await writeAuditLog({
     guildId: configuredGuild.id,
 
@@ -400,12 +680,29 @@ async function configureGuild(
 
     outcome: "success",
 
-    summary:
-      "Updated the server's event administration channels and Event Admin role.",
+    summary: "Updated the server's event-management configuration.",
 
     targetType: "guild",
 
     targetId: guild.id,
+
+    details: {
+      eventAdminRoleId: eventAdminRole.id,
+
+      attendanceChannelId: attendanceChannel.id,
+
+      roleRequestChannelId: roleRequestChannel.id,
+
+      eventAdminChannelId: eventAdminChannel?.id,
+
+      eventOrganiserRoleId: eventOrganiserRole?.id,
+
+      organiserPrimaryResponseMinutes,
+
+      organiserBackupResponseMinutes,
+
+      organiserWarningMinutesBefore,
+    },
   });
 }
 
@@ -450,7 +747,8 @@ async function configureEventRegions(
     },
     {
       code: "global",
-      name: "EU & NA / Global",
+      // name: "EU & NA / Global",
+      name: "EU & NA",
       defaultTimezone: configuredGuild.timezone,
     },
   ] as const;
@@ -491,7 +789,8 @@ async function configureEventRegions(
       "**NA**",
       "Default timezone: `America/New_York`",
       "",
-      "**EU & NA / Global**",
+      // "**EU & NA / Global**",
+      "**EU & NA**",
       `Default timezone: \`${configuredGuild.timezone}\``,
       "",
       "Ping roles are selected separately when each event is created.",
@@ -553,8 +852,16 @@ async function showSetupStatus(
     .select({
       eventAdminRoleId: guildSettings.eventAdminRoleId,
       attendanceChannelId: guildSettings.defaultAttendanceChannelId,
-      botLogChannelId: guildSettings.botLogChannelId,
       roleRequestChannelId: guildSettings.defaultRoleRequestChannelId,
+      eventAdminChannelId: guildSettings.eventAdminChannelId,
+      eventOrganiserRoleId: guildSettings.eventOrganiserRoleId,
+      organiserPrimaryResponseMinutes:
+        guildSettings.organiserPrimaryResponseMinutes,
+      organiserBackupResponseMinutes:
+        guildSettings.organiserBackupResponseMinutes,
+      organiserWarningMinutesBefore:
+        guildSettings.organiserWarningMinutesBefore,
+      botLogChannelId: guildSettings.botLogChannelId,
     })
     .from(guildSettings)
     .where(eq(guildSettings.guildId, guild.id))
@@ -607,6 +914,14 @@ async function showSetupStatus(
     settings.roleRequestChannelId,
   );
 
+  const eventAdminChannelDisplay = settings?.eventAdminChannelId
+    ? `<#${settings.eventAdminChannelId}>`
+    : "Not configured";
+
+  const eventOrganiserRoleDisplay = settings?.eventOrganiserRoleId
+    ? `<@&${settings.eventOrganiserRoleId}>`
+    : "Not configured";
+
   await interaction.editReply({
     content: [
       `**Server:** ${guild.name}`,
@@ -622,16 +937,29 @@ async function showSetupStatus(
           ? `<@&${settings.eventAdminRoleId}>`
           : "Not set"
       }`,
+      `• Event organiser role: ${eventOrganiserRoleDisplay}`,
       `• Attendance channel: ${
         settings?.attendanceChannelId
           ? `<#${settings.attendanceChannelId}>`
           : "Not set"
+      }`,
+      `• Primary organiser response: ${
+        settings?.organiserPrimaryResponseMinutes ?? 80
+      } minute(s)`,
+      `• Backup organiser response: ${
+        settings?.organiserBackupResponseMinutes ?? 40
+      } minute(s)`,
+      `• Organiser warning: ${
+        (settings?.organiserWarningMinutesBefore ?? 15) === 0
+          ? "Disabled"
+          : `${settings?.organiserWarningMinutesBefore ?? 15} minute(s) before timeout`
       }`,
       `• Role-request channel: ${
         settings?.roleRequestChannelId
           ? `<#${settings.roleRequestChannelId}>`
           : "Not set"
       }`,
+      `• Event administration channel: ${eventAdminChannelDisplay}`,
       `• Bot log channel: ${
         settings?.botLogChannelId
           ? `<#${settings.botLogChannelId}>`

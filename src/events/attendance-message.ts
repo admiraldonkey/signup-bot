@@ -20,6 +20,18 @@ export interface AttendanceCounts {
   not_attending: number;
 }
 
+export interface AttendanceOrganiserDisplay {
+  discordUserId: string;
+
+  status:
+    | "pending"
+    | "confirmed"
+    | "declined"
+    | "timed_out"
+    | "replaced"
+    | "removed";
+}
+
 export interface AttendanceEventDisplay {
   id: number;
   name: string;
@@ -29,6 +41,8 @@ export interface AttendanceEventDisplay {
   timezone: string;
   showDetailedDeadline: boolean;
   startsAt: Date;
+  organiser: AttendanceOrganiserDisplay | null;
+  signupsEnabled: boolean;
   attendanceClosesAt: Date | null;
   status: "scheduled" | "open" | "closed" | "cancelled" | "completed";
 }
@@ -80,6 +94,36 @@ export function parseAttendanceCustomId(customId: string): {
   };
 }
 
+function formatOrganiser(organiser: AttendanceOrganiserDisplay | null): string {
+  if (!organiser) {
+    return "Not assigned";
+  }
+
+  const status = (() => {
+    switch (organiser.status) {
+      case "pending":
+        return "🟡 Awaiting confirmation";
+
+      case "confirmed":
+        return "✅ Confirmed";
+
+      case "declined":
+        return "❌ Declined";
+
+      case "timed_out":
+        return "⏱️ No response";
+
+      case "replaced":
+        return "Replaced";
+
+      case "removed":
+        return "Removed";
+    }
+  })();
+
+  return `<@${organiser.discordUserId}> • ${status}`;
+}
+
 export function buildAttendanceEmbed(
   event: AttendanceEventDisplay,
   counts: AttendanceCounts,
@@ -101,9 +145,15 @@ export function buildAttendanceEmbed(
       ? null
       : formatInEventTimezone(event.attendanceClosesAt, event.timezone);
 
-  const description =
-    event.description?.trim() ||
-    "Use the buttons below to record your attendance.";
+  const customDescription = event.description?.trim();
+
+  const descriptionParts: string[] = [];
+
+  if (customDescription) {
+    descriptionParts.push(customDescription);
+  } else if (event.signupsEnabled) {
+    descriptionParts.push("Use the buttons below to record your attendance.");
+  }
 
   const deadlineValue =
     event.status === "cancelled"
@@ -139,65 +189,43 @@ export function buildAttendanceEmbed(
   const startDisplayValue =
     event.status === "cancelled"
       ? ["🚫 **Event cancelled**"].join("\n")
-      : [
-          `<t:${startTimestamp}:F> (your local time)`,
-          `<t:${startTimestamp}:R>`,
-        ].join("\n");
+      : [`<t:${startTimestamp}:F>`, `<t:${startTimestamp}:R>`].join("\n");
 
-  return new EmbedBuilder()
-    .setTitle(getEventTitle(event))
-    .setDescription(description)
-    .addFields(
-      {
-        name: "Event Type",
-        value: event.eventTypeName,
-        inline: true,
-      },
-      {
-        name: "Region",
-        value: event.audienceName,
-        inline: true,
-      },
-      {
-        name: "Host Timezone",
-        value: `\`${event.timezone}\``,
-        inline: true,
-      },
-      {
-        name: "Scheduled Time",
-        value: [scheduledStartText, "\n"].join("\n"),
-        inline: false,
-      },
-      {
-        name: "Starts At",
-        value: startDisplayValue,
-        inline: false,
-      },
-      {
-        name: "Sign-ups Close",
-        value: [deadlineValue, "\n"].join("\n"),
-        inline: !event.showDetailedDeadline,
-      },
-      {
-        name: "Attendance",
-        value: [
-          `✅ **Attending:** ${counts.attending}`,
-          `❔ **Tentative:** ${counts.tentative}`,
-          `❌ **Not attending:** ${counts.not_attending}`,
-        ].join("\n"),
-      },
-      {
-        name: "Status",
-        value: event.status
-          .replace("_", " ")
-          .replace(/\b\w/g, (character) => character.toUpperCase()),
-        inline: true,
-      },
-    )
+  const embed = new EmbedBuilder().setTitle(getEventTitle(event));
+
+  descriptionParts.push(
+    [
+      "**Details**",
+      `${event.eventTypeName} • ${event.audienceName} • ${scheduledStartText}`,
+    ].join("\n"),
+  );
+
+  descriptionParts.push(
+    ["**Organiser**", formatOrganiser(event.organiser)].join("\n"),
+  );
+
+  descriptionParts.push(["**Starts At**", startDisplayValue].join("\n"));
+
+  if (event.signupsEnabled) {
+    descriptionParts.push(["**Sign-ups Close**", deadlineValue].join("\n"));
+
+    descriptionParts.push(
+      [
+        "**Attendance**",
+        `✅ ${counts.attending} • ❔ ${counts.tentative} • ❌ ${counts.not_attending}`,
+        "",
+      ].join("\n"),
+    );
+  }
+
+  embed.setDescription(descriptionParts.join("\n\n"));
+  embed
     .setFooter({
-      text: `Event ID: ${event.id} • Last updated`,
+      text: `\u200B\nEvent ID: ${event.id} • Last updated`,
     })
     .setTimestamp(new Date());
+
+  return embed;
 }
 
 export function buildAttendanceButtons(

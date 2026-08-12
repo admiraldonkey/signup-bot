@@ -11,7 +11,7 @@ import {
   varchar,
   jsonb,
 } from "drizzle-orm/pg-core";
-
+import { sql } from "drizzle-orm";
 /*
  * Fixed system states.
  *
@@ -46,6 +46,21 @@ export const scheduledActionStatusEnum = pgEnum("scheduled_action_status", [
   "completed",
   "failed",
   "cancelled",
+]);
+
+export const organiserSlotEnum = pgEnum("organiser_slot", [
+  "primary",
+  "backup",
+  "cover",
+]);
+
+export const organiserStatusEnum = pgEnum("organiser_status", [
+  "pending",
+  "confirmed",
+  "declined",
+  "timed_out",
+  "replaced",
+  "removed",
 ]);
 
 /*
@@ -87,7 +102,23 @@ export const guildSettings = pgTable("guild_settings", {
 
   eventAdminRoleId: text("event_admin_role_id"),
 
+  eventOrganiserRoleId: text("event_organiser_role_id"),
+
+  organiserPrimaryResponseMinutes: integer("organiser_primary_response_minutes")
+    .notNull()
+    .default(80),
+
+  organiserBackupResponseMinutes: integer("organiser_backup_response_minutes")
+    .notNull()
+    .default(40),
+
+  organiserWarningMinutesBefore: integer("organiser_warning_minutes_before")
+    .notNull()
+    .default(15),
+
   defaultAttendanceChannelId: text("default_attendance_channel_id"),
+
+  eventAdminChannelId: text("event_admin_channel_id"),
 
   defaultRoleRequestChannelId: text("default_role_request_channel_id"),
 
@@ -358,6 +389,8 @@ export const events = pgTable(
     showDetailedDeadline: boolean("show_detailed_deadline")
       .notNull()
       .default(false),
+
+    signupsEnabled: boolean("signups_enabled").notNull().default(true),
 
     attendanceOpensAt: timestamp("attendance_opens_at", {
       withTimezone: true,
@@ -866,5 +899,75 @@ export const auditLogs = pgTable(
     index("audit_logs_actor_idx").on(table.actorUserId),
 
     index("audit_logs_action_idx").on(table.action),
+  ],
+);
+
+export const eventOrganiserAssignments = pgTable(
+  "event_organiser_assignments",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+
+    eventId: integer("event_id")
+      .notNull()
+      .references(() => events.id, {
+        onDelete: "cascade",
+      }),
+
+    slot: organiserSlotEnum("slot").notNull(),
+
+    discordUserId: text("discord_user_id").notNull(),
+
+    displayNameSnapshot: varchar("display_name_snapshot", {
+      length: 100,
+    }).notNull(),
+
+    status: organiserStatusEnum("status").notNull().default("pending"),
+
+    isCurrent: boolean("is_current").notNull().default(true),
+
+    assignedByUserId: text("assigned_by_user_id").notNull(),
+
+    assignedAt: timestamp("assigned_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    activatedAt: timestamp("activated_at", {
+      withTimezone: true,
+    }),
+
+    responseDeadlineAt: timestamp("response_deadline_at", {
+      withTimezone: true,
+    }),
+
+    respondedAt: timestamp("responded_at", {
+      withTimezone: true,
+    }),
+
+    endedAt: timestamp("ended_at", {
+      withTimezone: true,
+    }),
+
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("event_organiser_assignments_event_idx").on(
+      table.eventId,
+      table.isCurrent,
+    ),
+
+    index("event_organiser_assignments_user_idx").on(
+      table.discordUserId,
+      table.isCurrent,
+    ),
+
+    uniqueIndex("event_organiser_assignments_current_slot_unique")
+      .on(table.eventId, table.slot)
+      .where(sql`${table.isCurrent} = true`),
   ],
 );

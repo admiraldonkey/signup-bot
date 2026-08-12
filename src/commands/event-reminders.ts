@@ -62,6 +62,14 @@ export async function addEventReminder(
     return;
   }
 
+  if (timingReference === "signup_close" && !event.signupsEnabled) {
+    await interaction.editReply(
+      "This event does not use attendance signups, so it has no signup-close time.",
+    );
+
+    return;
+  }
+
   const minutesBefore = interaction.options.getInteger("minutes-before", true);
 
   const message = interaction.options.getString("message", true).trim();
@@ -585,15 +593,11 @@ async function findOwnedEvent(guildDatabaseId: number, eventId: number) {
   const [event] = await db
     .select({
       id: events.id,
-
       name: events.name,
-
       status: events.status,
-
+      signupsEnabled: events.signupsEnabled,
       startsAt: events.startsAt,
-
       attendanceClosesAt: events.attendanceClosesAt,
-
       attendanceChannelId: eventMessages.channelId,
     })
     .from(events)
@@ -774,6 +778,14 @@ export async function editEventReminder(
     newTimingReference !== "event_start"
   ) {
     await interaction.editReply("The reminder timing reference is invalid.");
+
+    return;
+  }
+
+  if (newTimingReference === "signup_close" && !event.signupsEnabled) {
+    await interaction.editReply(
+      "This event does not use attendance signups, so reminders cannot be scheduled relative to signup close.",
+    );
 
     return;
   }

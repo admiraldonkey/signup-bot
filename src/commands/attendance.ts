@@ -107,11 +107,11 @@ async function getAuthorisedContext(interaction: CachedInteraction) {
 
       outcome: "denied",
 
-      summary: `Denied /event ${interaction.options.getSubcommand()} command attempt.`,
+      summary: `Denied /attendance ${interaction.options.getSubcommand()} command attempt.`,
 
       targetType: "command",
 
-      targetId: `/event ${interaction.options.getSubcommand()}`,
+      targetId: `/attendance ${interaction.options.getSubcommand()}`,
     });
 
     await interaction.editReply(
@@ -132,6 +132,7 @@ async function findOwnedEvent(guildDatabaseId: number, eventId: number) {
       name: events.name,
       startsAt: events.startsAt,
       status: events.status,
+      signupsEnabled: events.signupsEnabled,
     })
     .from(events)
     .where(
@@ -266,46 +267,51 @@ async function recordAttendance(interaction: CachedInteraction): Promise<void> {
       .insert(eventAttendanceReports)
       .values({
         eventId,
-
         source: "paste",
-
         sourceReference,
-
         recordedByUserId: interaction.user.id,
-
         updatedAt: now,
       })
       .onConflictDoUpdate({
         target: eventAttendanceReports.eventId,
-
         set: {
           source: "paste",
-
           sourceReference,
-
           recordedByUserId: interaction.user.id,
-
           updatedAt: now,
         },
       });
   });
 
-  await interaction.editReply({
-    content: [
-      `✅ Actual attendance for **${event.name}** (#${event.id}) has been recorded.`,
-      `**Recorded attendees:** ${attendanceValues.length}`,
-      sourceReference
-        ? `**Source:** ${sourceReference}`
-        : "**Source:** Pasted/manual list",
-      "",
-      "This replaces any previously recorded actual-attendance list for the event.",
+  const responseLines = [
+    `✅ Actual attendance for **${event.name}** (#${event.id}) has been recorded.`,
+    `**Recorded attendees:** ${attendanceValues.length}`,
+
+    sourceReference
+      ? `**Source:** ${sourceReference}`
+      : "**Source:** Pasted/manual list",
+    "",
+    "This replaces any previously recorded actual-attendance list for the event.",
+  ];
+
+  if (event.signupsEnabled) {
+    responseLines.push(
       `Use \`/attendance compare event-id:${event.id}\` to compare it with signups.`,
-    ].join("\n"),
+    );
+  } else {
+    responseLines.push(
+      "This event did not use attendance signups, so no signup-versus-attendance comparison will be calculated.",
+    );
+  }
+
+  await interaction.editReply({
+    content: responseLines.join("\n"),
 
     allowedMentions: {
       parse: [],
     },
   });
+
   await writeAuditLog({
     guildId: configuration.guildId,
 
@@ -600,6 +606,61 @@ async function compareAttendance(
         "No comparison has been made. This prevents missing attendance data from being mistaken for mass no-shows.",
       ].join("\n"),
     );
+
+    return;
+  }
+
+  /*
+   * Events without signups can still have meaningful actual
+   * attendance records, but there is no signup behaviour to compare
+   * against.
+   */
+  if (!event.signupsEnabled) {
+    const actualRows = await db
+      .select({
+        userId: actualAttendanceRecords.discordUserId,
+      })
+      .from(actualAttendanceRecords)
+      .where(eq(actualAttendanceRecords.eventId, eventId));
+
+    const actualUserIds = actualRows.map((row) => row.userId);
+
+    const sourceLabel =
+      report.source === "paste"
+        ? "Pasted list"
+        : report.source === "manual"
+          ? "Manual entry"
+          : report.source;
+
+    const sourceDescription = report.sourceReference
+      ? `${report.sourceReference} — ${sourceLabel}`
+      : sourceLabel;
+
+    const embed = new EmbedBuilder()
+      .setTitle(`Actual attendance — ${event.name}`)
+      .setDescription(
+        [
+          `Event ID: **#${event.id}**`,
+          "",
+          "Attendance signups were disabled for this event, so there is no signup-versus-attendance comparison.",
+        ].join("\n"),
+      )
+      .addFields({
+        name: `✅ Actual attendees (${actualUserIds.length})`,
+        value: formatUserMentions(actualUserIds),
+        inline: false,
+      })
+      .setFooter({
+        text: `Actual-attendance source: ${sourceDescription}`,
+      })
+      .setTimestamp(report.updatedAt);
+
+    await interaction.editReply({
+      embeds: [embed],
+      allowedMentions: {
+        parse: [],
+      },
+    });
 
     return;
   }

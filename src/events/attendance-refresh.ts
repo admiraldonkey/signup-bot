@@ -17,6 +17,7 @@ import {
   buildAttendanceEmbed,
   EMPTY_ATTENDANCE_COUNTS,
 } from "./attendance-message.js";
+import { getPublicOrganiserDisplay } from "./organiser-display.js";
 
 export async function getAttendanceCounts(
   eventId: number,
@@ -65,6 +66,8 @@ export async function getAttendanceEventForInteraction(
       showDetailedDeadline: events.showDetailedDeadline,
 
       startsAt: events.startsAt,
+
+      signupsEnabled: events.signupsEnabled,
 
       attendanceClosesAt: events.attendanceClosesAt,
 
@@ -127,6 +130,8 @@ export async function refreshAttendanceMessage(
       showDetailedDeadline: events.showDetailedDeadline,
 
       startsAt: events.startsAt,
+
+      signupsEnabled: events.signupsEnabled,
 
       attendanceClosesAt: events.attendanceClosesAt,
 
@@ -202,14 +207,16 @@ export async function refreshAttendanceMessage(
     (event.attendanceClosesAt !== null &&
       event.attendanceClosesAt <= new Date());
 
+  const organiser = await getPublicOrganiserDisplay(event.eventId);
+
   await message.edit({
     content: pingRoleContent,
 
     allowedMentions: {
       /*
-       * Keep the visible role mentions in the existing signup
-       * message without generating a fresh notification merely
-       * because an admin edited/refreshed the event.
+       * Keep the visible role mentions without generating a fresh
+       * notification merely because an admin edited/refreshed the
+       * event.
        */
       parse: [],
     },
@@ -233,6 +240,10 @@ export async function refreshAttendanceMessage(
 
           startsAt: event.startsAt,
 
+          organiser,
+
+          signupsEnabled: event.signupsEnabled,
+
           attendanceClosesAt: event.attendanceClosesAt,
 
           status: event.status,
@@ -241,9 +252,9 @@ export async function refreshAttendanceMessage(
       ),
     ],
 
-    components: [
-      buildAttendanceButtons(event.eventId, counts, attendanceClosed),
-    ],
+    components: event.signupsEnabled
+      ? [buildAttendanceButtons(event.eventId, counts, attendanceClosed)]
+      : [],
   });
 
   return {

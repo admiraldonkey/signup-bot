@@ -42,6 +42,8 @@ export async function handleEventResponses(
       id: events.id,
 
       name: events.name,
+
+      signupsEnabled: events.signupsEnabled,
     })
     .from(events)
     .where(
@@ -55,6 +57,14 @@ export async function handleEventResponses(
   if (!event) {
     await interaction.editReply(
       `Event #${eventId} was not found in this server.`,
+    );
+
+    return;
+  }
+
+  if (!event.signupsEnabled) {
+    await interaction.editReply(
+      "Attendance signups are disabled for this event.",
     );
 
     return;

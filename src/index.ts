@@ -13,6 +13,7 @@ import {
   startEventScheduler,
   stopEventScheduler,
 } from "./scheduler/event-scheduler.js";
+import { handleOrganiserButton } from "./interactions/organiser-button.js";
 
 const token = process.env.DISCORD_TOKEN;
 
@@ -80,7 +81,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
    */
   if (interaction.isButton()) {
     try {
-      await handleAttendanceButton(interaction);
+      let handled = await handleAttendanceButton(interaction);
+
+      if (!handled) {
+        handled = await handleOrganiserButton(interaction);
+      }
+
+      if (!handled) {
+        console.warn(`No button handler recognised ${interaction.customId}.`);
+      }
     } catch (error) {
       console.error(`Button ${interaction.customId} failed:`, error);
 

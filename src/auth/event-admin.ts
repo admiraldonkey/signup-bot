@@ -18,6 +18,19 @@ export async function getGuildConfiguration(discordGuildId: string) {
 
       roleRequestChannelId: guildSettings.defaultRoleRequestChannelId,
 
+      eventAdminChannelId: guildSettings.eventAdminChannelId,
+
+      eventOrganiserRoleId: guildSettings.eventOrganiserRoleId,
+
+      organiserPrimaryResponseMinutes:
+        guildSettings.organiserPrimaryResponseMinutes,
+
+      organiserBackupResponseMinutes:
+        guildSettings.organiserBackupResponseMinutes,
+
+      organiserWarningMinutesBefore:
+        guildSettings.organiserWarningMinutesBefore,
+
       botLogChannelId: guildSettings.botLogChannelId,
     })
     .from(discordGuilds)
@@ -25,7 +38,22 @@ export async function getGuildConfiguration(discordGuildId: string) {
     .where(eq(discordGuilds.discordGuildId, discordGuildId))
     .limit(1);
 
-  return configuration ?? null;
+  if (!configuration) {
+    return null;
+  }
+
+  return {
+    ...configuration,
+
+    organiserPrimaryResponseMinutes:
+      configuration.organiserPrimaryResponseMinutes ?? 80,
+
+    organiserBackupResponseMinutes:
+      configuration.organiserBackupResponseMinutes ?? 40,
+
+    organiserWarningMinutesBefore:
+      configuration.organiserWarningMinutesBefore ?? 15,
+  };
 }
 
 export function memberCanManageEvents(

@@ -10,6 +10,7 @@ export function calculateReminderDueAt(
   minutesBefore: number,
   event: {
     startsAt: Date;
+
     attendanceClosesAt: Date | null;
   },
 ): Date | null {
@@ -26,6 +27,7 @@ export function calculateReminderDueAt(
 }
 
 export const REMINDER_ACTION_PREFIX = "event_reminder:";
+
 export function buildReminderActionKey(reminderId: number): string {
   return `${REMINDER_ACTION_PREFIX}${reminderId}`;
 }
@@ -38,6 +40,8 @@ export async function reschedulePendingEventReminders(
       status: events.status,
 
       startsAt: events.startsAt,
+
+      signupsEnabled: events.signupsEnabled,
 
       attendanceClosesAt: events.attendanceClosesAt,
     })
@@ -97,15 +101,21 @@ export async function reschedulePendingEventReminders(
     const actionKey = buildReminderActionKey(reminder.id);
 
     /*
-     * An early/manual signup closure makes a future
-     * signup-close reminder obsolete.
+     * Signup-close reminders only make sense while:
      *
-     * Natural deadline expiry is handled by the scheduler itself,
-     * which can then distinguish "late but still useful" from
-     * genuinely missed.
+     * - signups exist
+     * - there is an actual signup-close timestamp
+     * - attendance remains open.
+     *
+     * Manual early closure therefore invalidates a future
+     * signup-close reminder. Natural expiry is still handled by
+     * the scheduler so missed reminders can be classified correctly
      */
     const signupReminderInvalid =
-      reminder.timingReference === "signup_close" && event.status !== "open";
+      reminder.timingReference === "signup_close" &&
+      (!event.signupsEnabled ||
+        !event.attendanceClosesAt ||
+        event.status !== "open");
 
     const shouldCancel =
       event.status === "cancelled" ||
@@ -138,8 +148,8 @@ export async function reschedulePendingEventReminders(
 
     /*
      * If the calculated send time has already passed, schedule the
-     * action immediately. executeEventReminder() will decide whether
-     * the reminder is still useful or has genuinely been missed.
+     * action immediately. executeEventReminder() will decide
+     * whether it is still useful or has genuinely been missed.
      */
     const effectiveDueAt = dueAt <= now ? now : dueAt;
 

@@ -59,6 +59,53 @@ export const commandDefinitions = [
               ChannelType.GuildAnnouncement,
             )
             .setRequired(true),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("event-organiser-role")
+            .setDescription(
+              "Role containing members who can organise events or claim cover.",
+            ),
+        )
+
+        .addChannelOption((option) =>
+          option
+            .setName("event-admin-channel")
+            .setDescription(
+              "Private channel for organiser and event administration messages.",
+            )
+            .addChannelTypes(ChannelType.GuildText),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("organiser-primary-minutes")
+            .setDescription(
+              "Minutes a primary organiser has to confirm. Defaults to 80.",
+            )
+            .setMinValue(1)
+            .setMaxValue(10080),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("organiser-backup-minutes")
+            .setDescription(
+              "Minutes an activated backup has to confirm. Defaults to 40.",
+            )
+            .setMinValue(1)
+            .setMaxValue(10080),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("organiser-warning-minutes")
+            .setDescription(
+              "Minutes before organiser timeout to warn admins. 0 disables warnings.",
+            )
+            .setMinValue(0)
+            .setMaxValue(1440),
         ),
     )
 
@@ -106,9 +153,7 @@ export const commandDefinitions = [
     .addSubcommand((subcommand) =>
       subcommand
         .setName("create")
-        .setDescription(
-          "Creates a one-off event and opens attendance sign-ups.",
-        )
+        .setDescription("Creates a one-off regiment event.")
 
         /*
          * Discord requires all required options to appear before
@@ -198,10 +243,34 @@ export const commandDefinitions = [
             .setMaxLength(1000),
         )
 
+        .addUserOption((option) =>
+          option
+            .setName("primary-organiser")
+            .setDescription(
+              "Member primarily responsible for organising this event.",
+            ),
+        )
+
+        .addUserOption((option) =>
+          option
+            .setName("backup-organiser")
+            .setDescription(
+              "Optional standby organiser if the primary becomes unavailable.",
+            ),
+        )
+
+        .addBooleanOption((option) =>
+          option
+            .setName("signups")
+            .setDescription(
+              "Enable attendance signups for this event. Defaults to Yes.",
+            ),
+        )
+
         .addIntegerOption((option) =>
           option
             .setName("duration-minutes")
-            .setDescription("Expected event duration. Defaults to 120 minutes.")
+            .setDescription("Expected event duration. Defaults to 60 minutes.")
             .setMinValue(30)
             .setMaxValue(480),
         )
@@ -304,6 +373,77 @@ export const commandDefinitions = [
             .setName("event-id")
             .setDescription("The ID of the event to refresh.")
             .setMinValue(1)
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("organiser-set")
+        .setDescription("Assigns or replaces an organiser for an event.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event whose organiser should be changed.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("slot")
+            .setDescription(
+              "Whether to assign the primary or backup organiser.",
+            )
+            .addChoices(
+              {
+                name: "Primary organiser",
+                value: "primary",
+              },
+              {
+                name: "Backup organiser",
+                value: "backup",
+              },
+            )
+            .setRequired(true),
+        )
+
+        .addUserOption((option) =>
+          option
+            .setName("user")
+            .setDescription("The member to assign.")
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("organiser-clear")
+        .setDescription("Removes the current primary or backup organiser.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event whose organiser should be removed.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("slot")
+            .setDescription("Which organiser assignment should be removed.")
+            .addChoices(
+              {
+                name: "Primary organiser",
+                value: "primary",
+              },
+              {
+                name: "Backup organiser",
+                value: "backup",
+              },
+            )
             .setRequired(true),
         ),
     )
@@ -613,26 +753,32 @@ export const commandDefinitions = [
           option
             .setName("ping-role-1")
             .setDescription(
-              "Replace event ping roles with this role and any roles below.",
+              "Ping role 1. Supplying any ping roles replaces the current role set.",
             ),
         )
 
         .addRoleOption((option) =>
           option
             .setName("ping-role-2")
-            .setDescription("Optional second event ping role."),
+            .setDescription(
+              "Additional ping role for the replacement role set.",
+            ),
         )
 
         .addRoleOption((option) =>
           option
             .setName("ping-role-3")
-            .setDescription("Optional third event ping role."),
+            .setDescription(
+              "Additional ping role for the replacement role set.",
+            ),
         )
 
         .addRoleOption((option) =>
           option
             .setName("ping-role-4")
-            .setDescription("Optional fourth event ping role."),
+            .setDescription(
+              "Additional ping role for the replacement role set.",
+            ),
         ),
     ),
 
