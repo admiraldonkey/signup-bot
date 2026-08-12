@@ -57,8 +57,11 @@ import {
   type OrganiserNotificationDelivery,
   sendOrganiserAssignmentNotification,
 } from "../events/organiser-notification.js";
-
 import { clearEventOrganiser, setEventOrganiser } from "./event-organisers.js";
+import {
+  buildOrganiserResponseActionValues,
+  calculateOrganiserResponseDeadline,
+} from "../organisers/organiser-scheduling.js";
 
 const EVENT_DATE_FORMAT = "yyyy-MM-dd HH:mm";
 
@@ -435,6 +438,30 @@ async function createEvent(
     }
   }
 
+  if (
+    configuration.eventOrganiserRoleId &&
+    primaryOrganiserMember &&
+    !primaryOrganiserMember.roles.cache.has(configuration.eventOrganiserRoleId)
+  ) {
+    await interaction.editReply(
+      "The selected primary organiser does not have the configured Event Organiser role.",
+    );
+
+    return;
+  }
+
+  if (
+    configuration.eventOrganiserRoleId &&
+    backupOrganiserMember &&
+    !backupOrganiserMember.roles.cache.has(configuration.eventOrganiserRoleId)
+  ) {
+    await interaction.editReply(
+      "The selected backup organiser does not have the configured Event Organiser role.",
+    );
+
+    return;
+  }
+
   /*
    * Per-event ping roles
    */
@@ -692,6 +719,13 @@ async function createEvent(
       let backupAssignmentId: number | null = null;
 
       if (primaryOrganiserMember) {
+        const activatedAt = new Date();
+
+        const responseDeadlineAt = calculateOrganiserResponseDeadline(
+          activatedAt,
+          configuration.organiserPrimaryResponseMinutes,
+        );
+
         const [assignment] = await transaction
           .insert(eventOrganiserAssignments)
           .values({
@@ -709,7 +743,11 @@ async function createEvent(
 
             assignedByUserId: interaction.user.id,
 
-            updatedAt: new Date(),
+            activatedAt,
+
+            responseDeadlineAt,
+
+            updatedAt: activatedAt,
           })
           .returning({
             id: eventOrganiserAssignments.id,
@@ -722,6 +760,20 @@ async function createEvent(
         }
 
         primaryAssignmentId = assignment.id;
+
+        const actionValues = buildOrganiserResponseActionValues({
+          eventId: event.id,
+
+          assignmentId: assignment.id,
+
+          activatedAt,
+
+          responseDeadlineAt,
+
+          warningMinutesBefore: configuration.organiserWarningMinutesBefore,
+        });
+
+        await transaction.insert(scheduledActions).values(actionValues);
       }
 
       if (backupOrganiserMember) {
@@ -743,6 +795,10 @@ async function createEvent(
             assignedByUserId: interaction.user.id,
 
             updatedAt: new Date(),
+
+            activatedAt: null,
+
+            responseDeadlineAt: null,
           })
           .returning({
             id: eventOrganiserAssignments.id,

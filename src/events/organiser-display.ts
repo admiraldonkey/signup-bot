@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, isNotNull } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 import { eventOrganiserAssignments } from "../db/schema.js";
@@ -20,8 +20,10 @@ export interface PublicOrganiserDisplay {
 export async function getPublicOrganiserDisplay(
   eventId: number,
 ): Promise<PublicOrganiserDisplay | null> {
-  const [assignment] = await db
+  const assignments = await db
     .select({
+      slot: eventOrganiserAssignments.slot,
+
       discordUserId: eventOrganiserAssignments.discordUserId,
 
       status: eventOrganiserAssignments.status,
@@ -31,12 +33,41 @@ export async function getPublicOrganiserDisplay(
       and(
         eq(eventOrganiserAssignments.eventId, eventId),
 
-        eq(eventOrganiserAssignments.slot, "primary"),
-
         eq(eventOrganiserAssignments.isCurrent, true),
-      ),
-    )
-    .limit(1);
 
-  return assignment ?? null;
+        isNotNull(eventOrganiserAssignments.activatedAt),
+
+        inArray(eventOrganiserAssignments.status, ["pending", "confirmed"]),
+      ),
+    );
+
+  if (assignments.length === 0) {
+    return null;
+  }
+
+  /*
+   * Normally only one assignment is active.
+   *
+   * The explicit precedence provides defensive behaviour if an
+   * administrator changes state during an escalation race.
+   */
+  const priority = {
+    primary: 1,
+    backup: 2,
+    cover: 3,
+  } as const;
+
+  const [assignment] = assignments.sort(
+    (a, b) => priority[b.slot] - priority[a.slot],
+  );
+
+  if (!assignment) {
+    return null;
+  }
+
+  return {
+    discordUserId: assignment.discordUserId,
+
+    status: assignment.status,
+  };
 }

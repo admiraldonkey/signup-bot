@@ -76,6 +76,36 @@ export const commandDefinitions = [
               "Private channel for organiser and event administration messages.",
             )
             .addChannelTypes(ChannelType.GuildText),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("organiser-primary-minutes")
+            .setDescription(
+              "Minutes a primary organiser has to confirm. Defaults to 80.",
+            )
+            .setMinValue(1)
+            .setMaxValue(10080),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("organiser-backup-minutes")
+            .setDescription(
+              "Minutes an activated backup has to confirm. Defaults to 40.",
+            )
+            .setMinValue(1)
+            .setMaxValue(10080),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("organiser-warning-minutes")
+            .setDescription(
+              "Minutes before organiser timeout to warn admins. 0 disables warnings.",
+            )
+            .setMinValue(0)
+            .setMaxValue(1440),
         ),
     )
 

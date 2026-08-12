@@ -243,6 +243,21 @@ async function configureGuild(
     return;
   }
 
+  const [existingSettings] = await db
+    .select({
+      organiserPrimaryResponseMinutes:
+        guildSettings.organiserPrimaryResponseMinutes,
+
+      organiserBackupResponseMinutes:
+        guildSettings.organiserBackupResponseMinutes,
+
+      organiserWarningMinutesBefore:
+        guildSettings.organiserWarningMinutesBefore,
+    })
+    .from(guildSettings)
+    .where(eq(guildSettings.guildId, configuredGuild.id))
+    .limit(1);
+
   /*
    * Existing required configuration.
    */
@@ -274,6 +289,33 @@ async function configureGuild(
   const selectedEventOrganiserRole = interaction.options.getRole(
     "event-organiser-role",
   );
+
+  const primaryResponseMinutesOption = interaction.options.getInteger(
+    "organiser-primary-minutes",
+  );
+
+  const backupResponseMinutesOption = interaction.options.getInteger(
+    "organiser-backup-minutes",
+  );
+
+  const warningMinutesBeforeOption = interaction.options.getInteger(
+    "organiser-warning-minutes",
+  );
+
+  const organiserPrimaryResponseMinutes =
+    primaryResponseMinutesOption ??
+    existingSettings?.organiserPrimaryResponseMinutes ??
+    80;
+
+  const organiserBackupResponseMinutes =
+    backupResponseMinutesOption ??
+    existingSettings?.organiserBackupResponseMinutes ??
+    40;
+
+  const organiserWarningMinutesBefore =
+    warningMinutesBeforeOption ??
+    existingSettings?.organiserWarningMinutesBefore ??
+    15;
 
   /*
    * Fetch the real Discord objects rather than relying only on
@@ -333,6 +375,24 @@ async function configureGuild(
 
   if (selectedEventOrganiserRole && !eventOrganiserRole) {
     issues.push("The selected event-organiser role could not be found.");
+  }
+
+  if (
+    organiserWarningMinutesBefore > 0 &&
+    organiserWarningMinutesBefore >= organiserPrimaryResponseMinutes
+  ) {
+    issues.push(
+      "The organiser warning must occur before the primary response deadline.",
+    );
+  }
+
+  if (
+    organiserWarningMinutesBefore > 0 &&
+    organiserWarningMinutesBefore >= organiserBackupResponseMinutes
+  ) {
+    issues.push(
+      "The organiser warning must occur before the backup response deadline.",
+    );
   }
 
   if (issues.length > 0) {
@@ -500,6 +560,12 @@ async function configureGuild(
 
       defaultRoleRequestChannelId: roleRequestChannel.id,
 
+      organiserPrimaryResponseMinutes,
+
+      organiserBackupResponseMinutes,
+
+      organiserWarningMinutesBefore,
+
       ...(eventAdminChannel
         ? {
             eventAdminChannelId: eventAdminChannel.id,
@@ -523,6 +589,12 @@ async function configureGuild(
         defaultAttendanceChannelId: attendanceChannel.id,
 
         defaultRoleRequestChannelId: roleRequestChannel.id,
+
+        organiserPrimaryResponseMinutes,
+
+        organiserBackupResponseMinutes,
+
+        organiserWarningMinutesBefore,
 
         ...(eventAdminChannel
           ? {
@@ -563,6 +635,18 @@ async function configureGuild(
       `**Event organiser role:** <@&${eventOrganiserRole.id}>`,
     );
   }
+
+  responseLines.push(
+    "",
+    "**Organiser escalation:**",
+    `• Primary response time: ${organiserPrimaryResponseMinutes} minute(s)`,
+    `• Backup response time: ${organiserBackupResponseMinutes} minute(s)`,
+    `• Admin warning: ${
+      organiserWarningMinutesBefore === 0
+        ? "Disabled"
+        : `${organiserWarningMinutesBefore} minute(s) before timeout`
+    }`,
+  );
 
   if (!eventAdminChannel || !eventOrganiserRole) {
     responseLines.push(
@@ -612,6 +696,12 @@ async function configureGuild(
       eventAdminChannelId: eventAdminChannel?.id,
 
       eventOrganiserRoleId: eventOrganiserRole?.id,
+
+      organiserPrimaryResponseMinutes,
+
+      organiserBackupResponseMinutes,
+
+      organiserWarningMinutesBefore,
     },
   });
 }
@@ -765,6 +855,12 @@ async function showSetupStatus(
       roleRequestChannelId: guildSettings.defaultRoleRequestChannelId,
       eventAdminChannelId: guildSettings.eventAdminChannelId,
       eventOrganiserRoleId: guildSettings.eventOrganiserRoleId,
+      organiserPrimaryResponseMinutes:
+        guildSettings.organiserPrimaryResponseMinutes,
+      organiserBackupResponseMinutes:
+        guildSettings.organiserBackupResponseMinutes,
+      organiserWarningMinutesBefore:
+        guildSettings.organiserWarningMinutesBefore,
       botLogChannelId: guildSettings.botLogChannelId,
     })
     .from(guildSettings)
@@ -846,6 +942,17 @@ async function showSetupStatus(
         settings?.attendanceChannelId
           ? `<#${settings.attendanceChannelId}>`
           : "Not set"
+      }`,
+      `• Primary organiser response: ${
+        settings?.organiserPrimaryResponseMinutes ?? 80
+      } minute(s)`,
+      `• Backup organiser response: ${
+        settings?.organiserBackupResponseMinutes ?? 40
+      } minute(s)`,
+      `• Organiser warning: ${
+        (settings?.organiserWarningMinutesBefore ?? 15) === 0
+          ? "Disabled"
+          : `${settings?.organiserWarningMinutesBefore ?? 15} minute(s) before timeout`
       }`,
       `• Role-request channel: ${
         settings?.roleRequestChannelId

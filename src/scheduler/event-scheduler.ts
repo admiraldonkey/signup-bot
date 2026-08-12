@@ -1,5 +1,15 @@
 import { type Client } from "discord.js";
-import { and, eq, inArray, lt, lte, sql, isNull, ne } from "drizzle-orm";
+import {
+  and,
+  eq,
+  inArray,
+  lt,
+  lte,
+  sql,
+  isNull,
+  isNotNull,
+  ne,
+} from "drizzle-orm";
 
 import { db } from "../db/client.js";
 import {
@@ -7,12 +17,27 @@ import {
   events,
   scheduledActions,
   eventReminders,
+  eventOrganiserAssignments,
+  guildSettings,
 } from "../db/schema.js";
 import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
 import { writeAuditLog } from "../audit/audit-log.js";
 import { sendEventCustomMessage } from "../events/event-custom-message.js";
 import { REMINDER_ACTION_PREFIX } from "../reminders/reminder-scheduling.js";
 import { reschedulePendingEventReminders } from "../reminders/reminder-scheduling.js";
+import { escalateAfterFailedOrganiserAssignment } from "../organisers/organiser-escalation.js";
+
+import {
+  ORGANISER_COVER_REQUEST_ACTION_PREFIX,
+  ORGANISER_TIMEOUT_ACTION_PREFIX,
+  ORGANISER_WARNING_ACTION_PREFIX,
+  cancelAllOrganiserEscalationActions,
+} from "../organisers/organiser-scheduling.js";
+
+import {
+  sendOrganiserCoverRequest,
+  sendOrganiserPendingWarning,
+} from "../events/organiser-notification.js";
 
 const POLL_INTERVAL_MS = 15_000;
 
@@ -205,6 +230,43 @@ async function executeAction(
     return;
   }
 
+  if (action.actionKey.startsWith(ORGANISER_WARNING_ACTION_PREFIX)) {
+    const assignmentId = parseActionId(
+      action.actionKey,
+      ORGANISER_WARNING_ACTION_PREFIX,
+    );
+
+    await executeOrganiserWarning(client, action.eventId, assignmentId);
+
+    return;
+  }
+
+  if (action.actionKey.startsWith(ORGANISER_TIMEOUT_ACTION_PREFIX)) {
+    const assignmentId = parseActionId(
+      action.actionKey,
+      ORGANISER_TIMEOUT_ACTION_PREFIX,
+    );
+
+    await executeOrganiserTimeout(client, action.eventId, assignmentId);
+
+    return;
+  }
+
+  if (action.actionKey.startsWith(ORGANISER_COVER_REQUEST_ACTION_PREFIX)) {
+    const sourceAssignmentId = parseActionId(
+      action.actionKey,
+      ORGANISER_COVER_REQUEST_ACTION_PREFIX,
+    );
+
+    await executeOrganiserCoverRequest(
+      client,
+      action.eventId,
+      sourceAssignmentId,
+    );
+
+    return;
+  }
+
   switch (action.actionKey) {
     case "close_attendance":
       await executeCloseAttendance(client, action.eventId);
@@ -217,6 +279,340 @@ async function executeAction(
     default:
       throw new Error(`Unknown scheduled action key: ${action.actionKey}`);
   }
+}
+
+async function executeOrganiserWarning(
+  client: Client<true>,
+  eventId: number,
+  assignmentId: number,
+): Promise<void> {
+  const [assignment] = await db
+    .select({
+      id: eventOrganiserAssignments.id,
+
+      discordUserId: eventOrganiserAssignments.discordUserId,
+
+      slot: eventOrganiserAssignments.slot,
+
+      status: eventOrganiserAssignments.status,
+
+      isCurrent: eventOrganiserAssignments.isCurrent,
+
+      activatedAt: eventOrganiserAssignments.activatedAt,
+
+      responseDeadlineAt: eventOrganiserAssignments.responseDeadlineAt,
+
+      eventName: events.name,
+
+      eventStatus: events.status,
+
+      guildDatabaseId: events.ownerGuildId,
+
+      discordGuildId: discordGuilds.discordGuildId,
+
+      eventAdminChannelId: guildSettings.eventAdminChannelId,
+    })
+    .from(eventOrganiserAssignments)
+    .innerJoin(events, eq(events.id, eventOrganiserAssignments.eventId))
+    .innerJoin(discordGuilds, eq(discordGuilds.id, events.ownerGuildId))
+    .innerJoin(guildSettings, eq(guildSettings.guildId, events.ownerGuildId))
+    .where(
+      and(
+        eq(eventOrganiserAssignments.id, assignmentId),
+
+        eq(eventOrganiserAssignments.eventId, eventId),
+      ),
+    )
+    .limit(1);
+
+  if (!assignment) {
+    return;
+  }
+
+  if (
+    !assignment.isCurrent ||
+    assignment.status !== "pending" ||
+    !assignment.activatedAt ||
+    !assignment.responseDeadlineAt ||
+    assignment.eventStatus === "cancelled" ||
+    assignment.eventStatus === "completed"
+  ) {
+    return;
+  }
+
+  const guild = await client.guilds.fetch(assignment.discordGuildId);
+
+  const sent = await sendOrganiserPendingWarning({
+    guild,
+
+    eventAdminChannelId: assignment.eventAdminChannelId,
+
+    eventId,
+
+    eventName: assignment.eventName,
+
+    discordUserId: assignment.discordUserId,
+
+    slot: assignment.slot,
+
+    responseDeadlineAt: assignment.responseDeadlineAt,
+  });
+
+  if (!sent) {
+    console.warn(
+      `Organiser warning for assignment ${assignment.id} could not be posted because no usable Event Administration channel was available.`,
+    );
+
+    return;
+  }
+
+  await writeAuditLog({
+    guildId: assignment.guildDatabaseId,
+
+    guild,
+
+    actorUserId: null,
+
+    action: "scheduler.organiser_warning",
+
+    outcome: "success",
+
+    summary: `Warned that organiser assignment #${assignment.id} for "${assignment.eventName}" is still awaiting confirmation.`,
+
+    targetType: "organiser_assignment",
+
+    targetId: String(assignment.id),
+  });
+}
+
+async function executeOrganiserTimeout(
+  client: Client<true>,
+  eventId: number,
+  assignmentId: number,
+): Promise<void> {
+  const [assignment] = await db
+    .select({
+      id: eventOrganiserAssignments.id,
+
+      eventName: events.name,
+
+      eventStatus: events.status,
+
+      guildDatabaseId: events.ownerGuildId,
+
+      discordGuildId: discordGuilds.discordGuildId,
+    })
+    .from(eventOrganiserAssignments)
+    .innerJoin(events, eq(events.id, eventOrganiserAssignments.eventId))
+    .innerJoin(discordGuilds, eq(discordGuilds.id, events.ownerGuildId))
+    .where(
+      and(
+        eq(eventOrganiserAssignments.id, assignmentId),
+
+        eq(eventOrganiserAssignments.eventId, eventId),
+      ),
+    )
+    .limit(1);
+
+  if (!assignment) {
+    return;
+  }
+
+  if (
+    assignment.eventStatus === "cancelled" ||
+    assignment.eventStatus === "completed"
+  ) {
+    return;
+  }
+
+  const now = new Date();
+
+  const [timedOut] = await db
+    .update(eventOrganiserAssignments)
+    .set({
+      status: "timed_out",
+
+      isCurrent: false,
+
+      endedAt: now,
+
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(eventOrganiserAssignments.id, assignment.id),
+
+        eq(eventOrganiserAssignments.isCurrent, true),
+
+        eq(eventOrganiserAssignments.status, "pending"),
+
+        isNotNull(eventOrganiserAssignments.activatedAt),
+      ),
+    )
+    .returning({
+      id: eventOrganiserAssignments.id,
+    });
+
+  /*
+   * Confirmation, decline or replacement won the race.
+   */
+  if (!timedOut) {
+    return;
+  }
+
+  const guild = await client.guilds.fetch(assignment.discordGuildId);
+
+  await writeAuditLog({
+    guildId: assignment.guildDatabaseId,
+
+    guild,
+
+    actorUserId: null,
+
+    action: "scheduler.organiser_timeout",
+
+    outcome: "success",
+
+    summary: `Organiser assignment #${assignment.id} for "${assignment.eventName}" timed out without confirmation.`,
+
+    targetType: "organiser_assignment",
+
+    targetId: String(assignment.id),
+  });
+
+  await escalateAfterFailedOrganiserAssignment({
+    guild,
+
+    eventId,
+
+    failedAssignmentId: assignment.id,
+
+    trigger: "timed_out",
+  });
+}
+
+async function executeOrganiserCoverRequest(
+  client: Client<true>,
+  eventId: number,
+  sourceAssignmentId: number,
+): Promise<void> {
+  const [event] = await db
+    .select({
+      id: events.id,
+
+      name: events.name,
+
+      status: events.status,
+
+      guildDatabaseId: events.ownerGuildId,
+
+      discordGuildId: discordGuilds.discordGuildId,
+
+      eventAdminChannelId: guildSettings.eventAdminChannelId,
+
+      eventOrganiserRoleId: guildSettings.eventOrganiserRoleId,
+    })
+    .from(events)
+    .innerJoin(discordGuilds, eq(discordGuilds.id, events.ownerGuildId))
+    .innerJoin(guildSettings, eq(guildSettings.guildId, events.ownerGuildId))
+    .where(eq(events.id, eventId))
+    .limit(1);
+
+  if (!event) {
+    return;
+  }
+
+  if (event.status === "cancelled" || event.status === "completed") {
+    return;
+  }
+
+  const [sourceAssignment] = await db
+    .select({
+      status: eventOrganiserAssignments.status,
+    })
+    .from(eventOrganiserAssignments)
+    .where(
+      and(
+        eq(eventOrganiserAssignments.id, sourceAssignmentId),
+
+        eq(eventOrganiserAssignments.eventId, event.id),
+      ),
+    )
+    .limit(1);
+
+  if (
+    !sourceAssignment ||
+    (sourceAssignment.status !== "declined" &&
+      sourceAssignment.status !== "timed_out")
+  ) {
+    return;
+  }
+
+  const [activeAssignment] = await db
+    .select({
+      id: eventOrganiserAssignments.id,
+    })
+    .from(eventOrganiserAssignments)
+    .where(
+      and(
+        eq(eventOrganiserAssignments.eventId, event.id),
+
+        eq(eventOrganiserAssignments.isCurrent, true),
+
+        isNotNull(eventOrganiserAssignments.activatedAt),
+
+        inArray(eventOrganiserAssignments.status, ["pending", "confirmed"]),
+      ),
+    )
+    .limit(1);
+
+  if (activeAssignment) {
+    return;
+  }
+
+  const guild = await client.guilds.fetch(event.discordGuildId);
+
+  const delivery = await sendOrganiserCoverRequest({
+    guild,
+
+    eventId: event.id,
+
+    eventName: event.name,
+
+    eventAdminChannelId: event.eventAdminChannelId,
+
+    eventOrganiserRoleId: event.eventOrganiserRoleId,
+  });
+
+  if (delivery === "failed") {
+    throw new Error(
+      `Cover request for event ${event.id} could not be delivered. Check the Event Administration channel and Event Organiser role configuration.`,
+    );
+  }
+
+  await writeAuditLog({
+    guildId: event.guildDatabaseId,
+
+    guild,
+
+    actorUserId: null,
+
+    action: "scheduler.organiser_cover_request",
+
+    outcome: "success",
+
+    summary: `Requested organiser cover for "${event.name}" (#${event.id}).`,
+
+    targetType: "event",
+
+    targetId: String(event.id),
+
+    details: {
+      sourceAssignmentId,
+
+      delivery,
+    },
+  });
 }
 
 async function executeCloseAttendance(
@@ -331,6 +727,12 @@ async function executeCompleteEvent(
         inArray(scheduledActions.status, ["pending", "processing"]),
       ),
     );
+
+  /*
+   * An event which has finished no longer needs organiser warnings,
+   * timeouts or cover requests.
+   */
+  await cancelAllOrganiserEscalationActions(eventId);
 
   await refreshEventMessage(client, event.discordGuildId, eventId);
 
@@ -748,4 +1150,14 @@ async function markEventReminderMissed(
   console.warn(
     `Reminder ${reminder.id} for event ${reminder.eventId} was missed.`,
   );
+}
+
+function parseActionId(actionKey: string, prefix: string): number {
+  const id = Number(actionKey.slice(prefix.length));
+
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw new Error(`Invalid scheduled action key: ${actionKey}`);
+  }
+
+  return id;
 }

@@ -3,6 +3,7 @@ import {
   ButtonBuilder,
   ButtonStyle,
   ChannelType,
+  PermissionFlagsBits,
   type Guild,
 } from "discord.js";
 
@@ -181,4 +182,164 @@ export async function sendOrganiserAssignmentNotification(input: {
 
     return "failed";
   }
+}
+
+export function buildOrganiserCoverClaimCustomId(eventId: number): string {
+  return `organiser-cover:${eventId}`;
+}
+
+export function parseOrganiserCoverClaimCustomId(customId: string): {
+  eventId: number;
+} | null {
+  const match = /^organiser-cover:(\d+)$/.exec(customId);
+
+  if (!match) {
+    return null;
+  }
+
+  const eventId = Number(match[1]);
+
+  if (!Number.isSafeInteger(eventId) || eventId <= 0) {
+    return null;
+  }
+
+  return {
+    eventId,
+  };
+}
+
+export async function sendOrganiserPendingWarning(input: {
+  guild: Guild;
+
+  eventAdminChannelId: string | null;
+
+  eventId: number;
+
+  eventName: string;
+
+  discordUserId: string;
+
+  slot: OrganiserAssignmentSlot;
+
+  responseDeadlineAt: Date;
+}): Promise<boolean> {
+  if (!input.eventAdminChannelId) {
+    return false;
+  }
+
+  const channel = await input.guild.channels.fetch(input.eventAdminChannelId);
+
+  if (
+    !channel ||
+    channel.type !== ChannelType.GuildText ||
+    !channel.isSendable()
+  ) {
+    return false;
+  }
+
+  const deadlineTimestamp = Math.floor(
+    input.responseDeadlineAt.getTime() / 1000,
+  );
+
+  await channel.send({
+    content: [
+      "⚠️ **Organiser response warning**",
+
+      "",
+
+      `<@${input.discordUserId}> has not yet confirmed as the **${formatSlot(
+        input.slot,
+      )}** for **${input.eventName}** (#${input.eventId}).`,
+
+      `Response deadline: <t:${deadlineTimestamp}:F> (<t:${deadlineTimestamp}:R>)`,
+    ].join("\n"),
+
+    /*
+     * Show the member mention but do not generate another ping.
+     */
+    allowedMentions: {
+      parse: [],
+    },
+  });
+
+  return true;
+}
+
+export type CoverRequestDelivery = "pinged" | "posted_without_ping" | "failed";
+
+export async function sendOrganiserCoverRequest(input: {
+  guild: Guild;
+
+  eventId: number;
+
+  eventName: string;
+
+  eventAdminChannelId: string | null;
+
+  eventOrganiserRoleId: string | null;
+}): Promise<CoverRequestDelivery> {
+  if (!input.eventAdminChannelId || !input.eventOrganiserRoleId) {
+    return "failed";
+  }
+
+  const [channel, role] = await Promise.all([
+    input.guild.channels.fetch(input.eventAdminChannelId),
+
+    input.guild.roles.fetch(input.eventOrganiserRoleId),
+  ]);
+
+  if (
+    !channel ||
+    channel.type !== ChannelType.GuildText ||
+    !channel.isSendable() ||
+    !role
+  ) {
+    return "failed";
+  }
+
+  const botMember =
+    input.guild.members.me ?? (await input.guild.members.fetchMe());
+
+  const permissions = channel.permissionsFor(botMember);
+
+  const canPingRole =
+    role.mentionable || permissions.has(PermissionFlagsBits.MentionEveryone);
+
+  await channel.send({
+    content: [
+      canPingRole ? `<@&${role.id}>` : `**${role.name}**`,
+
+      "",
+
+      "🚨 **Event organiser cover required**",
+
+      "",
+
+      `**${input.eventName}** (#${input.eventId}) no longer has an available assigned organiser.`,
+
+      "An eligible Event Organiser can claim responsibility below.",
+    ].join("\n"),
+
+    components: [
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(buildOrganiserCoverClaimCustomId(input.eventId))
+          .setLabel("Claim Event")
+          .setEmoji("🫡")
+          .setStyle(ButtonStyle.Primary),
+      ),
+    ],
+
+    allowedMentions: canPingRole
+      ? {
+          parse: [],
+
+          roles: [role.id],
+        }
+      : {
+          parse: [],
+        },
+  });
+
+  return canPingRole ? "pinged" : "posted_without_ping";
 }

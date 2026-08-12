@@ -1,5 +1,5 @@
 import { type ChatInputCommandInteraction } from "discord.js";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, like, or } from "drizzle-orm";
 
 import { writeAuditLog } from "../audit/audit-log.js";
 import {
@@ -7,12 +7,24 @@ import {
   memberCanManageEvents,
 } from "../auth/event-admin.js";
 import { db } from "../db/client.js";
-import { eventOrganiserAssignments, events } from "../db/schema.js";
+import {
+  eventOrganiserAssignments,
+  events,
+  scheduledActions,
+} from "../db/schema.js";
 import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
 import {
   type OrganiserNotificationDelivery,
   sendOrganiserAssignmentNotification,
 } from "../events/organiser-notification.js";
+import {
+  buildOrganiserResponseActionValues,
+  calculateOrganiserResponseDeadline,
+  cancelOrganiserResponseActions,
+  ORGANISER_COVER_REQUEST_ACTION_PREFIX,
+  ORGANISER_TIMEOUT_ACTION_PREFIX,
+  ORGANISER_WARNING_ACTION_PREFIX,
+} from "../organisers/organiser-scheduling.js";
 
 type CachedInteraction = ChatInputCommandInteraction<"cached">;
 
@@ -79,16 +91,26 @@ export async function setEventOrganiser(
     return;
   }
 
-  /*
-   * A backup without a primary has no meaningful relationship to
-   * anything yet.
-   */
+  if (
+    context.eventOrganiserRoleId &&
+    !member.roles.cache.has(context.eventOrganiserRoleId)
+  ) {
+    await interaction.editReply(
+      "That member does not have the configured Event Organiser role.",
+    );
+
+    return;
+  }
+
   if (slot === "backup") {
     const currentPrimary = await findCurrentAssignment(event.id, "primary");
 
-    if (!currentPrimary) {
+    if (
+      !currentPrimary ||
+      !["pending", "confirmed"].includes(currentPrimary.status)
+    ) {
       await interaction.editReply(
-        "Assign a primary organiser before assigning a backup organiser.",
+        "Assign an active primary organiser before assigning a backup organiser.",
       );
 
       return;
@@ -139,6 +161,85 @@ export async function setEventOrganiser(
         .where(eq(eventOrganiserAssignments.id, existing.id));
     }
 
+    /*
+     * A newly assigned primary supersedes any currently-active
+     * backup or cover organiser.
+     *
+     * Dormant backups are deliberately retained.
+     */
+    if (slot === "primary") {
+      await transaction
+        .update(eventOrganiserAssignments)
+        .set({
+          status: "replaced",
+
+          isCurrent: false,
+
+          endedAt: now,
+
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(eventOrganiserAssignments.eventId, event.id),
+
+            eq(eventOrganiserAssignments.isCurrent, true),
+
+            isNotNull(eventOrganiserAssignments.activatedAt),
+
+            inArray(eventOrganiserAssignments.slot, ["backup", "cover"]),
+          ),
+        );
+
+      /*
+       * Cancel old organiser escalation work, including a cover
+       * request which may have just become unnecessary.
+       */
+      await transaction
+        .update(scheduledActions)
+        .set({
+          status: "cancelled",
+
+          lockedAt: null,
+
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(scheduledActions.eventId, event.id),
+
+            inArray(scheduledActions.status, ["pending", "processing"]),
+
+            or(
+              like(
+                scheduledActions.actionKey,
+                `${ORGANISER_WARNING_ACTION_PREFIX}%`,
+              ),
+
+              like(
+                scheduledActions.actionKey,
+                `${ORGANISER_TIMEOUT_ACTION_PREFIX}%`,
+              ),
+
+              like(
+                scheduledActions.actionKey,
+                `${ORGANISER_COVER_REQUEST_ACTION_PREFIX}%`,
+              ),
+            ),
+          ),
+        );
+    }
+
+    const activatedAt = slot === "primary" ? now : null;
+
+    const responseDeadlineAt =
+      slot === "primary"
+        ? calculateOrganiserResponseDeadline(
+            now,
+            context.organiserPrimaryResponseMinutes,
+          )
+        : null;
+
     const [created] = await transaction
       .insert(eventOrganiserAssignments)
       .values({
@@ -156,6 +257,10 @@ export async function setEventOrganiser(
 
         assignedByUserId: interaction.user.id,
 
+        activatedAt,
+
+        responseDeadlineAt,
+
         updatedAt: now,
       })
       .returning({
@@ -168,17 +273,33 @@ export async function setEventOrganiser(
       );
     }
 
+    if (slot === "primary") {
+      if (!activatedAt || !responseDeadlineAt) {
+        throw new Error(
+          "The primary organiser activation times were not created.",
+        );
+      }
+
+      const actions = buildOrganiserResponseActionValues({
+        eventId: event.id,
+
+        assignmentId: created.id,
+
+        activatedAt,
+
+        responseDeadlineAt,
+
+        warningMinutesBefore: context.organiserWarningMinutesBefore,
+      });
+
+      await transaction.insert(scheduledActions).values(actions);
+    }
+
     return created;
   });
 
   let notification: OrganiserNotificationDelivery | null = null;
 
-  /*
-   * Primary organisers are contacted immediately.
-   *
-   * Backups remain dormant until the escalation system activates
-   * them in the next phase.
-   */
   if (slot === "primary") {
     notification = await sendOrganiserAssignmentNotification({
       guild: interaction.guild,
@@ -234,7 +355,7 @@ export async function setEventOrganiser(
   if (slot === "backup") {
     response.push(
       "",
-      "The backup has been stored on standby and has not been contacted yet.",
+      "The backup has been stored on standby and will only be contacted if the primary becomes unavailable.",
     );
   } else {
     response.push("", formatNotificationDelivery(notification));
@@ -319,7 +440,9 @@ export async function clearEventOrganiser(
       ),
     );
 
-  if (slot === "primary") {
+  await cancelOrganiserResponseActions(event.id, assignment.id);
+
+  if (assignment.activatedAt) {
     await refreshAttendanceMessage(interaction.guild, event.id);
   }
 
@@ -439,6 +562,8 @@ async function findCurrentAssignment(
       discordUserId: eventOrganiserAssignments.discordUserId,
 
       status: eventOrganiserAssignments.status,
+
+      activatedAt: eventOrganiserAssignments.activatedAt,
     })
     .from(eventOrganiserAssignments)
     .where(

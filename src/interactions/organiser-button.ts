@@ -1,5 +1,5 @@
 import { type ButtonInteraction, MessageFlags } from "discord.js";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, ne } from "drizzle-orm";
 
 import { writeAuditLog } from "../audit/audit-log.js";
 import { db } from "../db/client.js";
@@ -7,19 +7,49 @@ import {
   discordGuilds,
   eventOrganiserAssignments,
   events,
+  guildSettings,
 } from "../db/schema.js";
 import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
-import { parseOrganiserResponseCustomId } from "../events/organiser-notification.js";
+import {
+  parseOrganiserCoverClaimCustomId,
+  parseOrganiserResponseCustomId,
+} from "../events/organiser-notification.js";
+import {
+  escalateAfterFailedOrganiserAssignment,
+  type OrganiserEscalationResult,
+} from "../organisers/organiser-escalation.js";
+import { cancelOrganiserResponseActions } from "../organisers/organiser-scheduling.js";
 
 export async function handleOrganiserButton(
   interaction: ButtonInteraction,
 ): Promise<boolean> {
-  const parsed = parseOrganiserResponseCustomId(interaction.customId);
+  const response = parseOrganiserResponseCustomId(interaction.customId);
 
-  if (!parsed) {
-    return false;
+  if (response) {
+    await handleAssignmentResponse(interaction, response);
+
+    return true;
   }
 
+  const cover = parseOrganiserCoverClaimCustomId(interaction.customId);
+
+  if (cover) {
+    await handleCoverClaim(interaction, cover.eventId);
+
+    return true;
+  }
+
+  return false;
+}
+
+async function handleAssignmentResponse(
+  interaction: ButtonInteraction,
+  parsed: {
+    assignmentId: number;
+
+    action: "confirm" | "decline";
+  },
+): Promise<void> {
   await interaction.deferReply({
     flags: MessageFlags.Ephemeral,
   });
@@ -38,6 +68,8 @@ export async function handleOrganiserButton(
 
       isCurrent: eventOrganiserAssignments.isCurrent,
 
+      activatedAt: eventOrganiserAssignments.activatedAt,
+
       eventName: events.name,
 
       eventStatus: events.status,
@@ -55,18 +87,15 @@ export async function handleOrganiserButton(
   if (!assignment) {
     await interaction.editReply("This organiser assignment no longer exists.");
 
-    return true;
+    return;
   }
 
-  /*
-   * A copied button cannot be used by somebody else.
-   */
   if (interaction.user.id !== assignment.discordUserId) {
     await interaction.editReply(
       "This organiser confirmation belongs to another member.",
     );
 
-    return true;
+    return;
   }
 
   if (!assignment.isCurrent) {
@@ -74,7 +103,15 @@ export async function handleOrganiserButton(
       "This organiser assignment is no longer current.",
     );
 
-    return true;
+    return;
+  }
+
+  if (!assignment.activatedAt) {
+    await interaction.editReply(
+      "This organiser assignment is currently on standby and is not awaiting a response.",
+    );
+
+    return;
   }
 
   if (assignment.status !== "pending") {
@@ -84,7 +121,7 @@ export async function handleOrganiserButton(
       )}**.`,
     );
 
-    return true;
+    return;
   }
 
   if (
@@ -95,26 +132,35 @@ export async function handleOrganiserButton(
       "This event is no longer accepting organiser responses.",
     );
 
-    return true;
+    return;
   }
-
-  const newStatus = parsed.action === "confirm" ? "confirmed" : "declined";
 
   const now = new Date();
 
-  /*
-   * Include current/status checks in the UPDATE itself so two
-   * nearly-simultaneous clicks cannot both succeed.
-   */
+  const updateValues =
+    parsed.action === "confirm"
+      ? {
+          status: "confirmed" as const,
+
+          respondedAt: now,
+
+          updatedAt: now,
+        }
+      : {
+          status: "declined" as const,
+
+          isCurrent: false,
+
+          respondedAt: now,
+
+          endedAt: now,
+
+          updatedAt: now,
+        };
+
   const [updatedAssignment] = await db
     .update(eventOrganiserAssignments)
-    .set({
-      status: newStatus,
-
-      respondedAt: now,
-
-      updatedAt: now,
-    })
+    .set(updateValues)
     .where(
       and(
         eq(eventOrganiserAssignments.id, assignment.id),
@@ -122,6 +168,8 @@ export async function handleOrganiserButton(
         eq(eventOrganiserAssignments.isCurrent, true),
 
         eq(eventOrganiserAssignments.status, "pending"),
+
+        isNotNull(eventOrganiserAssignments.activatedAt),
       ),
     )
     .returning({
@@ -133,13 +181,11 @@ export async function handleOrganiserButton(
       "This organiser assignment changed before your response could be saved. Please check the current event status.",
     );
 
-    return true;
+    return;
   }
 
-  /*
-   * Remove the now-useless buttons from the DM/fallback message.
-   * Failure here is cosmetic; the database is authoritative.
-   */
+  await cancelOrganiserResponseActions(assignment.eventId, assignment.id);
+
   await interaction.message
     .edit({
       components: [],
@@ -162,20 +208,29 @@ export async function handleOrganiserButton(
     );
   }
 
-  /*
-   * Primary organiser status is visible on the public event post.
-   *
-   * Backup assignments are deliberately not public/active yet.
-   */
-  if (guild && assignment.slot === "primary") {
-    await refreshAttendanceMessage(guild, assignment.eventId).catch(
-      (error: unknown) => {
-        console.error(
-          `Failed to refresh event ${assignment.eventId} after organiser response:`,
-          error,
-        );
-      },
-    );
+  let escalation: OrganiserEscalationResult | null = null;
+
+  if (guild) {
+    if (parsed.action === "confirm") {
+      await refreshAttendanceMessage(guild, assignment.eventId).catch(
+        (error: unknown) => {
+          console.error(
+            `Failed to refresh event ${assignment.eventId} after organiser confirmation:`,
+            error,
+          );
+        },
+      );
+    } else {
+      escalation = await escalateAfterFailedOrganiserAssignment({
+        guild,
+
+        eventId: assignment.eventId,
+
+        failedAssignmentId: assignment.id,
+
+        trigger: "declined",
+      });
+    }
   }
 
   await writeAuditLog({
@@ -207,16 +262,287 @@ export async function handleOrganiserButton(
       slot: assignment.slot,
 
       organiserUserId: assignment.discordUserId,
+
+      escalation: escalation?.kind ?? null,
+    },
+  });
+
+  if (parsed.action === "confirm") {
+    await interaction.editReply(
+      `✅ You are confirmed as the organiser for **${assignment.eventName}**.`,
+    );
+
+    return;
+  }
+
+  await interaction.editReply(
+    [
+      `❌ You have declined the organiser assignment for **${assignment.eventName}**.`,
+
+      "",
+
+      formatEscalationResult(escalation),
+    ].join("\n"),
+  );
+}
+
+async function handleCoverClaim(
+  interaction: ButtonInteraction,
+  eventId: number,
+): Promise<void> {
+  await interaction.deferReply({
+    flags: MessageFlags.Ephemeral,
+  });
+
+  if (!interaction.inCachedGuild()) {
+    await interaction.editReply(
+      "Event cover can only be claimed inside the event's Discord server.",
+    );
+
+    return;
+  }
+
+  const [event] = await db
+    .select({
+      id: events.id,
+
+      name: events.name,
+
+      status: events.status,
+
+      guildDatabaseId: events.ownerGuildId,
+
+      discordGuildId: discordGuilds.discordGuildId,
+
+      eventOrganiserRoleId: guildSettings.eventOrganiserRoleId,
+    })
+    .from(events)
+    .innerJoin(discordGuilds, eq(discordGuilds.id, events.ownerGuildId))
+    .leftJoin(guildSettings, eq(guildSettings.guildId, events.ownerGuildId))
+    .where(eq(events.id, eventId))
+    .limit(1);
+
+  if (!event || event.discordGuildId !== interaction.guildId) {
+    await interaction.editReply(
+      "This cover request no longer belongs to an available event in this server.",
+    );
+
+    return;
+  }
+
+  if (event.status === "cancelled" || event.status === "completed") {
+    await interaction.editReply(
+      "This event no longer requires organiser cover.",
+    );
+
+    return;
+  }
+
+  if (!event.eventOrganiserRoleId) {
+    await interaction.editReply(
+      "This server does not currently have an Event Organiser role configured.",
+    );
+
+    return;
+  }
+
+  if (!interaction.member.roles.cache.has(event.eventOrganiserRoleId)) {
+    await interaction.editReply(
+      "Only members with the configured Event Organiser role can claim event cover.",
+    );
+
+    return;
+  }
+
+  const [activeAssignment] = await db
+    .select({
+      id: eventOrganiserAssignments.id,
+    })
+    .from(eventOrganiserAssignments)
+    .where(
+      and(
+        eq(eventOrganiserAssignments.eventId, event.id),
+
+        eq(eventOrganiserAssignments.isCurrent, true),
+
+        isNotNull(eventOrganiserAssignments.activatedAt),
+
+        inArray(eventOrganiserAssignments.status, ["pending", "confirmed"]),
+      ),
+    )
+    .limit(1);
+
+  if (activeAssignment) {
+    await interaction.editReply(
+      "This event already has an active organiser assignment.",
+    );
+
+    return;
+  }
+
+  const now = new Date();
+
+  const [coverAssignment] = await db
+    .insert(eventOrganiserAssignments)
+    .values({
+      eventId: event.id,
+
+      slot: "cover",
+
+      discordUserId: interaction.user.id,
+
+      displayNameSnapshot: interaction.member.displayName,
+
+      status: "confirmed",
+
+      isCurrent: true,
+
+      assignedByUserId: interaction.user.id,
+
+      activatedAt: now,
+
+      responseDeadlineAt: null,
+
+      respondedAt: now,
+
+      updatedAt: now,
+    })
+    /*
+     * The partial unique current-cover constraint makes concurrent
+     * Claim Event presses race safely.
+     */
+    .onConflictDoNothing()
+    .returning({
+      id: eventOrganiserAssignments.id,
+    });
+
+  if (!coverAssignment) {
+    await interaction.editReply(
+      "Another organiser claimed this event before your response was saved.",
+    );
+
+    return;
+  }
+
+  /*
+   * Defensive second check for a simultaneously-created primary or
+   * backup assignment, which uses a different slot and therefore
+   * would not collide with the cover unique constraint.
+   */
+  const [conflictingAssignment] = await db
+    .select({
+      id: eventOrganiserAssignments.id,
+    })
+    .from(eventOrganiserAssignments)
+    .where(
+      and(
+        eq(eventOrganiserAssignments.eventId, event.id),
+
+        ne(eventOrganiserAssignments.id, coverAssignment.id),
+
+        eq(eventOrganiserAssignments.isCurrent, true),
+
+        isNotNull(eventOrganiserAssignments.activatedAt),
+
+        inArray(eventOrganiserAssignments.status, ["pending", "confirmed"]),
+      ),
+    )
+    .limit(1);
+
+  if (conflictingAssignment) {
+    await db
+      .update(eventOrganiserAssignments)
+      .set({
+        status: "replaced",
+
+        isCurrent: false,
+
+        endedAt: now,
+
+        updatedAt: now,
+      })
+      .where(eq(eventOrganiserAssignments.id, coverAssignment.id));
+
+    await interaction.editReply(
+      "Another active organiser assignment was created while you were claiming cover, so your claim was not applied.",
+    );
+
+    return;
+  }
+
+  await interaction.message
+    .edit({
+      content: [
+        interaction.message.content,
+
+        "",
+
+        `✅ **Cover claimed by <@${interaction.user.id}>.**`,
+      ].join("\n"),
+
+      components: [],
+
+      allowedMentions: {
+        parse: [],
+      },
+    })
+    .catch((error: unknown) => {
+      console.error(
+        `Failed to update cover-request message for event ${event.id}:`,
+        error,
+      );
+    });
+
+  await refreshAttendanceMessage(interaction.guild, event.id);
+
+  await writeAuditLog({
+    guildId: event.guildDatabaseId,
+
+    guild: interaction.guild,
+
+    actorUserId: interaction.user.id,
+
+    action: "event.organiser.cover.claim",
+
+    outcome: "success",
+
+    summary: `${interaction.member.displayName} claimed organiser cover for "${event.name}" (#${event.id}).`,
+
+    targetType: "organiser_assignment",
+
+    targetId: String(coverAssignment.id),
+
+    details: {
+      eventId: event.id,
+
+      organiserUserId: interaction.user.id,
     },
   });
 
   await interaction.editReply(
-    parsed.action === "confirm"
-      ? `✅ You are confirmed as the organiser for **${assignment.eventName}**.`
-      : `❌ You have declined the organiser assignment for **${assignment.eventName}**.`,
+    `✅ You are now the confirmed organiser for **${event.name}**.`,
   );
+}
 
-  return true;
+function formatEscalationResult(
+  result: OrganiserEscalationResult | null,
+): string {
+  switch (result?.kind) {
+    case "backup_activated":
+      return "The backup organiser has now been contacted.";
+
+    case "cover_queued":
+      return "No standby backup was available, so an Event Organiser cover request has been queued.";
+
+    case "already_resolved":
+      return "Another active organiser assignment is already in place.";
+
+    case "event_inactive":
+      return "The event is no longer active, so no further escalation was performed.";
+
+    default:
+      return "No further organiser escalation could be performed automatically.";
+  }
 }
 
 function formatStatus(

@@ -104,6 +104,18 @@ export const guildSettings = pgTable("guild_settings", {
 
   eventOrganiserRoleId: text("event_organiser_role_id"),
 
+  organiserPrimaryResponseMinutes: integer("organiser_primary_response_minutes")
+    .notNull()
+    .default(80),
+
+  organiserBackupResponseMinutes: integer("organiser_backup_response_minutes")
+    .notNull()
+    .default(40),
+
+  organiserWarningMinutesBefore: integer("organiser_warning_minutes_before")
+    .notNull()
+    .default(15),
+
   defaultAttendanceChannelId: text("default_attendance_channel_id"),
 
   eventAdminChannelId: text("event_admin_channel_id"),
@@ -920,6 +932,14 @@ export const eventOrganiserAssignments = pgTable(
     })
       .notNull()
       .defaultNow(),
+
+    activatedAt: timestamp("activated_at", {
+      withTimezone: true,
+    }),
+
+    responseDeadlineAt: timestamp("response_deadline_at", {
+      withTimezone: true,
+    }),
 
     respondedAt: timestamp("responded_at", {
       withTimezone: true,
