@@ -29,6 +29,7 @@ export interface AttendanceEventDisplay {
   timezone: string;
   showDetailedDeadline: boolean;
   startsAt: Date;
+  signupsEnabled: boolean;
   attendanceClosesAt: Date | null;
   status: "scheduled" | "open" | "closed" | "cancelled" | "completed";
 }
@@ -101,9 +102,15 @@ export function buildAttendanceEmbed(
       ? null
       : formatInEventTimezone(event.attendanceClosesAt, event.timezone);
 
-  const description =
-    event.description?.trim() ||
-    "Use the buttons below to record your attendance.";
+  const customDescription = event.description?.trim();
+
+  const descriptionParts: string[] = [];
+
+  if (customDescription) {
+    descriptionParts.push(customDescription);
+  } else if (event.signupsEnabled) {
+    descriptionParts.push("Use the buttons below to record your attendance.");
+  }
 
   const deadlineValue =
     event.status === "cancelled"
@@ -140,64 +147,113 @@ export function buildAttendanceEmbed(
     event.status === "cancelled"
       ? ["🚫 **Event cancelled**"].join("\n")
       : [
-          `<t:${startTimestamp}:F> (your local time)`,
+          // `<t:${startTimestamp}:F> (your local time)`,
+          `<t:${startTimestamp}:F>`,
           `<t:${startTimestamp}:R>`,
         ].join("\n");
 
-  return new EmbedBuilder()
-    .setTitle(getEventTitle(event))
-    .setDescription(description)
-    .addFields(
-      {
-        name: "Event Type",
-        value: event.eventTypeName,
-        inline: true,
-      },
-      {
-        name: "Region",
-        value: event.audienceName,
-        inline: true,
-      },
-      {
-        name: "Host Timezone",
-        value: `\`${event.timezone}\``,
-        inline: true,
-      },
-      {
-        name: "Scheduled Time",
-        value: [scheduledStartText, "\n"].join("\n"),
-        inline: false,
-      },
-      {
-        name: "Starts At",
-        value: startDisplayValue,
-        inline: false,
-      },
-      {
-        name: "Sign-ups Close",
-        value: [deadlineValue, "\n"].join("\n"),
-        inline: !event.showDetailedDeadline,
-      },
-      {
-        name: "Attendance",
-        value: [
-          `✅ **Attending:** ${counts.attending}`,
-          `❔ **Tentative:** ${counts.tentative}`,
-          `❌ **Not attending:** ${counts.not_attending}`,
-        ].join("\n"),
-      },
-      {
-        name: "Status",
-        value: event.status
-          .replace("_", " ")
-          .replace(/\b\w/g, (character) => character.toUpperCase()),
-        inline: true,
-      },
-    )
+  const embed = new EmbedBuilder().setTitle(getEventTitle(event));
+  // if (description) {
+  //   embed.setDescription(description);
+  // }
+  // /*
+  //  * Fields shown for every event.
+  //  */
+  // embed.addFields(
+  //   // {
+  //   //   name: "Event & Region",
+  //   //   value: `${event.eventTypeName} • ${event.audienceName}`,
+  //   //   inline: true,
+  //   // },
+  //   // {
+  //   //   name: "Scheduled Time",
+  //   //   value: [scheduledStartText, "\n"].join("\n"),
+  //   //   inline: false,
+  //   // },
+  //   {
+  //     name: "\u200B",
+  //     value: "",
+  //     inline: false,
+  //   },
+  //   {
+  //     name: "Details",
+  //     value: `${event.eventTypeName} • ${event.audienceName}  •  ${scheduledStartText}`,
+  //     inline: false,
+  //   },
+  //   {
+  //     name: "\u200B",
+  //     value: "",
+  //     inline: false,
+  //   },
+  //   {
+  //     name: "Starts At",
+  //     value: startDisplayValue,
+  //     inline: false,
+  //   },
+  // );
+
+  // /*
+  //  * Attendance-specific information only appears when this
+  //  * particular event actually uses signups.
+  //  */
+  // if (event.signupsEnabled) {
+  //   embed.addFields(
+  //     {
+  //       name: "\u200B",
+  //       value: "",
+  //       inline: false,
+  //     },
+  //     {
+  //       name: "Sign-ups Close",
+  //       value: [deadlineValue, "\n"].join("\n"),
+  //       inline: !event.showDetailedDeadline,
+  //     },
+  //     {
+  //       name: "\u200B",
+  //       value: "",
+  //       inline: false,
+  //     },
+  //     {
+  //       name: "Attendance",
+  //       value: `✅ ${counts.attending}   •   ❔ ${counts.tentative}   •   ❌ ${counts.not_attending}`,
+  //     },
+  //     {
+  //       name: "\u200B",
+  //       value: "",
+  //       inline: false,
+  //     },
+  //   );
+  // }
+
+  descriptionParts.push(
+    [
+      "**Details**",
+      `${event.eventTypeName} • ${event.audienceName} • ${scheduledStartText}`,
+    ].join("\n"),
+  );
+
+  descriptionParts.push(["**Starts At**", startDisplayValue].join("\n"));
+
+  if (event.signupsEnabled) {
+    descriptionParts.push(["**Sign-ups Close**", deadlineValue].join("\n"));
+
+    descriptionParts.push(
+      [
+        "**Attendance**",
+        `✅ ${counts.attending} • ❔ ${counts.tentative} • ❌ ${counts.not_attending}`,
+        "",
+      ].join("\n"),
+    );
+  }
+
+  embed.setDescription(descriptionParts.join("\n\n"));
+  embed
     .setFooter({
-      text: `Event ID: ${event.id} • Last updated`,
+      text: `\u200B\nEvent ID: ${event.id} • Last updated`,
     })
     .setTimestamp(new Date());
+
+  return embed;
 }
 
 export function buildAttendanceButtons(

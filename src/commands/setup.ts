@@ -657,7 +657,8 @@ async function configureEventRegions(
     },
     {
       code: "global",
-      name: "EU & NA / Global",
+      // name: "EU & NA / Global",
+      name: "EU & NA",
       defaultTimezone: configuredGuild.timezone,
     },
   ] as const;
@@ -698,7 +699,8 @@ async function configureEventRegions(
       "**NA**",
       "Default timezone: `America/New_York`",
       "",
-      "**EU & NA / Global**",
+      // "**EU & NA / Global**",
+      "**EU & NA**",
       `Default timezone: \`${configuredGuild.timezone}\``,
       "",
       "Ping roles are selected separately when each event is created.",

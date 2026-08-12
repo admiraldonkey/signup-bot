@@ -341,14 +341,17 @@ async function createEvent(
 
   const timeText = interaction.options.getString("time", true);
 
+  const signupsEnabled = interaction.options.getBoolean("signups") ?? true;
+
   const durationMinutes =
-    interaction.options.getInteger("duration-minutes") ?? 120;
+    interaction.options.getInteger("duration-minutes") ?? 60;
 
   const closeMinutesBefore =
     interaction.options.getInteger("close-minutes-before") ?? 60;
 
   const showDetailedDeadline =
-    interaction.options.getBoolean("detailed-deadline") ?? false;
+    signupsEnabled &&
+    (interaction.options.getBoolean("detailed-deadline") ?? false);
 
   /*
    * Per-event ping roles
@@ -418,11 +421,13 @@ async function createEvent(
     return;
   }
 
-  const attendanceClosesAt = parsedStart.value.minus({
-    minutes: closeMinutesBefore,
-  });
+  const attendanceClosesAt = signupsEnabled
+    ? parsedStart.value.minus({
+        minutes: closeMinutesBefore,
+      })
+    : null;
 
-  if (attendanceClosesAt <= now) {
+  if (signupsEnabled && attendanceClosesAt && attendanceClosesAt <= now) {
     await interaction.editReply(
       "The attendance deadline would already have passed. " +
         "Use a smaller `close-minutes-before` value or a later event time.",
@@ -552,11 +557,13 @@ async function createEvent(
 
           attendanceOpensAt: now.toJSDate(),
 
-          attendanceClosesAt: attendanceClosesAt.toJSDate(),
+          signupsEnabled,
+
+          attendanceClosesAt: attendanceClosesAt?.toJSDate() ?? null,
 
           roleRequestsOpenAt: null,
 
-          status: "open",
+          status: signupsEnabled ? "open" : "scheduled",
 
           createdByUserId: interaction.user.id,
 
@@ -574,6 +581,8 @@ async function createEvent(
           description: events.description,
 
           startsAt: events.startsAt,
+
+          signupsEnabled: events.signupsEnabled,
 
           attendanceClosesAt: events.attendanceClosesAt,
 
@@ -596,8 +605,12 @@ async function createEvent(
         })),
       );
 
-      await transaction.insert(scheduledActions).values([
-        {
+      /*
+       * Signup events need an automatic attendance-closing action.
+       * Announcement-only events do not.
+       */
+      if (signupsEnabled && attendanceClosesAt) {
+        await transaction.insert(scheduledActions).values({
           eventId: event.id,
 
           actionKey: "close_attendance",
@@ -609,43 +622,46 @@ async function createEvent(
           attemptCount: 0,
 
           updatedAt: new Date(),
-        },
+        });
+      }
 
-        {
-          eventId: event.id,
+      /*
+       * Every event still needs to be completed automatically,
+       * regardless of whether it uses signups.
+       */
+      await transaction.insert(scheduledActions).values({
+        eventId: event.id,
 
-          actionKey: "complete_event",
+        actionKey: "complete_event",
 
-          dueAt: endsAt.toJSDate(),
+        dueAt: endsAt.toJSDate(),
 
-          status: "pending",
+        status: "pending",
 
-          attemptCount: 0,
+        attemptCount: 0,
 
-          updatedAt: new Date(),
-        },
-      ]);
+        updatedAt: new Date(),
+      });
 
       return event;
     });
 
     createdEventId = createdEvent.id;
 
-    const createdAttendanceClosesAt = createdEvent.attendanceClosesAt;
-
-    if (!createdAttendanceClosesAt) {
-      throw new Error(
-        "The created event did not return an attendance closing time.",
-      );
-    }
-
     const organiserStart = DateTime.fromJSDate(createdEvent.startsAt, {
       zone: createdEvent.timezone,
     });
 
-    const organiserClose = DateTime.fromJSDate(createdAttendanceClosesAt, {
-      zone: createdEvent.timezone,
-    });
+    /*
+     * A signup event must have a closing time.
+     *
+     * A no-signup event deliberately stores NULL here.
+     */
+    if (createdEvent.signupsEnabled && !createdEvent.attendanceClosesAt) {
+      throw new Error(
+        "The created signup event did not return an attendance closing time.",
+      );
+    }
 
     const eventDisplay = {
       ...createdEvent,
@@ -660,9 +676,9 @@ async function createEvent(
 
       embeds: [buildAttendanceEmbed(eventDisplay, EMPTY_ATTENDANCE_COUNTS)],
 
-      components: [
-        buildAttendanceButtons(createdEvent.id, EMPTY_ATTENDANCE_COUNTS),
-      ],
+      components: createdEvent.signupsEnabled
+        ? [buildAttendanceButtons(createdEvent.id, EMPTY_ATTENDANCE_COUNTS)]
+        : [],
 
       allowedMentions: {
         parse: [],
@@ -683,33 +699,56 @@ async function createEvent(
       kind: "attendance",
     });
 
-    await interaction.editReply({
-      content: [
-        `✅ **${createdEvent.name}** was created.`,
-        "",
-        `**Event type:** ${eventType.name}`,
-        `**Region:** ${audience.name}`,
-        `**Ping roles:** ${pingRoles
-          .map((role) => `<@&${role.id}>`)
-          .join(" ")}`,
-        `**Scheduled as:** ${organiserStart.toFormat(
-          "dd LLL yyyy, HH:mm ZZZZ",
-        )}`,
-        `**Timezone:** \`${createdEvent.timezone}\``,
-        `**Your local time:** <t:${Math.floor(
-          createdEvent.startsAt.getTime() / 1000,
-        )}:F>`,
+    const responseLines = [
+      `✅ **${createdEvent.name}** was created.`,
+      "",
+      `**Event type:** ${eventType.name}`,
+      `**Region:** ${audience.name}`,
+      `**Ping roles:** ${pingRoles.map((role) => `<@&${role.id}>`).join(" ")}`,
+      `**Scheduled as:** ${organiserStart.toFormat("dd LLL yyyy, HH:mm ZZZZ")}`,
+      `**Timezone:** \`${createdEvent.timezone}\``,
+      `**Your local time:** <t:${Math.floor(
+        createdEvent.startsAt.getTime() / 1000,
+      )}:F>`,
+    ];
+
+    if (createdEvent.signupsEnabled) {
+      /*
+       * TypeScript does not necessarily retain the earlier narrowing
+       * across all of this code, so assign it locally before use.
+       */
+      const closingTime = createdEvent.attendanceClosesAt;
+
+      if (!closingTime) {
+        throw new Error(
+          "The created signup event did not return an attendance closing time.",
+        );
+      }
+
+      const organiserClose = DateTime.fromJSDate(closingTime, {
+        zone: createdEvent.timezone,
+      });
+
+      responseLines.push(
+        `**Signups:** Enabled`,
         `**Attendance closes:** ${organiserClose.toFormat(
           "dd LLL yyyy, HH:mm ZZZZ",
         )}`,
         `**Closure in your local time:** <t:${Math.floor(
-          createdAttendanceClosesAt.getTime() / 1000,
+          closingTime.getTime() / 1000,
         )}:F>`,
         `**Detailed deadline:** ${
           createdEvent.showDetailedDeadline ? "Yes" : "No"
         }`,
-        `**Sign-up message:** ${sentMessage.url}`,
-      ].join("\n"),
+      );
+    } else {
+      responseLines.push("**Signups:** Disabled");
+    }
+
+    responseLines.push(`**Event message:** ${sentMessage.url}`);
+
+    await interaction.editReply({
+      content: responseLines.join("\n"),
 
       allowedMentions: {
         parse: [],
@@ -737,6 +776,8 @@ async function createEvent(
         eventType: eventType.code,
 
         region: audience.code,
+
+        signupsEnabled: createdEvent.signupsEnabled,
 
         startsAt: createdEvent.startsAt.toISOString(),
 
@@ -792,6 +833,8 @@ async function listEvents(
 
       startsAt: events.startsAt,
 
+      signupsEnabled: events.signupsEnabled,
+
       audienceName: eventAudiences.name,
     })
     .from(events)
@@ -799,6 +842,7 @@ async function listEvents(
     .where(
       and(
         eq(events.ownerGuildId, configuration.guildId),
+
         gte(events.startsAt, new Date()),
       ),
     )
@@ -813,19 +857,27 @@ async function listEvents(
     return;
   }
 
-  const eventIds = upcomingEvents.map((event) => event.id);
+  /*
+   * Only signup-enabled events need attendance counts.
+   */
+  const signupEventIds = upcomingEvents
+    .filter((event) => event.signupsEnabled)
+    .map((event) => event.id);
 
-  const attendanceRows = await db
-    .select({
-      eventId: attendanceResponses.eventId,
+  const attendanceRows =
+    signupEventIds.length > 0
+      ? await db
+          .select({
+            eventId: attendanceResponses.eventId,
 
-      status: attendanceResponses.status,
+            status: attendanceResponses.status,
 
-      count: sql<number>`count(*)::int`,
-    })
-    .from(attendanceResponses)
-    .where(inArray(attendanceResponses.eventId, eventIds))
-    .groupBy(attendanceResponses.eventId, attendanceResponses.status);
+            count: sql<number>`count(*)::int`,
+          })
+          .from(attendanceResponses)
+          .where(inArray(attendanceResponses.eventId, signupEventIds))
+          .groupBy(attendanceResponses.eventId, attendanceResponses.status)
+      : [];
 
   const countsByEvent = new Map<
     number,
@@ -839,7 +891,9 @@ async function listEvents(
   for (const row of attendanceRows) {
     const current = countsByEvent.get(row.eventId) ?? {
       attending: 0,
+
       tentative: 0,
+
       notAttending: 0,
     };
 
@@ -861,20 +915,35 @@ async function listEvents(
   }
 
   const lines = upcomingEvents.flatMap((event) => {
-    const counts = countsByEvent.get(event.id) ?? {
-      attending: 0,
-      tentative: 0,
-      notAttending: 0,
-    };
-
     const timestamp = Math.floor(event.startsAt.getTime() / 1000);
+
+    const attendanceSummary = event.signupsEnabled
+      ? (() => {
+          const counts = countsByEvent.get(event.id) ?? {
+            attending: 0,
+
+            tentative: 0,
+
+            notAttending: 0,
+          };
+
+          return (
+            `✅ ${counts.attending}  ` +
+            `❔ ${counts.tentative}  ` +
+            `❌ ${counts.notAttending}`
+          );
+        })()
+      : "📢 Signups disabled";
 
     return [
       `**#${event.id} — ${event.name}**`,
+
       `${event.audienceName ?? "Unspecified"} • ${formatEventStatus(
         event.status,
       )} • <t:${timestamp}:F>`,
-      `✅ ${counts.attending}  ❔ ${counts.tentative}  ❌ ${counts.notAttending}`,
+
+      attendanceSummary,
+
       "",
     ];
   });
@@ -884,7 +953,7 @@ async function listEvents(
       "**Upcoming events**",
       "",
       ...lines,
-      "Use the event ID with `/event close`, `/event reopen`, `/event cancel` or `/event refresh`.",
+      "Use the event ID with `/event edit`, `/event close`, `/event reopen`, `/event cancel` or `/event refresh` as appropriate.",
     ].join("\n"),
 
     allowedMentions: {
@@ -914,6 +983,12 @@ async function closeEvent(
     await interaction.editReply(
       `Event #${eventId} was not found in this server.`,
     );
+
+    return;
+  }
+
+  if (!event.signupsEnabled) {
+    await interaction.editReply("This event does not use attendance signups.");
 
     return;
   }
@@ -1017,6 +1092,12 @@ async function reopenEvent(
     await interaction.editReply(
       `Event #${eventId} was not found in this server.`,
     );
+
+    return;
+  }
+
+  if (!event.signupsEnabled) {
+    await interaction.editReply("This event does not use attendance signups.");
 
     return;
   }
@@ -1223,9 +1304,13 @@ async function refreshEvent(
 
   const eventId = interaction.options.getInteger("event-id", true);
 
-  let event = await findOwnedEvent(configuration.guildId, eventId);
+  /*
+   * Use a separate initial variable so that after the null check,
+   * `event` itself has a permanently non-null inferred type.
+   */
+  const foundEvent = await findOwnedEvent(configuration.guildId, eventId);
 
-  if (!event) {
+  if (!foundEvent) {
     await interaction.editReply(
       `Event #${eventId} was not found in this server.`,
     );
@@ -1233,14 +1318,19 @@ async function refreshEvent(
     return;
   }
 
+  let event = foundEvent;
+
   const now = new Date();
 
   /*
-   * We do not have the scheduler yet. If an open event is already
-   * beyond its deadline, an admin refresh can perform that overdue
-   * transition before rebuilding the message.
+   * A refresh may perform the overdue attendance-close transition
+   * for signup events if the scheduler has not yet done so.
+   *
+   * No-signup events use status "scheduled", so they never enter
+   * this branch.
    */
   if (
+    event.signupsEnabled &&
     event.status === "open" &&
     ((event.attendanceClosesAt && event.attendanceClosesAt <= now) ||
       event.startsAt <= now)
@@ -1255,6 +1345,7 @@ async function refreshEvent(
       .where(
         and(
           eq(events.id, eventId),
+
           eq(events.ownerGuildId, configuration.guildId),
         ),
       )
@@ -1266,6 +1357,8 @@ async function refreshEvent(
         status: events.status,
 
         startsAt: events.startsAt,
+
+        signupsEnabled: events.signupsEnabled,
 
         attendanceClosesAt: events.attendanceClosesAt,
       });
@@ -1285,7 +1378,7 @@ async function refreshEvent(
   if (!refreshResult.ok) {
     await interaction.editReply(
       [
-        `The database record for **${event.name}** (#${event.id}) exists, but its Discord attendance message could not be refreshed.`,
+        `The database record for **${event.name}** (#${event.id}) exists, but its Discord event message could not be refreshed.`,
         "",
         formatRefreshResult(refreshResult),
       ].join("\n"),
@@ -1297,7 +1390,7 @@ async function refreshEvent(
   await interaction.editReply({
     content: [
       `🔄 **${event.name}** (#${event.id}) was rebuilt from the database.`,
-      `Attendance message: ${refreshResult.messageUrl}`,
+      `Event message: ${refreshResult.messageUrl}`,
     ].join("\n"),
 
     allowedMentions: {
@@ -1316,7 +1409,7 @@ async function refreshEvent(
 
     outcome: "success",
 
-    summary: `Refreshed the Discord attendance message for "${event.name}" (#${event.id}).`,
+    summary: `Refreshed the Discord event message for "${event.name}" (#${event.id}).`,
 
     targetType: "event",
 
@@ -1332,13 +1425,10 @@ async function findOwnedEvent(guildDatabaseId: number, eventId: number) {
   const [event] = await db
     .select({
       id: events.id,
-
       name: events.name,
-
       status: events.status,
-
       startsAt: events.startsAt,
-
+      signupsEnabled: events.signupsEnabled,
       attendanceClosesAt: events.attendanceClosesAt,
     })
     .from(events)

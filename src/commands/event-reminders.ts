@@ -585,15 +585,10 @@ async function findOwnedEvent(guildDatabaseId: number, eventId: number) {
   const [event] = await db
     .select({
       id: events.id,
-
       name: events.name,
-
       status: events.status,
-
       startsAt: events.startsAt,
-
       attendanceClosesAt: events.attendanceClosesAt,
-
       attendanceChannelId: eventMessages.channelId,
     })
     .from(events)

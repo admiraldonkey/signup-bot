@@ -215,10 +215,18 @@ export const commandDefinitions = [
             .setMaxLength(1000),
         )
 
+        .addBooleanOption((option) =>
+          option
+            .setName("signups")
+            .setDescription(
+              "Enable attendance signups for this event. Defaults to Yes.",
+            ),
+        )
+
         .addIntegerOption((option) =>
           option
             .setName("duration-minutes")
-            .setDescription("Expected event duration. Defaults to 120 minutes.")
+            .setDescription("Expected event duration. Defaults to 60 minutes.")
             .setMinValue(30)
             .setMaxValue(480),
         )

@@ -66,6 +66,8 @@ export async function getAttendanceEventForInteraction(
 
       startsAt: events.startsAt,
 
+      signupsEnabled: events.signupsEnabled,
+
       attendanceClosesAt: events.attendanceClosesAt,
 
       status: events.status,
@@ -127,6 +129,8 @@ export async function refreshAttendanceMessage(
       showDetailedDeadline: events.showDetailedDeadline,
 
       startsAt: events.startsAt,
+
+      signupsEnabled: events.signupsEnabled,
 
       attendanceClosesAt: events.attendanceClosesAt,
 
@@ -207,9 +211,9 @@ export async function refreshAttendanceMessage(
 
     allowedMentions: {
       /*
-       * Keep the visible role mentions in the existing signup
-       * message without generating a fresh notification merely
-       * because an admin edited/refreshed the event.
+       * Keep the visible role mentions without generating a fresh
+       * notification merely because an admin edited/refreshed the
+       * event.
        */
       parse: [],
     },
@@ -233,6 +237,8 @@ export async function refreshAttendanceMessage(
 
           startsAt: event.startsAt,
 
+          signupsEnabled: event.signupsEnabled,
+
           attendanceClosesAt: event.attendanceClosesAt,
 
           status: event.status,
@@ -241,9 +247,9 @@ export async function refreshAttendanceMessage(
       ),
     ],
 
-    components: [
-      buildAttendanceButtons(event.eventId, counts, attendanceClosed),
-    ],
+    components: event.signupsEnabled
+      ? [buildAttendanceButtons(event.eventId, counts, attendanceClosed)]
+      : [],
   });
 
   return {

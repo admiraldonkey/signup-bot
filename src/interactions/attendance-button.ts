@@ -12,7 +12,6 @@ import {
   refreshAttendanceMessage,
 } from "../events/attendance-refresh.js";
 import { markAttendanceCloseCompleted } from "../scheduler/action-maintenance.js";
-import { reschedulePendingEventReminders } from "../reminders/reminder-scheduling.js";
 
 const attendanceRefreshTimers = new Map<string, NodeJS.Timeout>();
 
@@ -57,6 +56,14 @@ export async function handleAttendanceButton(
   if (!event) {
     await interaction.editReply(
       "This attendance message is no longer linked to an active event.",
+    );
+
+    return true;
+  }
+
+  if (!event.signupsEnabled) {
+    await interaction.editReply(
+      "Attendance signups are not enabled for this event.",
     );
 
     return true;
