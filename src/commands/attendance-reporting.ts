@@ -37,6 +37,11 @@ interface AuditedEvent {
   name: string;
   startsAt: Date;
   eventTypeName: string;
+  /*
+   * No-signup events can still contribute to actual-attendance
+   * totals, but must never generate signup behaviour/issues.
+   */
+  signupsEnabled: boolean;
 }
 
 export async function handleAttendanceUserReport(
@@ -102,30 +107,52 @@ export async function handleAttendanceUserReport(
       ),
   ]);
 
+  /*
+   * Only signup-enabled events may contribute signup responses to
+   * behavioural reporting.
+   *
+   * This also protects historical reporting if bad/stale response
+   * data somehow exists against a no-signup event.
+   */
+  const signupEnabledEventIds = new Set(
+    auditedEvents
+      .filter((event) => event.signupsEnabled)
+      .map((event) => event.id),
+  );
+
   const signupByEvent = new Map(
-    signupRows.map((row) => [row.eventId, row.status]),
+    signupRows
+      .filter((row) => signupEnabledEventIds.has(row.eventId))
+      .map((row) => [row.eventId, row.status]),
   );
 
   const attendedEventIds = new Set(actualRows.map((row) => row.eventId));
 
   /*
-   * Do not count every regiment event as relevant to a member.
-   * An event is relevant when they either responded to it or
-   * actually attended it.
+   * An event is relevant when:
+   *
+   * - the member actually attended it; or
+   * - it used signups and the member responded.
+   *
+   * A no-signup event therefore becomes relevant only through
+   * actual attendance.
    */
   const relevantEvents = auditedEvents.filter(
-    (event) => signupByEvent.has(event.id) || attendedEventIds.has(event.id),
+    (event) =>
+      attendedEventIds.has(event.id) ||
+      (event.signupsEnabled && signupByEvent.has(event.id)),
   );
 
   let attendingSignups = 0;
+
   let attendingPresent = 0;
 
   let tentativeSignups = 0;
+
   let tentativePresent = 0;
 
-  let notAttendingResponses = 0;
-
   let noResponseWalkIns = 0;
+
   let notAttendingWalkIns = 0;
 
   const noShowEvents: AuditedEvent[] = [];
@@ -133,6 +160,14 @@ export async function handleAttendanceUserReport(
   const walkInEvents: AuditedEvent[] = [];
 
   for (const event of relevantEvents) {
+    /*
+     * No-signup events may contribute to actual attendance, but
+     * cannot create no-shows, walk-ins or other signup behaviour.
+     */
+    if (!event.signupsEnabled) {
+      continue;
+    }
+
     const signup = signupByEvent.get(event.id);
 
     const attended = attendedEventIds.has(event.id);
@@ -160,10 +195,9 @@ export async function handleAttendanceUserReport(
     }
 
     if (signup === "not_attending") {
-      notAttendingResponses += 1;
-
       if (attended) {
         notAttendingWalkIns += 1;
+
         walkInEvents.push(event);
       }
 
@@ -172,6 +206,7 @@ export async function handleAttendanceUserReport(
 
     if (attended) {
       noResponseWalkIns += 1;
+
       walkInEvents.push(event);
     }
   }
@@ -182,8 +217,15 @@ export async function handleAttendanceUserReport(
 
   const walkIns = noResponseWalkIns + notAttendingWalkIns;
 
+  /*
+   * Actual attendance includes no-signup events.
+   */
   const actualAttendances = relevantEvents.filter((event) =>
     attendedEventIds.has(event.id),
+  ).length;
+
+  const signupRelevantEvents = relevantEvents.filter(
+    (event) => event.signupsEnabled,
   ).length;
 
   const embed = new EmbedBuilder()
@@ -194,6 +236,7 @@ export async function handleAttendanceUserReport(
         "",
         `**Relevant audited events:** ${relevantEvents.length}`,
         `**Actual attendances:** ${actualAttendances}`,
+        `**Events with signup tracking:** ${signupRelevantEvents}`,
         `**Event type:** ${filters.eventTypeName ?? "All"}`,
         `**Period:** ${formatPeriod(filters)}`,
       ].join("\n"),
@@ -252,7 +295,7 @@ export async function handleAttendanceUserReport(
       },
     )
     .setFooter({
-      text: "Tentative absences are shown for context but are not counted as attendance issues.",
+      text: "No-signup events count towards actual attendance but not signup issues. Tentative absences are shown for context only.",
     })
     .setTimestamp();
 
@@ -286,11 +329,19 @@ export async function handleAttendanceIssuesReport(
 
   const limit = interaction.options.getInteger("limit") ?? 15;
 
-  const auditedEvents = await loadAuditedEvents(context.guildId, filters);
+  const allAuditedEvents = await loadAuditedEvents(context.guildId, filters);
+
+  /*
+   * Attendance issues only make sense when members were actually
+   * given the opportunity to submit a signup response.
+   */
+  const auditedEvents = allAuditedEvents.filter(
+    (event) => event.signupsEnabled,
+  );
 
   if (auditedEvents.length === 0) {
     await interaction.editReply(
-      "No events with recorded actual attendance match those filters.",
+      "No signup-enabled events with recorded actual attendance match those filters.",
     );
 
     return;
@@ -328,6 +379,7 @@ export async function handleAttendanceIssuesReport(
   for (const row of signupRows) {
     signupByEventUser.set(
       makeEventUserKey(row.eventId, row.userId),
+
       row.status,
     );
   }
@@ -338,8 +390,11 @@ export async function handleAttendanceIssuesReport(
 
   interface UserIssues {
     userId: string;
+
     noShows: number;
+
     noResponseWalkIns: number;
+
     notAttendingWalkIns: number;
   }
 
@@ -354,8 +409,11 @@ export async function handleAttendanceIssuesReport(
 
     const created: UserIssues = {
       userId,
+
       noShows: 0,
+
       noResponseWalkIns: 0,
+
       notAttendingWalkIns: 0,
     };
 
@@ -419,7 +477,7 @@ export async function handleAttendanceIssuesReport(
       [
         "✅ No attendance issues were found for the selected period.",
         "",
-        `Audited events checked: ${auditedEvents.length}`,
+        `Signup-enabled audited events checked: ${auditedEvents.length}`,
       ].join("\n"),
     );
 
@@ -429,6 +487,7 @@ export async function handleAttendanceIssuesReport(
   const lines = ranked.map((entry, index) =>
     [
       `**${index + 1}. <@${entry.userId}> — ${entry.total} issue${entry.total === 1 ? "" : "s"}**`,
+
       `No-shows: ${entry.noShows} • No signup: ${entry.noResponseWalkIns} • Said Not attending: ${entry.notAttendingWalkIns}`,
     ].join("\n"),
   );
@@ -437,7 +496,7 @@ export async function handleAttendanceIssuesReport(
     .setTitle("Attendance issues")
     .setDescription(
       [
-        `**Audited events:** ${auditedEvents.length}`,
+        `**Signup-enabled audited events:** ${auditedEvents.length}`,
         `**Event type:** ${filters.eventTypeName ?? "All"}`,
         `**Period:** ${formatPeriod(filters)}`,
         "",
@@ -445,7 +504,7 @@ export async function handleAttendanceIssuesReport(
       ].join("\n"),
     )
     .setFooter({
-      text: "Tentative absences are not treated as issues.",
+      text: "No-signup events are excluded. Tentative absences are not treated as issues.",
     })
     .setTimestamp();
 
@@ -611,6 +670,8 @@ async function loadAuditedEvents(
       startsAt: events.startsAt,
 
       eventTypeName: eventTypes.name,
+
+      signupsEnabled: events.signupsEnabled,
     })
     .from(events)
     .innerJoin(

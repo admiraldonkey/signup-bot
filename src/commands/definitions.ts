@@ -638,26 +638,32 @@ export const commandDefinitions = [
           option
             .setName("ping-role-1")
             .setDescription(
-              "Replace event ping roles with this role and any roles below.",
+              "Ping role 1. Supplying any ping roles replaces the current role set.",
             ),
         )
 
         .addRoleOption((option) =>
           option
             .setName("ping-role-2")
-            .setDescription("Optional second event ping role."),
+            .setDescription(
+              "Additional ping role for the replacement role set.",
+            ),
         )
 
         .addRoleOption((option) =>
           option
             .setName("ping-role-3")
-            .setDescription("Optional third event ping role."),
+            .setDescription(
+              "Additional ping role for the replacement role set.",
+            ),
         )
 
         .addRoleOption((option) =>
           option
             .setName("ping-role-4")
-            .setDescription("Optional fourth event ping role."),
+            .setDescription(
+              "Additional ping role for the replacement role set.",
+            ),
         ),
     ),
 

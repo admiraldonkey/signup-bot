@@ -146,84 +146,9 @@ export function buildAttendanceEmbed(
   const startDisplayValue =
     event.status === "cancelled"
       ? ["🚫 **Event cancelled**"].join("\n")
-      : [
-          // `<t:${startTimestamp}:F> (your local time)`,
-          `<t:${startTimestamp}:F>`,
-          `<t:${startTimestamp}:R>`,
-        ].join("\n");
+      : [`<t:${startTimestamp}:F>`, `<t:${startTimestamp}:R>`].join("\n");
 
   const embed = new EmbedBuilder().setTitle(getEventTitle(event));
-  // if (description) {
-  //   embed.setDescription(description);
-  // }
-  // /*
-  //  * Fields shown for every event.
-  //  */
-  // embed.addFields(
-  //   // {
-  //   //   name: "Event & Region",
-  //   //   value: `${event.eventTypeName} • ${event.audienceName}`,
-  //   //   inline: true,
-  //   // },
-  //   // {
-  //   //   name: "Scheduled Time",
-  //   //   value: [scheduledStartText, "\n"].join("\n"),
-  //   //   inline: false,
-  //   // },
-  //   {
-  //     name: "\u200B",
-  //     value: "",
-  //     inline: false,
-  //   },
-  //   {
-  //     name: "Details",
-  //     value: `${event.eventTypeName} • ${event.audienceName}  •  ${scheduledStartText}`,
-  //     inline: false,
-  //   },
-  //   {
-  //     name: "\u200B",
-  //     value: "",
-  //     inline: false,
-  //   },
-  //   {
-  //     name: "Starts At",
-  //     value: startDisplayValue,
-  //     inline: false,
-  //   },
-  // );
-
-  // /*
-  //  * Attendance-specific information only appears when this
-  //  * particular event actually uses signups.
-  //  */
-  // if (event.signupsEnabled) {
-  //   embed.addFields(
-  //     {
-  //       name: "\u200B",
-  //       value: "",
-  //       inline: false,
-  //     },
-  //     {
-  //       name: "Sign-ups Close",
-  //       value: [deadlineValue, "\n"].join("\n"),
-  //       inline: !event.showDetailedDeadline,
-  //     },
-  //     {
-  //       name: "\u200B",
-  //       value: "",
-  //       inline: false,
-  //     },
-  //     {
-  //       name: "Attendance",
-  //       value: `✅ ${counts.attending}   •   ❔ ${counts.tentative}   •   ❌ ${counts.not_attending}`,
-  //     },
-  //     {
-  //       name: "\u200B",
-  //       value: "",
-  //       inline: false,
-  //     },
-  //   );
-  // }
 
   descriptionParts.push(
     [

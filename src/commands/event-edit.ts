@@ -88,6 +88,8 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
 
       showDetailedDeadline: events.showDetailedDeadline,
 
+      signupsEnabled: events.signupsEnabled,
+
       startsAt: events.startsAt,
 
       endsAt: events.endsAt,
@@ -152,6 +154,21 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
 
   const detailedDeadlineOption =
     interaction.options.getBoolean("detailed-deadline");
+
+  /*
+   * Signup-specific settings do not apply to announcement-style
+   * events where attendance signups were disabled at creation.
+   */
+  if (
+    !event.signupsEnabled &&
+    (closeOption !== null || detailedDeadlineOption !== null)
+  ) {
+    await interaction.editReply(
+      "This event does not use attendance signups, so its signup deadline settings cannot be edited.",
+    );
+
+    return;
+  }
 
   const roleOptionNames = [
     "ping-role-1",
@@ -300,27 +317,37 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
     newEndsAt = new Date(newStartsAt.getTime() + newDurationMinutes * 60_000);
   }
 
-  let newAttendanceClosesAt = event.attendanceClosesAt;
+  /*
+   * Announcement-style events deliberately have no attendance
+   * closing time.
+   */
+  let newAttendanceClosesAt = event.signupsEnabled
+    ? event.attendanceClosesAt
+    : null;
 
-  if (closeOption !== null) {
-    newAttendanceClosesAt = new Date(
-      newStartsAt.getTime() - closeOption * 60_000,
-    );
-  } else if (hasStartChange && event.attendanceClosesAt) {
-    /*
-     * Preserve the existing relative signup-close offset when the
-     * event moves but the admin did not supply a new one.
-     */
-    const existingOffsetMinutes = Math.round(
-      (event.startsAt.getTime() - event.attendanceClosesAt.getTime()) / 60_000,
-    );
+  if (event.signupsEnabled) {
+    if (closeOption !== null) {
+      newAttendanceClosesAt = new Date(
+        newStartsAt.getTime() - closeOption * 60_000,
+      );
+    } else if (hasStartChange && event.attendanceClosesAt) {
+      /*
+       * Preserve the existing relative signup-close offset when the
+       * event moves but the admin did not supply a new one.
+       */
+      const existingOffsetMinutes = Math.round(
+        (event.startsAt.getTime() - event.attendanceClosesAt.getTime()) /
+          60_000,
+      );
 
-    newAttendanceClosesAt = new Date(
-      newStartsAt.getTime() - existingOffsetMinutes * 60_000,
-    );
+      newAttendanceClosesAt = new Date(
+        newStartsAt.getTime() - existingOffsetMinutes * 60_000,
+      );
+    }
   }
 
   if (
+    event.signupsEnabled &&
     (event.status === "open" || event.status === "scheduled") &&
     newAttendanceClosesAt &&
     newAttendanceClosesAt <= new Date()
@@ -400,8 +427,9 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
   const newDescription =
     clearDescription === true ? null : (descriptionOption ?? event.description);
 
-  const newDetailedDeadline =
-    detailedDeadlineOption ?? event.showDetailedDeadline;
+  const newDetailedDeadline = event.signupsEnabled
+    ? (detailedDeadlineOption ?? event.showDetailedDeadline)
+    : false;
 
   const changedFields: string[] = [];
 
@@ -490,6 +518,7 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
    * Editing a closed event does NOT implicitly reopen signups.
    */
   if (
+    event.signupsEnabled &&
     (event.status === "open" || event.status === "scheduled") &&
     newAttendanceClosesAt &&
     (hasStartChange || closeOption !== null)
@@ -565,7 +594,7 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
     `**Scheduled as:** ${localStart.toFormat("dd LLL yyyy, HH:mm ZZZZ")}`,
   ];
 
-  if (event.status === "closed") {
+  if (event.signupsEnabled && event.status === "closed") {
     response.push(
       "",
       "ℹ️ Attendance was already closed and remains closed. Use `/event reopen` if signups should reopen.",
