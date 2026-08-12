@@ -20,6 +20,18 @@ export interface AttendanceCounts {
   not_attending: number;
 }
 
+export interface AttendanceOrganiserDisplay {
+  discordUserId: string;
+
+  status:
+    | "pending"
+    | "confirmed"
+    | "declined"
+    | "timed_out"
+    | "replaced"
+    | "removed";
+}
+
 export interface AttendanceEventDisplay {
   id: number;
   name: string;
@@ -29,6 +41,7 @@ export interface AttendanceEventDisplay {
   timezone: string;
   showDetailedDeadline: boolean;
   startsAt: Date;
+  organiser: AttendanceOrganiserDisplay | null;
   signupsEnabled: boolean;
   attendanceClosesAt: Date | null;
   status: "scheduled" | "open" | "closed" | "cancelled" | "completed";
@@ -79,6 +92,36 @@ export function parseAttendanceCustomId(customId: string): {
     eventId,
     status,
   };
+}
+
+function formatOrganiser(organiser: AttendanceOrganiserDisplay | null): string {
+  if (!organiser) {
+    return "Not assigned";
+  }
+
+  const status = (() => {
+    switch (organiser.status) {
+      case "pending":
+        return "🟡 Awaiting confirmation";
+
+      case "confirmed":
+        return "✅ Confirmed";
+
+      case "declined":
+        return "❌ Declined";
+
+      case "timed_out":
+        return "⏱️ No response";
+
+      case "replaced":
+        return "Replaced";
+
+      case "removed":
+        return "Removed";
+    }
+  })();
+
+  return `<@${organiser.discordUserId}> • ${status}`;
 }
 
 export function buildAttendanceEmbed(
@@ -155,6 +198,10 @@ export function buildAttendanceEmbed(
       "**Details**",
       `${event.eventTypeName} • ${event.audienceName} • ${scheduledStartText}`,
     ].join("\n"),
+  );
+
+  descriptionParts.push(
+    ["**Organiser**", formatOrganiser(event.organiser)].join("\n"),
   );
 
   descriptionParts.push(["**Starts At**", startDisplayValue].join("\n"));

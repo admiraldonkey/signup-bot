@@ -123,9 +123,7 @@ export const commandDefinitions = [
     .addSubcommand((subcommand) =>
       subcommand
         .setName("create")
-        .setDescription(
-          "Creates a one-off event and opens attendance sign-ups.",
-        )
+        .setDescription("Creates a one-off regiment event.")
 
         /*
          * Discord requires all required options to appear before
@@ -213,6 +211,22 @@ export const commandDefinitions = [
             .setName("description")
             .setDescription("Optional information shown in the event message.")
             .setMaxLength(1000),
+        )
+
+        .addUserOption((option) =>
+          option
+            .setName("primary-organiser")
+            .setDescription(
+              "Member primarily responsible for organising this event.",
+            ),
+        )
+
+        .addUserOption((option) =>
+          option
+            .setName("backup-organiser")
+            .setDescription(
+              "Optional standby organiser if the primary becomes unavailable.",
+            ),
         )
 
         .addBooleanOption((option) =>
@@ -329,6 +343,77 @@ export const commandDefinitions = [
             .setName("event-id")
             .setDescription("The ID of the event to refresh.")
             .setMinValue(1)
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("organiser-set")
+        .setDescription("Assigns or replaces an organiser for an event.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event whose organiser should be changed.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("slot")
+            .setDescription(
+              "Whether to assign the primary or backup organiser.",
+            )
+            .addChoices(
+              {
+                name: "Primary organiser",
+                value: "primary",
+              },
+              {
+                name: "Backup organiser",
+                value: "backup",
+              },
+            )
+            .setRequired(true),
+        )
+
+        .addUserOption((option) =>
+          option
+            .setName("user")
+            .setDescription("The member to assign.")
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("organiser-clear")
+        .setDescription("Removes the current primary or backup organiser.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event whose organiser should be removed.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("slot")
+            .setDescription("Which organiser assignment should be removed.")
+            .addChoices(
+              {
+                name: "Primary organiser",
+                value: "primary",
+              },
+              {
+                name: "Backup organiser",
+                value: "backup",
+              },
+            )
             .setRequired(true),
         ),
     )

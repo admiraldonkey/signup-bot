@@ -1,6 +1,7 @@
 import {
   ChannelType,
   type ChatInputCommandInteraction,
+  type GuildMember,
   type Message,
   MessageFlags,
   PermissionFlagsBits,
@@ -22,6 +23,7 @@ import {
   events,
   eventTypes,
   scheduledActions,
+  eventOrganiserAssignments,
 } from "../db/schema.js";
 import {
   buildAttendanceButtons,
@@ -49,6 +51,14 @@ import {
 } from "./event-reminders.js";
 import { reschedulePendingEventReminders } from "../reminders/reminder-scheduling.js";
 import { editEvent } from "./event-edit.js";
+import { getPublicOrganiserDisplay } from "../events/organiser-display.js";
+
+import {
+  type OrganiserNotificationDelivery,
+  sendOrganiserAssignmentNotification,
+} from "../events/organiser-notification.js";
+
+import { clearEventOrganiser, setEventOrganiser } from "./event-organisers.js";
 
 const EVENT_DATE_FORMAT = "yyyy-MM-dd HH:mm";
 
@@ -99,6 +109,14 @@ export async function handleEventCommand(
 
     case "refresh":
       await refreshEvent(interaction);
+      return;
+
+    case "organiser-set":
+      await setEventOrganiser(interaction);
+      return;
+
+    case "organiser-clear":
+      await clearEventOrganiser(interaction);
       return;
 
     case "edit":
@@ -353,6 +371,70 @@ async function createEvent(
     signupsEnabled &&
     (interaction.options.getBoolean("detailed-deadline") ?? false);
 
+  const primaryOrganiserUser = interaction.options.getUser("primary-organiser");
+
+  const backupOrganiserUser = interaction.options.getUser("backup-organiser");
+
+  if (primaryOrganiserUser?.bot || backupOrganiserUser?.bot) {
+    await interaction.editReply(
+      "Bot accounts cannot be assigned as event organisers.",
+    );
+
+    return;
+  }
+
+  if (
+    primaryOrganiserUser &&
+    backupOrganiserUser &&
+    primaryOrganiserUser.id === backupOrganiserUser.id
+  ) {
+    await interaction.editReply(
+      "The primary and backup organiser must be different members.",
+    );
+
+    return;
+  }
+
+  if (backupOrganiserUser && !primaryOrganiserUser) {
+    await interaction.editReply(
+      "A backup organiser can only be selected when a primary organiser is also assigned.",
+    );
+
+    return;
+  }
+
+  let primaryOrganiserMember: GuildMember | null = null;
+
+  let backupOrganiserMember: GuildMember | null = null;
+
+  if (primaryOrganiserUser) {
+    try {
+      primaryOrganiserMember = await interaction.guild.members.fetch(
+        primaryOrganiserUser.id,
+      );
+    } catch {
+      await interaction.editReply(
+        "The selected primary organiser could not be resolved as a current server member.",
+      );
+
+      return;
+    }
+  }
+
+  if (backupOrganiserUser) {
+    try {
+      backupOrganiserMember = await interaction.guild.members.fetch(
+        backupOrganiserUser.id,
+      );
+    } catch {
+      await interaction.editReply(
+        "The selected backup organiser could not be resolved as a current server member.",
+      );
+
+      return;
+    }
+  }
+
   /*
    * Per-event ping roles
    */
@@ -532,7 +614,7 @@ async function createEvent(
   let sentMessage: Message | null = null;
 
   try {
-    const createdEvent = await db.transaction(async (transaction) => {
+    const creationResult = await db.transaction(async (transaction) => {
       const [event] = await transaction
         .insert(events)
         .values({
@@ -605,6 +687,76 @@ async function createEvent(
         })),
       );
 
+      let primaryAssignmentId: number | null = null;
+
+      let backupAssignmentId: number | null = null;
+
+      if (primaryOrganiserMember) {
+        const [assignment] = await transaction
+          .insert(eventOrganiserAssignments)
+          .values({
+            eventId: event.id,
+
+            slot: "primary",
+
+            discordUserId: primaryOrganiserMember.id,
+
+            displayNameSnapshot: primaryOrganiserMember.displayName,
+
+            status: "pending",
+
+            isCurrent: true,
+
+            assignedByUserId: interaction.user.id,
+
+            updatedAt: new Date(),
+          })
+          .returning({
+            id: eventOrganiserAssignments.id,
+          });
+
+        if (!assignment) {
+          throw new Error(
+            "The database did not return the primary organiser assignment.",
+          );
+        }
+
+        primaryAssignmentId = assignment.id;
+      }
+
+      if (backupOrganiserMember) {
+        const [assignment] = await transaction
+          .insert(eventOrganiserAssignments)
+          .values({
+            eventId: event.id,
+
+            slot: "backup",
+
+            discordUserId: backupOrganiserMember.id,
+
+            displayNameSnapshot: backupOrganiserMember.displayName,
+
+            status: "pending",
+
+            isCurrent: true,
+
+            assignedByUserId: interaction.user.id,
+
+            updatedAt: new Date(),
+          })
+          .returning({
+            id: eventOrganiserAssignments.id,
+          });
+
+        if (!assignment) {
+          throw new Error(
+            "The database did not return the backup organiser assignment.",
+          );
+        }
+
+        backupAssignmentId = assignment.id;
+      }
+
       /*
        * Signup events need an automatic attendance-closing action.
        * Announcement-only events do not.
@@ -642,9 +794,16 @@ async function createEvent(
 
         updatedAt: new Date(),
       });
+      return {
+        event,
 
-      return event;
+        primaryAssignmentId,
+
+        backupAssignmentId,
+      };
     });
+
+    const createdEvent = creationResult.event;
 
     createdEventId = createdEvent.id;
 
@@ -663,12 +822,16 @@ async function createEvent(
       );
     }
 
+    const organiser = await getPublicOrganiserDisplay(createdEvent.id);
+
     const eventDisplay = {
       ...createdEvent,
 
       audienceName: audience.name,
 
       eventTypeName: eventType.name,
+
+      organiser,
     };
 
     sentMessage = await attendanceChannel.send({
@@ -699,6 +862,28 @@ async function createEvent(
       kind: "attendance",
     });
 
+    let primaryNotification: OrganiserNotificationDelivery | null = null;
+
+    if (creationResult.primaryAssignmentId && primaryOrganiserMember) {
+      primaryNotification = await sendOrganiserAssignmentNotification({
+        guild: interaction.guild,
+
+        assignmentId: creationResult.primaryAssignmentId,
+
+        eventId: createdEvent.id,
+
+        eventName: createdEvent.name,
+
+        discordUserId: primaryOrganiserMember.id,
+
+        slot: "primary",
+
+        eventAdminChannelId: configuration.eventAdminChannelId,
+
+        eventMessageUrl: sentMessage.url,
+      });
+    }
+
     const responseLines = [
       `✅ **${createdEvent.name}** was created.`,
       "",
@@ -711,6 +896,32 @@ async function createEvent(
         createdEvent.startsAt.getTime() / 1000,
       )}:F>`,
     ];
+
+    if (primaryOrganiserMember) {
+      responseLines.push(
+        `**Primary organiser:** <@${primaryOrganiserMember.id}>`,
+      );
+    } else {
+      responseLines.push("**Primary organiser:** Not assigned");
+    }
+
+    if (backupOrganiserMember) {
+      responseLines.push(
+        `**Backup organiser:** <@${backupOrganiserMember.id}>`,
+      );
+    }
+
+    if (primaryNotification === "dm") {
+      responseLines.push("**Organiser confirmation:** DM sent");
+    } else if (primaryNotification === "admin_channel") {
+      responseLines.push(
+        "**Organiser confirmation:** DM failed; fallback posted in the Event Administration channel",
+      );
+    } else if (primaryNotification === "failed") {
+      responseLines.push(
+        "**Organiser confirmation:** ⚠️ Assignment saved, but the confirmation request could not be delivered",
+      );
+    }
 
     if (createdEvent.signupsEnabled) {
       /*
@@ -782,6 +993,12 @@ async function createEvent(
         startsAt: createdEvent.startsAt.toISOString(),
 
         pingRoleIds: pingRoles.map((role) => role.id),
+
+        primaryOrganiserUserId: primaryOrganiserMember?.id ?? null,
+
+        backupOrganiserUserId: backupOrganiserMember?.id ?? null,
+
+        primaryOrganiserNotification: primaryNotification,
       },
     });
   } catch (error) {

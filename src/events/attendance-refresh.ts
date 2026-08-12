@@ -17,6 +17,7 @@ import {
   buildAttendanceEmbed,
   EMPTY_ATTENDANCE_COUNTS,
 } from "./attendance-message.js";
+import { getPublicOrganiserDisplay } from "./organiser-display.js";
 
 export async function getAttendanceCounts(
   eventId: number,
@@ -206,6 +207,8 @@ export async function refreshAttendanceMessage(
     (event.attendanceClosesAt !== null &&
       event.attendanceClosesAt <= new Date());
 
+  const organiser = await getPublicOrganiserDisplay(event.eventId);
+
   await message.edit({
     content: pingRoleContent,
 
@@ -236,6 +239,8 @@ export async function refreshAttendanceMessage(
           showDetailedDeadline: event.showDetailedDeadline,
 
           startsAt: event.startsAt,
+
+          organiser,
 
           signupsEnabled: event.signupsEnabled,
 
