@@ -19,6 +19,7 @@ import {
   eventReminders,
   eventOrganiserAssignments,
   guildSettings,
+  roleRequestGroups,
 } from "../db/schema.js";
 import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
 import { writeAuditLog } from "../audit/audit-log.js";
@@ -26,18 +27,21 @@ import { sendEventCustomMessage } from "../events/event-custom-message.js";
 import { REMINDER_ACTION_PREFIX } from "../reminders/reminder-scheduling.js";
 import { reschedulePendingEventReminders } from "../reminders/reminder-scheduling.js";
 import { escalateAfterFailedOrganiserAssignment } from "../organisers/organiser-escalation.js";
-
 import {
   ORGANISER_COVER_REQUEST_ACTION_PREFIX,
   ORGANISER_TIMEOUT_ACTION_PREFIX,
   ORGANISER_WARNING_ACTION_PREFIX,
   cancelAllOrganiserEscalationActions,
 } from "../organisers/organiser-scheduling.js";
-
 import {
   sendOrganiserCoverRequest,
   sendOrganiserPendingWarning,
 } from "../events/organiser-notification.js";
+import { ROLE_REQUEST_GROUP_CLOSE_ACTION_PREFIX } from "../role-requests/role-request-scheduling.js";
+import {
+  refreshRoleRequestGroupMessage,
+  refreshRoleRequestMessages,
+} from "../role-requests/role-request-message.js";
 
 const POLL_INTERVAL_MS = 15_000;
 
@@ -263,6 +267,17 @@ async function executeAction(
       action.eventId,
       sourceAssignmentId,
     );
+
+    return;
+  }
+
+  if (action.actionKey.startsWith(ROLE_REQUEST_GROUP_CLOSE_ACTION_PREFIX)) {
+    const groupId = parseActionId(
+      action.actionKey,
+      ROLE_REQUEST_GROUP_CLOSE_ACTION_PREFIX,
+    );
+
+    await executeRoleRequestGroupClose(client, action.eventId, groupId);
 
     return;
   }
@@ -615,6 +630,85 @@ async function executeOrganiserCoverRequest(
   });
 }
 
+async function executeRoleRequestGroupClose(
+  client: Client<true>,
+  eventId: number,
+  groupId: number,
+): Promise<void> {
+  const [group] = await db
+    .select({
+      id: roleRequestGroups.id,
+
+      name: roleRequestGroups.name,
+
+      eventId: roleRequestGroups.eventId,
+
+      closedAt: roleRequestGroups.closedAt,
+
+      eventName: events.name,
+
+      eventStatus: events.status,
+
+      guildDatabaseId: events.ownerGuildId,
+
+      discordGuildId: discordGuilds.discordGuildId,
+    })
+    .from(roleRequestGroups)
+    .innerJoin(events, eq(events.id, roleRequestGroups.eventId))
+    .innerJoin(discordGuilds, eq(discordGuilds.id, events.ownerGuildId))
+    .where(
+      and(
+        eq(roleRequestGroups.id, groupId),
+
+        eq(roleRequestGroups.eventId, eventId),
+      ),
+    )
+    .limit(1);
+
+  if (!group) {
+    return;
+  }
+
+  if (!group.closedAt) {
+    const now = new Date();
+
+    await db
+      .update(roleRequestGroups)
+      .set({
+        closedAt: now,
+
+        updatedAt: now,
+      })
+      .where(eq(roleRequestGroups.id, group.id));
+  }
+
+  const guild = await client.guilds.fetch(group.discordGuildId);
+
+  await refreshRoleRequestGroupMessage(guild, group.id);
+
+  await writeAuditLog({
+    guildId: group.guildDatabaseId,
+
+    guild,
+
+    actorUserId: null,
+
+    action: "scheduler.role_group_close",
+
+    outcome: "success",
+
+    summary: `Closed role-request group "${group.name}" (#${group.id}) for "${group.eventName}" (#${group.eventId}).`,
+
+    targetType: "role_request_group",
+
+    targetId: String(group.id),
+  });
+
+  console.log(
+    `Closed role-request group ${group.id} for event ${group.eventId}.`,
+  );
+}
+
 async function executeCloseAttendance(
   client: Client<true>,
   eventId: number,
@@ -734,11 +828,15 @@ async function executeCompleteEvent(
    */
   await cancelAllOrganiserEscalationActions(eventId);
 
+  const completedGuild = await client.guilds.fetch(event.discordGuildId);
+
+  await refreshRoleRequestMessages(completedGuild, eventId);
+
   await refreshEventMessage(client, event.discordGuildId, eventId);
 
   console.log(`Marked event ${eventId} as completed.`);
 
-  const guild = await client.guilds.fetch(event.discordGuildId);
+  const guild = completedGuild;
 
   await writeAuditLog({
     guildId: event.guildDatabaseId,

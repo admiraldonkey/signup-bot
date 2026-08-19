@@ -49,6 +49,15 @@ import {
   listEventReminders,
   removeEventReminder,
 } from "./event-reminders.js";
+import {
+  addEventRoleOption,
+  closeRoleRequestGroup,
+  listEventRoleOptions,
+  listRoleRequestGroups,
+  postRoleRequestGroup,
+  showEventRoleRequests,
+} from "./event-role-requests.js";
+import { refreshRoleRequestMessages } from "../role-requests/role-request-message.js";
 import { reschedulePendingEventReminders } from "../reminders/reminder-scheduling.js";
 import { editEvent } from "./event-edit.js";
 import { getPublicOrganiserDisplay } from "../events/organiser-display.js";
@@ -120,6 +129,30 @@ export async function handleEventCommand(
 
     case "organiser-clear":
       await clearEventOrganiser(interaction);
+      return;
+
+    case "role-option-add":
+      await addEventRoleOption(interaction);
+      return;
+
+    case "role-option-list":
+      await listEventRoleOptions(interaction);
+      return;
+
+    case "role-group-post":
+      await postRoleRequestGroup(interaction);
+      return;
+
+    case "role-group-list":
+      await listRoleRequestGroups(interaction);
+      return;
+
+    case "role-group-close":
+      await closeRoleRequestGroup(interaction);
+      return;
+
+    case "role-requests":
+      await showEventRoleRequests(interaction);
       return;
 
     case "edit":
@@ -1530,6 +1563,8 @@ async function cancelEvent(
     interaction.guild,
     eventId,
   );
+
+  await refreshRoleRequestMessages(interaction.guild, eventId);
 
   await interaction.editReply({
     content: [

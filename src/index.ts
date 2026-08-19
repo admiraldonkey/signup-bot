@@ -14,6 +14,7 @@ import {
   stopEventScheduler,
 } from "./scheduler/event-scheduler.js";
 import { handleOrganiserButton } from "./interactions/organiser-button.js";
+import { handleRoleRequestButton } from "./interactions/role-request-button.js";
 
 const token = process.env.DISCORD_TOKEN;
 
@@ -85,6 +86,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (!handled) {
         handled = await handleOrganiserButton(interaction);
+      }
+
+      if (!handled) {
+        handled = await handleRoleRequestButton(interaction);
       }
 
       if (!handled) {

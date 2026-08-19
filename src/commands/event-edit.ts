@@ -20,6 +20,7 @@ import {
   scheduleAttendanceClose,
   scheduleEventCompletion,
 } from "../scheduler/action-maintenance.js";
+import { rescheduleOpenRoleRequestGroupCloses } from "../role-requests/role-request-scheduling.js";
 
 type CachedInteraction = ChatInputCommandInteraction<"cached">;
 
@@ -532,6 +533,10 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
 
   if (hasStartChange || closeOption !== null) {
     await reschedulePendingEventReminders(event.id);
+  }
+
+  if (hasStartChange) {
+    await rescheduleOpenRoleRequestGroupCloses(event.id);
   }
 
   const refreshResult = await refreshAttendanceMessage(

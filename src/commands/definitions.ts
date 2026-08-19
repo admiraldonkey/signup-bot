@@ -450,6 +450,299 @@ export const commandDefinitions = [
 
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("role-option-add")
+        .setDescription("Adds a requestable role to an event.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event to add the role to.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("name")
+            .setDescription("Role name, such as Captain or Carpenter.")
+            .setMinLength(2)
+            .setMaxLength(100)
+            .setRequired(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("description")
+            .setDescription("Optional description of this role.")
+            .setMaxLength(500),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("restriction")
+            .setDescription("Who may submit requests for this role.")
+            .addChoices(
+              {
+                name: "Open",
+                value: "open",
+              },
+              {
+                name: "Qualified only",
+                value: "qualified_only",
+              },
+            ),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("qualified-role-1")
+            .setDescription("Discord role indicating full qualification."),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("qualified-role-2")
+            .setDescription("Additional full qualification role."),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("qualified-role-3")
+            .setDescription("Additional full qualification role."),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("qualified-role-4")
+            .setDescription("Additional full qualification role."),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("supervised-role-1")
+            .setDescription("Qualification requiring supervision."),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("supervised-role-2")
+            .setDescription("Additional supervised qualification role."),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("supervised-role-3")
+            .setDescription("Additional supervised qualification role."),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("supervised-role-4")
+            .setDescription("Additional supervised qualification role."),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("role-option-list")
+        .setDescription("Lists the requestable roles configured for an event.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event whose role options should be shown.")
+            .setMinValue(1)
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("role-group-post")
+        .setDescription(
+          "Posts a role-request message for selected event roles.",
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event this request group belongs to.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("name")
+            .setDescription("Name of this request group.")
+            .setMinLength(2)
+            .setMaxLength(100)
+            .setRequired(true),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-1")
+            .setDescription("Role-option ID from role-option-list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addChannelOption((option) =>
+          option
+            .setName("channel")
+            .setDescription(
+              "Destination; defaults to the configured role-request channel.",
+            )
+            .addChannelTypes(
+              ChannelType.GuildText,
+              ChannelType.GuildAnnouncement,
+            ),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("description")
+            .setDescription("Optional instructions for this request group.")
+            .setMaxLength(800),
+        )
+
+        .addBooleanOption((option) =>
+          option
+            .setName("requires-signup")
+            .setDescription(
+              "Require Attending/Tentative. Defaults to Yes on signup events.",
+            ),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("close-minutes-before-start")
+            .setDescription(
+              "Close requests this many minutes before event start. Defaults to 0.",
+            )
+            .setMinValue(0)
+            .setMaxValue(10080),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("notify-role")
+            .setDescription(
+              "Optional role to ping when this request group is posted.",
+            ),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-2")
+            .setDescription("Additional role-option ID.")
+            .setMinValue(1),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-3")
+            .setDescription("Additional role-option ID.")
+            .setMinValue(1),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-4")
+            .setDescription("Additional role-option ID.")
+            .setMinValue(1),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-5")
+            .setDescription("Additional role-option ID.")
+            .setMinValue(1),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-6")
+            .setDescription("Additional role-option ID.")
+            .setMinValue(1),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-7")
+            .setDescription("Additional role-option ID.")
+            .setMinValue(1),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-8")
+            .setDescription("Additional role-option ID.")
+            .setMinValue(1),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-9")
+            .setDescription("Additional role-option ID.")
+            .setMinValue(1),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-10")
+            .setDescription("Additional role-option ID.")
+            .setMinValue(1),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("role-group-list")
+        .setDescription("Lists the role-request groups for an event.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event whose groups should be listed.")
+            .setMinValue(1)
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("role-group-close")
+        .setDescription("Closes a role-request group immediately.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("group-id")
+            .setDescription("The role-request group to close.")
+            .setMinValue(1)
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("role-requests")
+        .setDescription(
+          "Shows volunteers and other qualified attendees for an event.",
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The event whose role requests should be shown.")
+            .setMinValue(1)
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("reminder-add")
         .setDescription("Adds a scheduled custom reminder to an event.")
 
