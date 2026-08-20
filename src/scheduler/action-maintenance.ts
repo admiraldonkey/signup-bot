@@ -125,6 +125,38 @@ export async function scheduleEventCompletion(
     });
 }
 
+export async function markEventPublicationCompleted(
+  eventId: number,
+  completedAt = new Date(),
+): Promise<void> {
+  await db
+    .update(scheduledActions)
+    .set({
+      status: "completed",
+
+      lockedAt: null,
+
+      completedAt,
+
+      lastError: null,
+
+      updatedAt: completedAt,
+    })
+    .where(
+      and(
+        eq(scheduledActions.eventId, eventId),
+
+        eq(scheduledActions.actionKey, "publish_event"),
+
+        /*
+         * Include failed here because an admin may manually publish
+         * an event after its automatic publication previously failed.
+         */
+        inArray(scheduledActions.status, ["pending", "processing", "failed"]),
+      ),
+    );
+}
+
 export async function cancelEventScheduledActions(
   eventId: number,
 ): Promise<void> {
@@ -143,6 +175,81 @@ export async function cancelEventScheduledActions(
       and(
         eq(scheduledActions.eventId, eventId),
         inArray(scheduledActions.status, ["pending", "processing"]),
+      ),
+    );
+}
+
+export async function scheduleEventPublication(
+  eventId: number,
+  dueAt: Date,
+): Promise<void> {
+  const now = new Date();
+
+  await db
+    .insert(scheduledActions)
+    .values({
+      eventId,
+
+      actionKey: "publish_event",
+
+      dueAt,
+
+      status: "pending",
+
+      attemptCount: 0,
+
+      lockedAt: null,
+
+      completedAt: null,
+
+      lastError: null,
+
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: [scheduledActions.eventId, scheduledActions.actionKey],
+
+      set: {
+        dueAt,
+
+        status: "pending",
+
+        attemptCount: 0,
+
+        lockedAt: null,
+
+        completedAt: null,
+
+        lastError: null,
+
+        updatedAt: now,
+      },
+    });
+}
+
+export async function cancelEventPublication(eventId: number): Promise<void> {
+  const now = new Date();
+
+  await db
+    .update(scheduledActions)
+    .set({
+      status: "cancelled",
+
+      lockedAt: null,
+
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(scheduledActions.eventId, eventId),
+
+        eq(scheduledActions.actionKey, "publish_event"),
+
+        /*
+         * Clearing an automatic publication schedule should also
+         * retire a previously-failed publication action.
+         */
+        inArray(scheduledActions.status, ["pending", "processing", "failed"]),
       ),
     );
 }

@@ -310,6 +310,8 @@ async function handleCoverClaim(
 
       status: events.status,
 
+      startsAt: events.startsAt,
+
       guildDatabaseId: events.ownerGuildId,
 
       discordGuildId: discordGuilds.discordGuildId,
@@ -333,6 +335,14 @@ async function handleCoverClaim(
   if (event.status === "cancelled" || event.status === "completed") {
     await interaction.editReply(
       "This event no longer requires organiser cover.",
+    );
+
+    return;
+  }
+
+  if (event.startsAt <= new Date()) {
+    await interaction.editReply(
+      "This event has already started and can no longer be claimed through organiser cover.",
     );
 
     return;

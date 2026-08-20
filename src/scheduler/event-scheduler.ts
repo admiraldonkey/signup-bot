@@ -19,6 +19,7 @@ import {
   eventReminders,
   eventOrganiserAssignments,
   guildSettings,
+  roleRequestGroups,
 } from "../db/schema.js";
 import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
 import { writeAuditLog } from "../audit/audit-log.js";
@@ -26,18 +27,22 @@ import { sendEventCustomMessage } from "../events/event-custom-message.js";
 import { REMINDER_ACTION_PREFIX } from "../reminders/reminder-scheduling.js";
 import { reschedulePendingEventReminders } from "../reminders/reminder-scheduling.js";
 import { escalateAfterFailedOrganiserAssignment } from "../organisers/organiser-escalation.js";
-
 import {
   ORGANISER_COVER_REQUEST_ACTION_PREFIX,
   ORGANISER_TIMEOUT_ACTION_PREFIX,
   ORGANISER_WARNING_ACTION_PREFIX,
   cancelAllOrganiserEscalationActions,
 } from "../organisers/organiser-scheduling.js";
-
 import {
   sendOrganiserCoverRequest,
   sendOrganiserPendingWarning,
 } from "../events/organiser-notification.js";
+import { ROLE_REQUEST_GROUP_CLOSE_ACTION_PREFIX } from "../role-requests/role-request-scheduling.js";
+import {
+  refreshRoleRequestGroupMessage,
+  refreshRoleRequestMessages,
+} from "../role-requests/role-request-message.js";
+import { publishStoredEvent } from "../events/event-publication.js";
 
 const POLL_INTERVAL_MS = 15_000;
 
@@ -267,7 +272,22 @@ async function executeAction(
     return;
   }
 
+  if (action.actionKey.startsWith(ROLE_REQUEST_GROUP_CLOSE_ACTION_PREFIX)) {
+    const groupId = parseActionId(
+      action.actionKey,
+      ROLE_REQUEST_GROUP_CLOSE_ACTION_PREFIX,
+    );
+
+    await executeRoleRequestGroupClose(client, action.eventId, groupId);
+
+    return;
+  }
+
   switch (action.actionKey) {
+    case "publish_event":
+      await executePublishEvent(client, action.eventId);
+      return;
+
     case "close_attendance":
       await executeCloseAttendance(client, action.eventId);
       return;
@@ -615,6 +635,194 @@ async function executeOrganiserCoverRequest(
   });
 }
 
+async function executeRoleRequestGroupClose(
+  client: Client<true>,
+  eventId: number,
+  groupId: number,
+): Promise<void> {
+  const [group] = await db
+    .select({
+      id: roleRequestGroups.id,
+
+      name: roleRequestGroups.name,
+
+      eventId: roleRequestGroups.eventId,
+
+      closedAt: roleRequestGroups.closedAt,
+
+      eventName: events.name,
+
+      eventStatus: events.status,
+
+      guildDatabaseId: events.ownerGuildId,
+
+      discordGuildId: discordGuilds.discordGuildId,
+    })
+    .from(roleRequestGroups)
+    .innerJoin(events, eq(events.id, roleRequestGroups.eventId))
+    .innerJoin(discordGuilds, eq(discordGuilds.id, events.ownerGuildId))
+    .where(
+      and(
+        eq(roleRequestGroups.id, groupId),
+
+        eq(roleRequestGroups.eventId, eventId),
+      ),
+    )
+    .limit(1);
+
+  if (!group) {
+    return;
+  }
+
+  if (!group.closedAt) {
+    const now = new Date();
+
+    await db
+      .update(roleRequestGroups)
+      .set({
+        closedAt: now,
+
+        updatedAt: now,
+      })
+      .where(eq(roleRequestGroups.id, group.id));
+  }
+
+  const guild = await client.guilds.fetch(group.discordGuildId);
+
+  await refreshRoleRequestGroupMessage(guild, group.id);
+
+  await writeAuditLog({
+    guildId: group.guildDatabaseId,
+
+    guild,
+
+    actorUserId: null,
+
+    action: "scheduler.role_group_close",
+
+    outcome: "success",
+
+    summary: `Closed role-request group "${group.name}" (#${group.id}) for "${group.eventName}" (#${group.eventId}).`,
+
+    targetType: "role_request_group",
+
+    targetId: String(group.id),
+  });
+
+  console.log(
+    `Closed role-request group ${group.id} for event ${group.eventId}.`,
+  );
+}
+
+async function executePublishEvent(
+  client: Client<true>,
+  eventId: number,
+): Promise<void> {
+  const event = await loadScheduledEvent(eventId);
+
+  /*
+   * The event may have been deleted after the scheduled action
+   * was created.
+   */
+  if (!event) {
+    return;
+  }
+
+  /*
+   * Manual early publication may have beaten this scheduled action.
+   *
+   * Cancellation/completion also makes publication irrelevant.
+   */
+  if (
+    event.publishedAt ||
+    event.status === "cancelled" ||
+    event.status === "completed"
+  ) {
+    return;
+  }
+
+  const guild = await client.guilds.fetch(event.discordGuildId);
+
+  const result = await publishStoredEvent(guild, eventId);
+
+  if (!result.ok) {
+    /*
+     * These states can occur harmlessly because another operation
+     * won a race with the scheduler.
+     */
+    if (
+      result.reason === "not-found" ||
+      result.reason === "already-published" ||
+      result.reason === "inactive"
+    ) {
+      return;
+    }
+
+    /*
+     * Retrying after the event start or signup deadline would not
+     * make the publication valid again. Complete the scheduler action
+     * normally, but leave an audit trail explaining why nothing was
+     * published.
+     */
+    await writeAuditLog({
+      guildId: event.guildDatabaseId,
+
+      guild,
+
+      actorUserId: null,
+
+      action: "scheduler.publish_event",
+
+      outcome: "failure",
+
+      summary:
+        result.reason === "event-started"
+          ? `Scheduled publication for event #${eventId} was skipped because the event had already started.`
+          : `Scheduled publication for event #${eventId} was skipped because its signup deadline had already passed.`,
+
+      targetType: "event",
+
+      targetId: String(eventId),
+
+      details: {
+        reason: result.reason,
+      },
+    });
+
+    console.warn(
+      `Scheduled publication for event ${eventId} was skipped: ${result.reason}.`,
+    );
+
+    return;
+  }
+
+  await writeAuditLog({
+    guildId: event.guildDatabaseId,
+
+    guild,
+
+    actorUserId: null,
+
+    action: "scheduler.publish_event",
+
+    outcome: "success",
+
+    summary: `Automatically published "${result.eventName}" (#${result.eventId}).`,
+
+    targetType: "event",
+
+    targetId: String(result.eventId),
+
+    details: {
+      messageUrl: result.messageUrl,
+
+      primaryOrganiserNotification: result.primaryOrganiserNotification,
+    },
+  });
+
+  console.log(`Automatically published event ${eventId}.`);
+}
+
 async function executeCloseAttendance(
   client: Client<true>,
   eventId: number,
@@ -648,7 +856,9 @@ async function executeCloseAttendance(
       );
   }
 
-  await refreshEventMessage(client, event.discordGuildId, eventId);
+  if (event.publishedAt) {
+    await refreshEventMessage(client, event.discordGuildId, eventId);
+  }
 
   console.log(`Automatically closed attendance for event ${eventId}.`);
 
@@ -707,7 +917,8 @@ async function executeCompleteEvent(
   }
 
   /*
-   * A completion action makes an outstanding close action redundant.
+   * Completion makes outstanding attendance-close or publication
+   * actions redundant.
    */
   await db
     .update(scheduledActions)
@@ -723,7 +934,10 @@ async function executeCompleteEvent(
     .where(
       and(
         eq(scheduledActions.eventId, eventId),
-        eq(scheduledActions.actionKey, "close_attendance"),
+        inArray(scheduledActions.actionKey, [
+          "close_attendance",
+          "publish_event",
+        ]),
         inArray(scheduledActions.status, ["pending", "processing"]),
       ),
     );
@@ -734,11 +948,17 @@ async function executeCompleteEvent(
    */
   await cancelAllOrganiserEscalationActions(eventId);
 
-  await refreshEventMessage(client, event.discordGuildId, eventId);
+  const completedGuild = await client.guilds.fetch(event.discordGuildId);
+
+  await refreshRoleRequestMessages(completedGuild, eventId);
+
+  if (event.publishedAt) {
+    await refreshEventMessage(client, event.discordGuildId, eventId);
+  }
 
   console.log(`Marked event ${eventId} as completed.`);
 
-  const guild = await client.guilds.fetch(event.discordGuildId);
+  const guild = completedGuild;
 
   await writeAuditLog({
     guildId: event.guildDatabaseId,
@@ -765,6 +985,8 @@ async function loadScheduledEvent(eventId: number) {
       id: events.id,
 
       status: events.status,
+
+      publishedAt: events.publishedAt,
 
       guildDatabaseId: events.ownerGuildId,
 
@@ -814,7 +1036,20 @@ async function markActionCompleted(actionId: number): Promise<void> {
 
       updatedAt: now,
     })
-    .where(eq(scheduledActions.id, actionId));
+    .where(
+      and(
+        eq(scheduledActions.id, actionId),
+
+        /*
+         * Only the worker which still owns the processing action may
+         * complete it.
+         *
+         * An administrator may have cancelled the action while it was
+         * executing, in which case that newer terminal state wins.
+         */
+        eq(scheduledActions.status, "processing"),
+      ),
+    );
 }
 
 async function handleActionFailure(
@@ -848,7 +1083,13 @@ async function handleActionFailure(
 
         updatedAt: now,
       })
-      .where(eq(scheduledActions.id, action.id));
+      .where(
+        and(
+          eq(scheduledActions.id, action.id),
+
+          eq(scheduledActions.status, "processing"),
+        ),
+      );
 
     return;
   }
@@ -877,7 +1118,13 @@ async function handleActionFailure(
 
       updatedAt: now,
     })
-    .where(eq(scheduledActions.id, action.id));
+    .where(
+      and(
+        eq(scheduledActions.id, action.id),
+
+        eq(scheduledActions.status, "processing"),
+      ),
+    );
 }
 
 async function executeEventReminder(

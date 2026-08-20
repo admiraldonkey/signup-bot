@@ -1,10 +1,7 @@
 import {
-  ChannelType,
   type ChatInputCommandInteraction,
   type GuildMember,
-  type Message,
   MessageFlags,
-  PermissionFlagsBits,
   type Role,
 } from "discord.js";
 import { and, asc, eq, gte, inArray, sql } from "drizzle-orm";
@@ -18,18 +15,12 @@ import { db } from "../db/client.js";
 import {
   attendanceResponses,
   eventAudiences,
-  eventMessages,
   eventPingRoles,
   events,
   eventTypes,
   scheduledActions,
   eventOrganiserAssignments,
 } from "../db/schema.js";
-import {
-  buildAttendanceButtons,
-  buildAttendanceEmbed,
-  EMPTY_ATTENDANCE_COUNTS,
-} from "../events/attendance-message.js";
 import {
   refreshAttendanceMessage,
   type AttendanceRefreshResult,
@@ -43,25 +34,30 @@ import {
 } from "../scheduler/action-maintenance.js";
 import { writeAuditLog } from "../audit/audit-log.js";
 import {
+  publishStoredEvent,
+  type EventPublicationResult,
+} from "../events/event-publication.js";
+import { publishEvent } from "./event-publish.js";
+import {
   addEventReminder,
   announceEvent,
   editEventReminder,
   listEventReminders,
   removeEventReminder,
 } from "./event-reminders.js";
+import {
+  addEventRoleOption,
+  closeRoleRequestGroup,
+  listEventRoleOptions,
+  listRoleRequestGroups,
+  postRoleRequestGroup,
+  showEventRoleRequests,
+} from "./event-role-requests.js";
+import { refreshRoleRequestMessages } from "../role-requests/role-request-message.js";
 import { reschedulePendingEventReminders } from "../reminders/reminder-scheduling.js";
 import { editEvent } from "./event-edit.js";
-import { getPublicOrganiserDisplay } from "../events/organiser-display.js";
 
-import {
-  type OrganiserNotificationDelivery,
-  sendOrganiserAssignmentNotification,
-} from "../events/organiser-notification.js";
 import { clearEventOrganiser, setEventOrganiser } from "./event-organisers.js";
-import {
-  buildOrganiserResponseActionValues,
-  calculateOrganiserResponseDeadline,
-} from "../organisers/organiser-scheduling.js";
 
 const EVENT_DATE_FORMAT = "yyyy-MM-dd HH:mm";
 
@@ -88,6 +84,10 @@ export async function handleEventCommand(
   switch (subcommand) {
     case "create":
       await createEvent(interaction);
+      return;
+
+    case "publish":
+      await publishEvent(interaction);
       return;
 
     case "list":
@@ -120,6 +120,30 @@ export async function handleEventCommand(
 
     case "organiser-clear":
       await clearEventOrganiser(interaction);
+      return;
+
+    case "role-option-add":
+      await addEventRoleOption(interaction);
+      return;
+
+    case "role-option-list":
+      await listEventRoleOptions(interaction);
+      return;
+
+    case "role-group-post":
+      await postRoleRequestGroup(interaction);
+      return;
+
+    case "role-group-list":
+      await listRoleRequestGroups(interaction);
+      return;
+
+    case "role-group-close":
+      await closeRoleRequestGroup(interaction);
+      return;
+
+    case "role-requests":
+      await showEventRoleRequests(interaction);
       return;
 
     case "edit":
@@ -235,18 +259,13 @@ async function createEvent(
     return;
   }
 
-  /*
-   * Event type
-   */
-
   const eventTypeIdText = interaction.options.getString("event-type", true);
 
   const eventTypeId = Number(eventTypeIdText);
 
   if (!Number.isSafeInteger(eventTypeId) || eventTypeId <= 0) {
     await interaction.editReply(
-      "The selected event type is invalid. " +
-        "Choose one from the autocomplete list.",
+      "The selected event type is invalid. Choose one from the autocomplete list.",
     );
 
     return;
@@ -264,7 +283,9 @@ async function createEvent(
     .where(
       and(
         eq(eventTypes.id, eventTypeId),
+
         eq(eventTypes.ownerGuildId, configuration.guildId),
+
         eq(eventTypes.active, true),
       ),
     )
@@ -278,18 +299,13 @@ async function createEvent(
     return;
   }
 
-  /*
-   * Region
-   */
-
   const audienceIdText = interaction.options.getString("region", true);
 
   const audienceId = Number(audienceIdText);
 
   if (!Number.isSafeInteger(audienceId) || audienceId <= 0) {
     await interaction.editReply(
-      "The selected region is invalid. " +
-        "Choose one from the autocomplete list.",
+      "The selected region is invalid. Choose one from the autocomplete list.",
     );
 
     return;
@@ -309,7 +325,9 @@ async function createEvent(
     .where(
       and(
         eq(eventAudiences.id, audienceId),
+
         eq(eventAudiences.ownerGuildId, configuration.guildId),
+
         eq(eventAudiences.active, true),
       ),
     )
@@ -322,10 +340,6 @@ async function createEvent(
 
     return;
   }
-
-  /*
-   * Timezone
-   */
 
   const timezoneOverride = interaction.options.getString("timezone")?.trim();
 
@@ -349,10 +363,6 @@ async function createEvent(
     return;
   }
 
-  /*
-   * Ordinary event fields
-   */
-
   const name = interaction.options.getString("name", true).trim();
 
   const description =
@@ -363,6 +373,27 @@ async function createEvent(
   const timeText = interaction.options.getString("time", true);
 
   const signupsEnabled = interaction.options.getBoolean("signups") ?? true;
+
+  const publishNowOption = interaction.options.getBoolean("publish-now");
+
+  const publishMinutesBeforeStart = interaction.options.getInteger(
+    "publish-minutes-before-start",
+  );
+
+  if (publishNowOption === true && publishMinutesBeforeStart !== null) {
+    await interaction.editReply(
+      [
+        "`publish-now` and `publish-minutes-before-start` cannot both be used.",
+        "",
+        "Either publish the event immediately or schedule it for later.",
+      ].join("\n"),
+    );
+
+    return;
+  }
+
+  const publishNow =
+    publishMinutesBeforeStart !== null ? false : (publishNowOption ?? true);
 
   const durationMinutes =
     interaction.options.getInteger("duration-minutes") ?? 60;
@@ -462,10 +493,6 @@ async function createEvent(
     return;
   }
 
-  /*
-   * Per-event ping roles
-   */
-
   const selectedPingRoles = [
     interaction.options.getRole("ping-role-1", true),
 
@@ -479,12 +506,6 @@ async function createEvent(
   const pingRoles = [
     ...new Map(selectedPingRoles.map((role) => [role.id, role])).values(),
   ];
-
-  if (pingRoles.length === 0) {
-    await interaction.editReply("At least one ping role must be selected.");
-
-    return;
-  }
 
   const invalidPingRoles = pingRoles.filter(
     (role) => role.id === interaction.guild.id || role.managed,
@@ -507,10 +528,6 @@ async function createEvent(
 
     return;
   }
-
-  /*
-   * Parse event time
-   */
 
   const parsedStart = parseEventDateTime(dateText, timeText, eventTimezone);
 
@@ -549,300 +566,203 @@ async function createEvent(
     minutes: durationMinutes,
   });
 
-  /*
-   * Attendance channel
-   */
+  const scheduledPublicationAt =
+    !publishNow && publishMinutesBeforeStart !== null
+      ? parsedStart.value
+          .minus({
+            minutes: publishMinutesBeforeStart,
+          })
+          .toJSDate()
+      : null;
 
-  const attendanceChannel = await interaction.guild.channels.fetch(
-    configuration.attendanceChannelId,
-  );
-
-  if (
-    !attendanceChannel ||
-    (attendanceChannel.type !== ChannelType.GuildText &&
-      attendanceChannel.type !== ChannelType.GuildAnnouncement) ||
-    !attendanceChannel.isSendable()
-  ) {
-    await interaction.editReply(
-      "The configured attendance channel no longer exists " +
-        "or cannot receive messages. Run `/setup configure` again.",
-    );
-
-    return;
-  }
-
-  const botMember =
-    interaction.guild.members.me ?? (await interaction.guild.members.fetchMe());
-
-  const channelPermissions = attendanceChannel.permissionsFor(botMember);
-
-  const missingPermissions: string[] = [];
-
-  if (!channelPermissions.has(PermissionFlagsBits.ViewChannel)) {
-    missingPermissions.push("View Channel");
-  }
-
-  if (!channelPermissions.has(PermissionFlagsBits.SendMessages)) {
-    missingPermissions.push("Send Messages");
-  }
-
-  if (!channelPermissions.has(PermissionFlagsBits.EmbedLinks)) {
-    missingPermissions.push("Embed Links");
-  }
-
-  if (!channelPermissions.has(PermissionFlagsBits.ReadMessageHistory)) {
-    missingPermissions.push("Read Message History");
-  }
-
-  if (missingPermissions.length > 0) {
+  if (scheduledPublicationAt && scheduledPublicationAt <= now.toJSDate()) {
     await interaction.editReply(
       [
-        "The event could not be posted because the bot is missing:",
+        "The scheduled publication time would already have passed.",
         "",
-        ...missingPermissions.map((permission) => `• ${permission}`),
+        "Use a smaller `publish-minutes-before-start` value or choose a later event time.",
       ].join("\n"),
     );
 
     return;
   }
 
-  const canMentionRestrictedRoles = channelPermissions.has(
-    PermissionFlagsBits.MentionEveryone,
-  );
-
-  const unmentionableRoles = pingRoles.filter(
-    (role) => !role.mentionable && !canMentionRestrictedRoles,
-  );
-
-  if (unmentionableRoles.length > 0) {
-    await interaction.editReply({
-      content: [
-        "The bot cannot mention these roles:",
+  /*
+   * Signup events must be published before signups close.
+   *
+   * Publishing at exactly the same moment as the closing action would
+   * create an unnecessary scheduler race, so require it to be earlier.
+   */
+  if (
+    scheduledPublicationAt &&
+    signupsEnabled &&
+    attendanceClosesAt &&
+    scheduledPublicationAt >= attendanceClosesAt.toJSDate()
+  ) {
+    await interaction.editReply(
+      [
+        "The event would be published after its signup deadline.",
         "",
-        ...unmentionableRoles.map((role) => `• ${role.name}`),
-        "",
-        "Make the roles mentionable, or grant the bot “Mention @everyone, @here, and All Roles” in the attendance channel.",
+        "Schedule publication earlier than the configured attendance closing time.",
       ].join("\n"),
-
-      allowedMentions: {
-        parse: [],
-      },
-    });
+    );
 
     return;
   }
 
-  /*
-   * Create the database records and Discord message.
-   */
+  const creationResult = await db.transaction(async (transaction) => {
+    const [event] = await transaction
+      .insert(events)
+      .values({
+        templateId: null,
 
-  let createdEventId: number | null = null;
+        ownerGuildId: configuration.guildId,
 
-  let sentMessage: Message | null = null;
+        eventTypeId: eventType.id,
 
-  try {
-    const creationResult = await db.transaction(async (transaction) => {
-      const [event] = await transaction
-        .insert(events)
+        audienceId: audience.id,
+
+        timezone: eventTimezone,
+
+        showDetailedDeadline,
+
+        name,
+
+        description,
+
+        startsAt: parsedStart.value.toJSDate(),
+
+        endsAt: endsAt.toJSDate(),
+
+        /*
+         * An unpublished event exists internally but attendance has
+         * not yet opened to members.
+         */
+        attendanceOpensAt: null,
+
+        signupsEnabled,
+
+        attendanceClosesAt: attendanceClosesAt?.toJSDate() ?? null,
+
+        roleRequestsOpenAt: null,
+
+        publishedAt: null,
+
+        publishMinutesBeforeStart,
+
+        publicationChannelId: configuration.attendanceChannelId,
+
+        status: "scheduled",
+
+        createdByUserId: interaction.user.id,
+
+        updatedAt: new Date(),
+      })
+      .returning({
+        id: events.id,
+
+        timezone: events.timezone,
+
+        showDetailedDeadline: events.showDetailedDeadline,
+
+        name: events.name,
+
+        startsAt: events.startsAt,
+
+        signupsEnabled: events.signupsEnabled,
+
+        attendanceClosesAt: events.attendanceClosesAt,
+      });
+
+    if (!event) {
+      throw new Error("The database did not return the created event.");
+    }
+
+    await transaction.insert(eventPingRoles).values(
+      pingRoles.map((role, index) => ({
+        eventId: event.id,
+
+        discordRoleId: role.id,
+
+        roleName: role.name,
+
+        sortOrder: index,
+      })),
+    );
+
+    if (primaryOrganiserMember) {
+      const [assignment] = await transaction
+        .insert(eventOrganiserAssignments)
         .values({
-          templateId: null,
+          eventId: event.id,
 
-          ownerGuildId: configuration.guildId,
+          slot: "primary",
 
-          eventTypeId: eventType.id,
+          discordUserId: primaryOrganiserMember.id,
 
-          audienceId: audience.id,
+          displayNameSnapshot: primaryOrganiserMember.displayName,
 
-          timezone: eventTimezone,
+          status: "pending",
 
-          showDetailedDeadline,
+          isCurrent: true,
 
-          name,
-          description,
+          assignedByUserId: interaction.user.id,
 
-          startsAt: parsedStart.value.toJSDate(),
+          /*
+           * Organiser responsibility begins when the event becomes public,
+           * not merely when its internal event record is created.
+           *
+           * publishStoredEvent() activates this assignment and creates the
+           * warning/timeout actions.
+           */
+          activatedAt: null,
 
-          endsAt: endsAt.toJSDate(),
-
-          attendanceOpensAt: now.toJSDate(),
-
-          signupsEnabled,
-
-          attendanceClosesAt: attendanceClosesAt?.toJSDate() ?? null,
-
-          roleRequestsOpenAt: null,
-
-          status: signupsEnabled ? "open" : "scheduled",
-
-          createdByUserId: interaction.user.id,
+          responseDeadlineAt: null,
 
           updatedAt: new Date(),
         })
         .returning({
-          id: events.id,
-
-          timezone: events.timezone,
-
-          showDetailedDeadline: events.showDetailedDeadline,
-
-          name: events.name,
-
-          description: events.description,
-
-          startsAt: events.startsAt,
-
-          signupsEnabled: events.signupsEnabled,
-
-          attendanceClosesAt: events.attendanceClosesAt,
-
-          status: events.status,
+          id: eventOrganiserAssignments.id,
         });
 
-      if (!event) {
-        throw new Error("The database did not return the created event.");
-      }
-
-      await transaction.insert(eventPingRoles).values(
-        pingRoles.map((role, index) => ({
-          eventId: event.id,
-
-          discordRoleId: role.id,
-
-          roleName: role.name,
-
-          sortOrder: index,
-        })),
-      );
-
-      let primaryAssignmentId: number | null = null;
-
-      let backupAssignmentId: number | null = null;
-
-      if (primaryOrganiserMember) {
-        const activatedAt = new Date();
-
-        const responseDeadlineAt = calculateOrganiserResponseDeadline(
-          activatedAt,
-          configuration.organiserPrimaryResponseMinutes,
+      if (!assignment) {
+        throw new Error(
+          "The database did not return the primary organiser assignment.",
         );
-
-        const [assignment] = await transaction
-          .insert(eventOrganiserAssignments)
-          .values({
-            eventId: event.id,
-
-            slot: "primary",
-
-            discordUserId: primaryOrganiserMember.id,
-
-            displayNameSnapshot: primaryOrganiserMember.displayName,
-
-            status: "pending",
-
-            isCurrent: true,
-
-            assignedByUserId: interaction.user.id,
-
-            activatedAt,
-
-            responseDeadlineAt,
-
-            updatedAt: activatedAt,
-          })
-          .returning({
-            id: eventOrganiserAssignments.id,
-          });
-
-        if (!assignment) {
-          throw new Error(
-            "The database did not return the primary organiser assignment.",
-          );
-        }
-
-        primaryAssignmentId = assignment.id;
-
-        const actionValues = buildOrganiserResponseActionValues({
-          eventId: event.id,
-
-          assignmentId: assignment.id,
-
-          activatedAt,
-
-          responseDeadlineAt,
-
-          warningMinutesBefore: configuration.organiserWarningMinutesBefore,
-        });
-
-        await transaction.insert(scheduledActions).values(actionValues);
       }
+    }
 
-      if (backupOrganiserMember) {
-        const [assignment] = await transaction
-          .insert(eventOrganiserAssignments)
-          .values({
-            eventId: event.id,
+    if (backupOrganiserMember) {
+      await transaction.insert(eventOrganiserAssignments).values({
+        eventId: event.id,
 
-            slot: "backup",
+        slot: "backup",
 
-            discordUserId: backupOrganiserMember.id,
+        discordUserId: backupOrganiserMember.id,
 
-            displayNameSnapshot: backupOrganiserMember.displayName,
+        displayNameSnapshot: backupOrganiserMember.displayName,
 
-            status: "pending",
+        status: "pending",
 
-            isCurrent: true,
+        isCurrent: true,
 
-            assignedByUserId: interaction.user.id,
+        assignedByUserId: interaction.user.id,
 
-            updatedAt: new Date(),
+        activatedAt: null,
 
-            activatedAt: null,
+        responseDeadlineAt: null,
 
-            responseDeadlineAt: null,
-          })
-          .returning({
-            id: eventOrganiserAssignments.id,
-          });
+        updatedAt: new Date(),
+      });
+    }
 
-        if (!assignment) {
-          throw new Error(
-            "The database did not return the backup organiser assignment.",
-          );
-        }
-
-        backupAssignmentId = assignment.id;
-      }
-
-      /*
-       * Signup events need an automatic attendance-closing action.
-       * Announcement-only events do not.
-       */
-      if (signupsEnabled && attendanceClosesAt) {
-        await transaction.insert(scheduledActions).values({
-          eventId: event.id,
-
-          actionKey: "close_attendance",
-
-          dueAt: attendanceClosesAt.toJSDate(),
-
-          status: "pending",
-
-          attemptCount: 0,
-
-          updatedAt: new Date(),
-        });
-      }
-
-      /*
-       * Every event still needs to be completed automatically,
-       * regardless of whether it uses signups.
-       */
+    if (scheduledPublicationAt) {
       await transaction.insert(scheduledActions).values({
         eventId: event.id,
 
-        actionKey: "complete_event",
+        actionKey: "publish_event",
 
-        dueAt: endsAt.toJSDate(),
+        dueAt: scheduledPublicationAt,
 
         status: "pending",
 
@@ -850,237 +770,248 @@ async function createEvent(
 
         updatedAt: new Date(),
       });
-      return {
-        event,
+    }
 
-        primaryAssignmentId,
+    if (signupsEnabled && attendanceClosesAt) {
+      await transaction.insert(scheduledActions).values({
+        eventId: event.id,
 
-        backupAssignmentId,
-      };
+        actionKey: "close_attendance",
+
+        dueAt: attendanceClosesAt.toJSDate(),
+
+        status: "pending",
+
+        attemptCount: 0,
+
+        updatedAt: new Date(),
+      });
+    }
+
+    await transaction.insert(scheduledActions).values({
+      eventId: event.id,
+
+      actionKey: "complete_event",
+
+      dueAt: endsAt.toJSDate(),
+
+      status: "pending",
+
+      attemptCount: 0,
+
+      updatedAt: new Date(),
     });
 
-    const createdEvent = creationResult.event;
+    return {
+      event,
+    };
+  });
 
-    createdEventId = createdEvent.id;
+  const createdEvent = creationResult.event;
 
-    const organiserStart = DateTime.fromJSDate(createdEvent.startsAt, {
-      zone: createdEvent.timezone,
-    });
+  let publication: Extract<EventPublicationResult, { ok: true }> | null = null;
 
-    /*
-     * A signup event must have a closing time.
-     *
-     * A no-signup event deliberately stores NULL here.
-     */
-    if (createdEvent.signupsEnabled && !createdEvent.attendanceClosesAt) {
+  if (publishNow) {
+    try {
+      const result = await publishStoredEvent(
+        interaction.guild,
+        createdEvent.id,
+      );
+
+      /*
+       * A freshly-created event should always be publishable here.
+       * Treat any ordinary publication refusal as a creation failure
+       * rather than leaving behind an unexpected draft.
+       */
+      if (!result.ok) {
+        throw new Error(
+          `The newly-created event could not be published: ${result.reason}.`,
+        );
+      }
+
+      publication = result;
+    } catch (error) {
+      /*
+       * Immediate creation/publication remains atomic from the user's
+       * perspective. If publication fails, remove the newly-created
+       * internal event and its cascading records.
+       *
+       * Manual drafts and scheduled publications never enter this path.
+       */
+      await db
+        .delete(events)
+        .where(eq(events.id, createdEvent.id))
+        .catch((deleteError: unknown) => {
+          console.error(
+            `Failed to remove event ${createdEvent.id} after publication failure:`,
+            deleteError,
+          );
+        });
+
+      throw error;
+    }
+  }
+
+  const primaryNotification = publication?.primaryOrganiserNotification ?? null;
+
+  const organiserStart = DateTime.fromJSDate(createdEvent.startsAt, {
+    zone: createdEvent.timezone,
+  });
+
+  const publicationTimestamp = scheduledPublicationAt
+    ? Math.floor(scheduledPublicationAt.getTime() / 1000)
+    : null;
+
+  const responseLines = [
+    publishNow
+      ? `✅ **${createdEvent.name}** was created and published.`
+      : scheduledPublicationAt
+        ? `✅ **${createdEvent.name}** was created and scheduled for publication.`
+        : `✅ **${createdEvent.name}** was created as an unpublished event.`,
+    "",
+    `**Event ID:** ${createdEvent.id}`,
+    `**Event type:** ${eventType.name}`,
+    `**Region:** ${audience.name}`,
+    `**Ping roles:** ${pingRoles.map((role) => `<@&${role.id}>`).join(" ")}`,
+    `**Scheduled as:** ${organiserStart.toFormat("dd LLL yyyy, HH:mm ZZZZ")}`,
+    `**Timezone:** \`${createdEvent.timezone}\``,
+    `**Your local time:** <t:${Math.floor(
+      createdEvent.startsAt.getTime() / 1000,
+    )}:F>`,
+    `**Publication:** ${
+      publishNow
+        ? "Published"
+        : publicationTimestamp !== null
+          ? `<t:${publicationTimestamp}:F> (<t:${publicationTimestamp}:R>)`
+          : "Manual publication"
+    }`,
+  ];
+
+  if (primaryOrganiserMember) {
+    responseLines.push(
+      `**Primary organiser:** <@${primaryOrganiserMember.id}>`,
+    );
+  } else {
+    responseLines.push("**Primary organiser:** Not assigned");
+  }
+
+  if (backupOrganiserMember) {
+    responseLines.push(`**Backup organiser:** <@${backupOrganiserMember.id}>`);
+  }
+
+  if (!publishNow && primaryOrganiserMember) {
+    responseLines.push(
+      "**Organiser confirmation:** Will begin when the event is published",
+    );
+  } else if (primaryNotification === "dm") {
+    responseLines.push("**Organiser confirmation:** DM sent");
+  } else if (primaryNotification === "admin_channel") {
+    responseLines.push(
+      "**Organiser confirmation:** DM failed; fallback posted in the Event Administration channel",
+    );
+  } else if (primaryNotification === "failed") {
+    responseLines.push(
+      "**Organiser confirmation:** ⚠️ Assignment saved, but the confirmation request could not be delivered",
+    );
+  }
+
+  if (createdEvent.signupsEnabled) {
+    const closingTime = createdEvent.attendanceClosesAt;
+
+    if (!closingTime) {
       throw new Error(
         "The created signup event did not return an attendance closing time.",
       );
     }
 
-    const organiser = await getPublicOrganiserDisplay(createdEvent.id);
-
-    const eventDisplay = {
-      ...createdEvent,
-
-      audienceName: audience.name,
-
-      eventTypeName: eventType.name,
-
-      organiser,
-    };
-
-    sentMessage = await attendanceChannel.send({
-      content: pingRoles.map((role) => `<@&${role.id}>`).join(" "),
-
-      embeds: [buildAttendanceEmbed(eventDisplay, EMPTY_ATTENDANCE_COUNTS)],
-
-      components: createdEvent.signupsEnabled
-        ? [buildAttendanceButtons(createdEvent.id, EMPTY_ATTENDANCE_COUNTS)]
-        : [],
-
-      allowedMentions: {
-        parse: [],
-
-        roles: pingRoles.map((role) => role.id),
-      },
+    const organiserClose = DateTime.fromJSDate(closingTime, {
+      zone: createdEvent.timezone,
     });
 
-    await db.insert(eventMessages).values({
-      eventId: createdEvent.id,
-
-      guildId: configuration.guildId,
-
-      channelId: attendanceChannel.id,
-
-      messageId: sentMessage.id,
-
-      kind: "attendance",
-    });
-
-    let primaryNotification: OrganiserNotificationDelivery | null = null;
-
-    if (creationResult.primaryAssignmentId && primaryOrganiserMember) {
-      primaryNotification = await sendOrganiserAssignmentNotification({
-        guild: interaction.guild,
-
-        assignmentId: creationResult.primaryAssignmentId,
-
-        eventId: createdEvent.id,
-
-        eventName: createdEvent.name,
-
-        discordUserId: primaryOrganiserMember.id,
-
-        slot: "primary",
-
-        eventAdminChannelId: configuration.eventAdminChannelId,
-
-        eventMessageUrl: sentMessage.url,
-      });
-    }
-
-    const responseLines = [
-      `✅ **${createdEvent.name}** was created.`,
-      "",
-      `**Event type:** ${eventType.name}`,
-      `**Region:** ${audience.name}`,
-      `**Ping roles:** ${pingRoles.map((role) => `<@&${role.id}>`).join(" ")}`,
-      `**Scheduled as:** ${organiserStart.toFormat("dd LLL yyyy, HH:mm ZZZZ")}`,
-      `**Timezone:** \`${createdEvent.timezone}\``,
-      `**Your local time:** <t:${Math.floor(
-        createdEvent.startsAt.getTime() / 1000,
+    responseLines.push(
+      "**Signups:** Enabled",
+      `**Attendance closes:** ${organiserClose.toFormat(
+        "dd LLL yyyy, HH:mm ZZZZ",
+      )}`,
+      `**Closure in your local time:** <t:${Math.floor(
+        closingTime.getTime() / 1000,
       )}:F>`,
-    ];
-
-    if (primaryOrganiserMember) {
-      responseLines.push(
-        `**Primary organiser:** <@${primaryOrganiserMember.id}>`,
-      );
-    } else {
-      responseLines.push("**Primary organiser:** Not assigned");
-    }
-
-    if (backupOrganiserMember) {
-      responseLines.push(
-        `**Backup organiser:** <@${backupOrganiserMember.id}>`,
-      );
-    }
-
-    if (primaryNotification === "dm") {
-      responseLines.push("**Organiser confirmation:** DM sent");
-    } else if (primaryNotification === "admin_channel") {
-      responseLines.push(
-        "**Organiser confirmation:** DM failed; fallback posted in the Event Administration channel",
-      );
-    } else if (primaryNotification === "failed") {
-      responseLines.push(
-        "**Organiser confirmation:** ⚠️ Assignment saved, but the confirmation request could not be delivered",
-      );
-    }
-
-    if (createdEvent.signupsEnabled) {
-      /*
-       * TypeScript does not necessarily retain the earlier narrowing
-       * across all of this code, so assign it locally before use.
-       */
-      const closingTime = createdEvent.attendanceClosesAt;
-
-      if (!closingTime) {
-        throw new Error(
-          "The created signup event did not return an attendance closing time.",
-        );
-      }
-
-      const organiserClose = DateTime.fromJSDate(closingTime, {
-        zone: createdEvent.timezone,
-      });
-
-      responseLines.push(
-        `**Signups:** Enabled`,
-        `**Attendance closes:** ${organiserClose.toFormat(
-          "dd LLL yyyy, HH:mm ZZZZ",
-        )}`,
-        `**Closure in your local time:** <t:${Math.floor(
-          closingTime.getTime() / 1000,
-        )}:F>`,
-        `**Detailed deadline:** ${
-          createdEvent.showDetailedDeadline ? "Yes" : "No"
-        }`,
-      );
-    } else {
-      responseLines.push("**Signups:** Disabled");
-    }
-
-    responseLines.push(`**Event message:** ${sentMessage.url}`);
-
-    await interaction.editReply({
-      content: responseLines.join("\n"),
-
-      allowedMentions: {
-        parse: [],
-      },
-    });
-
-    await writeAuditLog({
-      guildId: configuration.guildId,
-
-      guild: interaction.guild,
-
-      actorUserId: interaction.user.id,
-
-      action: "event.create",
-
-      outcome: "success",
-
-      summary: `Created event "${createdEvent.name}" (#${createdEvent.id}).`,
-
-      targetType: "event",
-
-      targetId: String(createdEvent.id),
-
-      details: {
-        eventType: eventType.code,
-
-        region: audience.code,
-
-        signupsEnabled: createdEvent.signupsEnabled,
-
-        startsAt: createdEvent.startsAt.toISOString(),
-
-        pingRoleIds: pingRoles.map((role) => role.id),
-
-        primaryOrganiserUserId: primaryOrganiserMember?.id ?? null,
-
-        backupOrganiserUserId: backupOrganiserMember?.id ?? null,
-
-        primaryOrganiserNotification: primaryNotification,
-      },
-    });
-  } catch (error) {
-    if (sentMessage) {
-      await sentMessage.delete().catch((deleteError: unknown) => {
-        console.error(
-          "Failed to remove the partially created Discord message:",
-          deleteError,
-        );
-      });
-    }
-
-    if (createdEventId !== null) {
-      await db
-        .delete(events)
-        .where(eq(events.id, createdEventId))
-        .catch((deleteError: unknown) => {
-          console.error(
-            "Failed to remove the partially created event:",
-            deleteError,
-          );
-        });
-    }
-
-    throw error;
+      `**Detailed deadline:** ${
+        createdEvent.showDetailedDeadline ? "Yes" : "No"
+      }`,
+    );
+  } else {
+    responseLines.push("**Signups:** Disabled");
   }
+
+  if (publication) {
+    responseLines.push(`**Event message:** ${publication.messageUrl}`);
+  } else if (publicationTimestamp !== null) {
+    responseLines.push(
+      `**Public announcement:** Scheduled for <t:${publicationTimestamp}:F> (<t:${publicationTimestamp}:R>)`,
+      `**Manual override:** \`/event publish event-id:${createdEvent.id}\` can still publish it earlier.`,
+    );
+  } else {
+    responseLines.push(
+      `**Public announcement:** Not yet published. Use \`/event publish event-id:${createdEvent.id}\` when ready.`,
+    );
+  }
+
+  await interaction.editReply({
+    content: responseLines.join("\n"),
+
+    allowedMentions: {
+      parse: [],
+    },
+  });
+
+  await writeAuditLog({
+    guildId: configuration.guildId,
+
+    guild: interaction.guild,
+
+    actorUserId: interaction.user.id,
+
+    action: "event.create",
+
+    outcome: "success",
+
+    summary: `Created event "${createdEvent.name}" (#${createdEvent.id})${
+      publishNow
+        ? " and published it"
+        : scheduledPublicationAt
+          ? " with scheduled publication"
+          : " as unpublished"
+    }.`,
+
+    targetType: "event",
+
+    targetId: String(createdEvent.id),
+
+    details: {
+      eventType: eventType.code,
+
+      region: audience.code,
+
+      signupsEnabled: createdEvent.signupsEnabled,
+
+      publishNow,
+
+      publishMinutesBeforeStart,
+
+      scheduledPublicationAt: scheduledPublicationAt?.toISOString() ?? null,
+
+      startsAt: createdEvent.startsAt.toISOString(),
+
+      pingRoleIds: pingRoles.map((role) => role.id),
+
+      primaryOrganiserUserId: primaryOrganiserMember?.id ?? null,
+
+      backupOrganiserUserId: backupOrganiserMember?.id ?? null,
+
+      primaryOrganiserNotification: primaryNotification,
+    },
+  });
 }
 
 /*
@@ -1104,14 +1035,30 @@ async function listEvents(
 
       status: events.status,
 
+      publishedAt: events.publishedAt,
+
+      publishMinutesBeforeStart: events.publishMinutesBeforeStart,
+
       startsAt: events.startsAt,
 
       signupsEnabled: events.signupsEnabled,
 
       audienceName: eventAudiences.name,
+
+      publicationActionStatus: scheduledActions.status,
+
+      publicationDueAt: scheduledActions.dueAt,
     })
     .from(events)
     .leftJoin(eventAudiences, eq(eventAudiences.id, events.audienceId))
+    .leftJoin(
+      scheduledActions,
+      and(
+        eq(scheduledActions.eventId, events.id),
+
+        eq(scheduledActions.actionKey, "publish_event"),
+      ),
+    )
     .where(
       and(
         eq(events.ownerGuildId, configuration.guildId),
@@ -1131,10 +1078,19 @@ async function listEvents(
   }
 
   /*
-   * Only signup-enabled events need attendance counts.
+   * Only active, published signup events need attendance counts.
+   *
+   * Closed published events are deliberately included because their
+   * final signup totals remain useful to organisers.
    */
   const signupEventIds = upcomingEvents
-    .filter((event) => event.signupsEnabled)
+    .filter(
+      (event) =>
+        event.signupsEnabled &&
+        event.publishedAt !== null &&
+        event.status !== "cancelled" &&
+        event.status !== "completed",
+    )
     .map((event) => event.id);
 
   const attendanceRows =
@@ -1187,35 +1143,121 @@ async function listEvents(
     countsByEvent.set(row.eventId, current);
   }
 
+  const now = new Date();
+
   const lines = upcomingEvents.flatMap((event) => {
     const timestamp = Math.floor(event.startsAt.getTime() / 1000);
 
-    const attendanceSummary = event.signupsEnabled
-      ? (() => {
-          const counts = countsByEvent.get(event.id) ?? {
-            attending: 0,
+    const publicationState = event.publishedAt ? "Published" : "Unpublished";
 
-            tentative: 0,
+    let summary: string;
 
-            notAttending: 0,
-          };
+    /*
+     * Terminal event states take precedence over the publication
+     * schedule. A cancelled event must never continue advertising a
+     * publication countdown merely because it once had one.
+     */
+    if (event.status === "cancelled") {
+      summary = event.publishedAt
+        ? "🚫 Event cancelled"
+        : "🚫 Event cancelled before publication";
+    } else if (event.status === "completed") {
+      summary = event.publishedAt
+        ? "🏁 Event completed"
+        : "🏁 Event completed without publication";
+    } else if (!event.publishedAt && event.status === "closed") {
+      /*
+       * This can happen when a manually-held signup event reaches its
+       * signup deadline before it is published.
+       */
+      summary = "🔒 Unpublished • signup deadline has passed";
+    } else if (!event.publishedAt) {
+      /*
+       * A null publication offset represents a manually-held draft.
+       */
+      if (event.publishMinutesBeforeStart === null) {
+        summary = "📝 Unpublished • manual publication";
+      } else {
+        /*
+         * The scheduled action is the authoritative source for
+         * whether automatic publication is still actually pending.
+         */
+        switch (event.publicationActionStatus) {
+          case "pending": {
+            if (!event.publicationDueAt) {
+              summary =
+                "⚠️ Publication is scheduled, but its due time is unavailable";
+              break;
+            }
 
-          return (
-            `✅ ${counts.attending}  ` +
-            `❔ ${counts.tentative}  ` +
-            `❌ ${counts.notAttending}`
-          );
-        })()
-      : "📢 Signups disabled";
+            const publicationTimestamp = Math.floor(
+              event.publicationDueAt.getTime() / 1000,
+            );
+
+            summary =
+              event.publicationDueAt > now
+                ? `🕒 Publishes <t:${publicationTimestamp}:R>`
+                : "⏳ Publication is due and awaiting scheduler processing";
+
+            break;
+          }
+
+          case "processing":
+            summary = "⏳ Automatic publication is being processed";
+            break;
+
+          case "failed":
+            summary =
+              "⚠️ Automatic publication failed • manual publication is still available";
+            break;
+
+          case "cancelled":
+            summary =
+              "📝 Unpublished • automatic publication has been cancelled";
+            break;
+
+          case "completed":
+            /*
+             * A completed publication action paired with publishedAt=null
+             * means the action ran but publication did not occur, for
+             * example because its useful publication window had passed.
+             */
+            summary =
+              "⚠️ Automatic publication completed without publishing the event";
+            break;
+
+          default:
+            summary =
+              "⚠️ Publication schedule configured, but no scheduler action was found";
+            break;
+        }
+      }
+    } else if (event.signupsEnabled) {
+      const counts = countsByEvent.get(event.id) ?? {
+        attending: 0,
+
+        tentative: 0,
+
+        notAttending: 0,
+      };
+
+      summary =
+        `✅ ${counts.attending}  ` +
+        `❔ ${counts.tentative}  ` +
+        `❌ ${counts.notAttending}`;
+    } else {
+      summary = "📢 Signups disabled";
+    }
 
     return [
       `**#${event.id} — ${event.name}**`,
 
-      `${event.audienceName ?? "Unspecified"} • ${formatEventStatus(
-        event.status,
-      )} • <t:${timestamp}:F>`,
+      `${event.audienceName ?? "Unspecified"} • ` +
+        `${formatEventStatus(event.status)} • ` +
+        `${publicationState} • ` +
+        `<t:${timestamp}:F>`,
 
-      attendanceSummary,
+      summary,
 
       "",
     ];
@@ -1226,7 +1268,7 @@ async function listEvents(
       "**Upcoming events**",
       "",
       ...lines,
-      "Use the event ID with `/event edit`, `/event close`, `/event reopen`, `/event cancel` or `/event refresh` as appropriate.",
+      "Use the event ID with `/event publish`, `/event edit`, `/event close`, `/event reopen`, `/event cancel` or `/event refresh` as appropriate.",
     ].join("\n"),
 
     allowedMentions: {
@@ -1262,6 +1304,14 @@ async function closeEvent(
 
   if (!event.signupsEnabled) {
     await interaction.editReply("This event does not use attendance signups.");
+
+    return;
+  }
+
+  if (!event.publishedAt) {
+    await interaction.editReply(
+      "This event has not been published yet, so there are no public attendance signups to close.",
+    );
 
     return;
   }
@@ -1371,6 +1421,14 @@ async function reopenEvent(
 
   if (!event.signupsEnabled) {
     await interaction.editReply("This event does not use attendance signups.");
+
+    return;
+  }
+
+  if (!event.publishedAt) {
+    await interaction.editReply(
+      "This event has not been published yet, so there are no public attendance signups to close.",
+    );
 
     return;
   }
@@ -1526,16 +1584,19 @@ async function cancelEvent(
 
   await cancelEventScheduledActions(eventId);
 
-  const refreshResult = await refreshAttendanceMessage(
-    interaction.guild,
-    eventId,
-  );
+  const refreshResult = event.publishedAt
+    ? await refreshAttendanceMessage(interaction.guild, eventId)
+    : null;
+
+  await refreshRoleRequestMessages(interaction.guild, eventId);
 
   await interaction.editReply({
     content: [
       `🚫 **${event.name}** (#${event.id}) has been cancelled.`,
       "Existing attendance responses have been retained.",
-      formatRefreshResult(refreshResult),
+      refreshResult
+        ? formatRefreshResult(refreshResult)
+        : "No public event message had been published.",
     ].join("\n"),
 
     allowedMentions: {
@@ -1591,6 +1652,19 @@ async function refreshEvent(
     return;
   }
 
+  if (!foundEvent.publishedAt) {
+    await interaction.editReply(
+      [
+        `**${foundEvent.name}** (#${foundEvent.id}) is still unpublished.`,
+        "",
+        "There is no public event message to refresh yet.",
+        `Use \`/event publish event-id:${foundEvent.id}\` when it should go live.`,
+      ].join("\n"),
+    );
+
+    return;
+  }
+
   let event = foundEvent;
 
   const now = new Date();
@@ -1628,6 +1702,8 @@ async function refreshEvent(
         name: events.name,
 
         status: events.status,
+
+        publishedAt: events.publishedAt,
 
         startsAt: events.startsAt,
 
@@ -1700,6 +1776,7 @@ async function findOwnedEvent(guildDatabaseId: number, eventId: number) {
       id: events.id,
       name: events.name,
       status: events.status,
+      publishedAt: events.publishedAt,
       startsAt: events.startsAt,
       signupsEnabled: events.signupsEnabled,
       attendanceClosesAt: events.attendanceClosesAt,

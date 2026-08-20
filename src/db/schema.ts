@@ -404,6 +404,35 @@ export const events = pgTable(
       withTimezone: true,
     }),
 
+    /*
+     * Null means the event exists internally but has not yet been
+     * publicly announced.
+     *
+     * Once set, this records when the normal public event/attendance
+     * message was first published.
+     */
+    publishedAt: timestamp("published_at", {
+      withTimezone: true,
+    }),
+
+    /*
+     * Null means either:
+     * - publish immediately; or
+     * - this is a manually-held draft.
+     *
+     * A value means the public event message should be published
+     * this many minutes before the event starts.
+     */
+    publishMinutesBeforeStart: integer("publish_minutes_before_start"),
+
+    /*
+     * Snapshot the intended public event channel when the event is created.
+     *
+     * This prevents a later server-default change from unexpectedly
+     * moving an already-scheduled announcement somewhere else.
+     */
+    publicationChannelId: text("publication_channel_id"),
+
     status: eventStatusEnum("status").notNull().default("scheduled"),
 
     createdByUserId: text("created_by_user_id").notNull(),
@@ -654,6 +683,21 @@ export const eventRoleOptions = pgTable(
 
     description: text("description"),
 
+    /*
+     * Controls whether anybody may express interest or whether the
+     * member must currently hold one of this option's configured
+     * qualification roles.
+     *
+     * Supported by the application:
+     * - open
+     * - qualified_only
+     */
+    requestRestriction: varchar("request_restriction", {
+      length: 32,
+    })
+      .notNull()
+      .default("open"),
+
     capacity: integer("capacity"),
 
     sortOrder: integer("sort_order").notNull().default(0),
@@ -678,12 +722,185 @@ export const eventRoleOptions = pgTable(
 );
 
 /*
- * Player role preferences.
+ * Discord roles which indicate qualification for an event role.
  *
- * preferenceRank allows us to support second and third choices later without
- * replacing the table. The first implementation may use only rank 1.
+ * qualificationLevel is intentionally varchar rather than an enum
+ * because more nuanced levels may be useful later.
+ *
+ * Currently supported:
+ * - qualified
+ * - supervision_required
  */
+export const eventRoleOptionQualificationRoles = pgTable(
+  "event_role_option_qualification_roles",
+  {
+    eventRoleOptionId: integer("event_role_option_id")
+      .notNull()
+      .references(() => eventRoleOptions.id, {
+        onDelete: "cascade",
+      }),
 
+    discordRoleId: text("discord_role_id").notNull(),
+
+    roleNameSnapshot: varchar("role_name_snapshot", {
+      length: 100,
+    }).notNull(),
+
+    qualificationLevel: varchar("qualification_level", {
+      length: 32,
+    }).notNull(),
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.eventRoleOptionId, table.discordRoleId],
+    }),
+
+    index("event_role_option_qualification_idx").on(table.eventRoleOptionId),
+  ],
+);
+
+/*
+ * One Discord-facing request group.
+ *
+ * Different groups may expose the same event role option. This lets
+ * an early private Captain request and a later general request share
+ * exactly the same underlying Captain volunteers.
+ */
+export const roleRequestGroups = pgTable(
+  "role_request_groups",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+
+    eventId: integer("event_id")
+      .notNull()
+      .references(() => events.id, {
+        onDelete: "cascade",
+      }),
+
+    name: varchar("name", {
+      length: 100,
+    }).notNull(),
+
+    description: text("description"),
+
+    channelId: text("channel_id").notNull(),
+
+    messageId: text("message_id").unique(),
+
+    /*
+     * If true, only Attending or Tentative members may add new
+     * requests through this group.
+     *
+     * Existing requests remain event-level records and can therefore
+     * still be displayed by another group.
+     */
+    requiresPositiveSignup: boolean("requires_positive_signup")
+      .notNull()
+      .default(false),
+
+    opensAt: timestamp("opens_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    /*
+     * Signed offset relative to event start:
+     *
+     *  10 = 10 minutes before start
+     *   0 = at event start
+     * -10 = 10 minutes after start
+     *
+     * The database column retains its original name for compatibility.
+     * Storing both the offset and resolved timestamp lets schedule
+     * edits preserve the relationship.
+     */
+    closeMinutesBeforeStart: integer("close_minutes_before_start")
+      .notNull()
+      .default(0),
+
+    closesAt: timestamp("closes_at", {
+      withTimezone: true,
+    }).notNull(),
+
+    /*
+     * Non-null means an administrator or scheduler has explicitly
+     * closed the group.
+     */
+    closedAt: timestamp("closed_at", {
+      withTimezone: true,
+    }),
+
+    createdByUserId: text("created_by_user_id").notNull(),
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("role_request_groups_event_idx").on(table.eventId),
+
+    index("role_request_groups_closes_at_idx").on(
+      table.eventId,
+      table.closesAt,
+    ),
+  ],
+);
+
+/*
+ * Which logical event roles are displayed by each request group.
+ *
+ * The same eventRoleOptionId can deliberately appear in several
+ * groups.
+ */
+export const roleRequestGroupOptions = pgTable(
+  "role_request_group_options",
+  {
+    groupId: integer("group_id")
+      .notNull()
+      .references(() => roleRequestGroups.id, {
+        onDelete: "cascade",
+      }),
+
+    eventRoleOptionId: integer("event_role_option_id")
+      .notNull()
+      .references(() => eventRoleOptions.id, {
+        onDelete: "cascade",
+      }),
+
+    sortOrder: integer("sort_order").notNull().default(0),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.groupId, table.eventRoleOptionId],
+    }),
+
+    index("role_request_group_options_group_idx").on(table.groupId),
+
+    index("role_request_group_options_role_idx").on(table.eventRoleOptionId),
+  ],
+);
+
+/*
+ * A member expressing willingness to perform a particular role.
+ *
+ * Requests are independent rather than ranked. A member may therefore
+ * request Captain, Carpenter and Gunboat Gunner simultaneously.
+ */
 export const roleRequests = pgTable(
   "role_requests",
   {
@@ -691,7 +908,9 @@ export const roleRequests = pgTable(
 
     eventId: integer("event_id")
       .notNull()
-      .references(() => events.id, { onDelete: "cascade" }),
+      .references(() => events.id, {
+        onDelete: "cascade",
+      }),
 
     discordUserId: text("discord_user_id").notNull(),
 
@@ -701,15 +920,30 @@ export const roleRequests = pgTable(
         onDelete: "cascade",
       }),
 
-    preferenceRank: integer("preference_rank").notNull().default(1),
+    /*
+     * Records where the request was first made.
+     *
+     * This is informational only. The request belongs to the EVENT,
+     * not permanently to that particular message/group.
+     */
+    sourceGroupId: integer("source_group_id").references(
+      () => roleRequestGroups.id,
+      {
+        onDelete: "set null",
+      },
+    ),
 
     note: text("note"),
 
-    createdAt: timestamp("created_at", { withTimezone: true })
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
       .notNull()
       .defaultNow(),
 
-    updatedAt: timestamp("updated_at", { withTimezone: true })
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+    })
       .notNull()
       .defaultNow(),
   },
@@ -719,12 +953,10 @@ export const roleRequests = pgTable(
       table.discordUserId,
       table.eventRoleOptionId,
     ),
-    uniqueIndex("role_requests_user_rank_unique").on(
-      table.eventId,
-      table.discordUserId,
-      table.preferenceRank,
-    ),
+
     index("role_requests_event_idx").on(table.eventId),
+
+    index("role_requests_user_idx").on(table.discordUserId),
   ],
 );
 
