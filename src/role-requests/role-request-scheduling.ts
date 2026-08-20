@@ -6,7 +6,7 @@ import { events, roleRequestGroups, scheduledActions } from "../db/schema.js";
 export const ROLE_REQUEST_GROUP_CLOSE_ACTION_PREFIX =
   "role_request_group_close:";
 
-export function buildRoleRequestGroupCloseActionKey(groupId: number): string {
+function makeRoleRequestGroupCloseActionKey(groupId: number): string {
   return `${ROLE_REQUEST_GROUP_CLOSE_ACTION_PREFIX}${groupId}`;
 }
 
@@ -22,9 +22,9 @@ export async function scheduleRoleRequestGroupClose(
     .values({
       eventId,
 
-      actionKey: buildRoleRequestGroupCloseActionKey(groupId),
+      actionKey: makeRoleRequestGroupCloseActionKey(groupId),
 
-      dueAt: dueAt <= now ? now : dueAt,
+      dueAt,
 
       status: "pending",
 
@@ -42,7 +42,7 @@ export async function scheduleRoleRequestGroupClose(
       target: [scheduledActions.eventId, scheduledActions.actionKey],
 
       set: {
-        dueAt: dueAt <= now ? now : dueAt,
+        dueAt,
 
         status: "pending",
 
@@ -83,7 +83,7 @@ export async function markRoleRequestGroupCloseCompleted(
 
         eq(
           scheduledActions.actionKey,
-          buildRoleRequestGroupCloseActionKey(groupId),
+          makeRoleRequestGroupCloseActionKey(groupId),
         ),
 
         inArray(scheduledActions.status, ["pending", "processing"]),
@@ -97,8 +97,6 @@ export async function rescheduleOpenRoleRequestGroupCloses(
   const [event] = await db
     .select({
       startsAt: events.startsAt,
-
-      status: events.status,
     })
     .from(events)
     .where(eq(events.id, eventId))
@@ -126,6 +124,10 @@ export async function rescheduleOpenRoleRequestGroupCloses(
   const now = new Date();
 
   for (const group of groups) {
+    /*
+     * Positive offset = before start.
+     * Negative offset = after start.
+     */
     const closesAt = new Date(
       event.startsAt.getTime() - group.closeMinutesBeforeStart * 60_000,
     );
@@ -139,32 +141,15 @@ export async function rescheduleOpenRoleRequestGroupCloses(
       })
       .where(eq(roleRequestGroups.id, group.id));
 
-    if (event.status === "cancelled" || event.status === "completed") {
-      await db
-        .update(scheduledActions)
-        .set({
-          status: "cancelled",
-
-          lockedAt: null,
-
-          updatedAt: now,
-        })
-        .where(
-          and(
-            eq(scheduledActions.eventId, eventId),
-
-            eq(
-              scheduledActions.actionKey,
-              buildRoleRequestGroupCloseActionKey(group.id),
-            ),
-
-            inArray(scheduledActions.status, ["pending", "processing"]),
-          ),
-        );
-
-      continue;
-    }
-
-    await scheduleRoleRequestGroupClose(eventId, group.id, closesAt);
+    /*
+     * If an edit moves the calculated close into the past, queue it
+     * for immediate scheduler processing rather than inventing a new
+     * deadline.
+     */
+    await scheduleRoleRequestGroupClose(
+      eventId,
+      group.id,
+      closesAt <= now ? now : closesAt,
+    );
   }
 }

@@ -10,6 +10,7 @@ import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 import {
+  attendanceResponses,
   eventRoleOptions,
   events,
   roleRequestGroupOptions,
@@ -56,7 +57,7 @@ export async function buildRoleRequestGroupMessagePayload(groupId: number) {
 
       eventName: events.name,
 
-      eventStartsAt: events.startsAt,
+      signupsEnabled: events.signupsEnabled,
 
       eventStatus: events.status,
     })
@@ -105,8 +106,15 @@ export async function buildRoleRequestGroupMessagePayload(groupId: number) {
             userId: roleRequests.discordUserId,
 
             createdAt: roleRequests.createdAt,
+
+            sourceRequiresPositiveSignup:
+              roleRequestGroups.requiresPositiveSignup,
           })
           .from(roleRequests)
+          .leftJoin(
+            roleRequestGroups,
+            eq(roleRequestGroups.id, roleRequests.sourceGroupId),
+          )
           .where(
             and(
               eq(roleRequests.eventId, group.eventId),
@@ -115,6 +123,32 @@ export async function buildRoleRequestGroupMessagePayload(groupId: number) {
             ),
           )
           .orderBy(asc(roleRequests.createdAt), asc(roleRequests.id));
+
+  const requestUserIds = [
+    ...new Set(requests.map((request) => request.userId)),
+  ];
+
+  const signupRows =
+    group.signupsEnabled && requestUserIds.length > 0
+      ? await db
+          .select({
+            userId: attendanceResponses.discordUserId,
+
+            status: attendanceResponses.status,
+          })
+          .from(attendanceResponses)
+          .where(
+            and(
+              eq(attendanceResponses.eventId, group.eventId),
+
+              inArray(attendanceResponses.discordUserId, requestUserIds),
+            ),
+          )
+      : [];
+
+  const signupByUserId = new Map(
+    signupRows.map((signup) => [signup.userId, signup.status]),
+  );
 
   const requestsByOption = new Map<number, typeof requests>();
 
@@ -132,14 +166,16 @@ export async function buildRoleRequestGroupMessagePayload(groupId: number) {
     group.closedAt === null &&
     group.opensAt <= now &&
     group.closesAt > now &&
-    group.eventStartsAt > now &&
     group.eventStatus !== "cancelled" &&
     group.eventStatus !== "completed";
 
+  /*
+   * Withdrawal remains possible after request closure/start so that
+   * organisers can learn that a volunteer is no longer available.
+   * Event completion/cancellation is the final boundary.
+   */
   const eventStillManageable =
-    group.eventStartsAt > now &&
-    group.eventStatus !== "cancelled" &&
-    group.eventStatus !== "completed";
+    group.eventStatus !== "cancelled" && group.eventStatus !== "completed";
 
   const closeTimestamp = Math.floor(group.closesAt.getTime() / 1000);
 
@@ -148,6 +184,7 @@ export async function buildRoleRequestGroupMessagePayload(groupId: number) {
       "Select any roles you would be willing to perform. You may request multiple roles.",
 
     "",
+
     "**Requests do not guarantee allocation.**",
 
     group.requiresPositiveSignup
@@ -171,19 +208,71 @@ export async function buildRoleRequestGroupMessagePayload(groupId: number) {
   for (const option of options.slice(0, 20)) {
     const optionRequests = requestsByOption.get(option.id) ?? [];
 
-    const requestLines = optionRequests
-      .slice(0, 15)
-      .map((request, index) => `${index + 1}. <@${request.userId}>`);
+    const availableRequests = optionRequests.filter((request) =>
+      requestIsCurrentlyAvailable(
+        group.signupsEnabled,
+        signupByUserId.get(request.userId) ?? null,
+        request.sourceRequiresPositiveSignup,
+      ),
+    );
 
-    if (optionRequests.length > 15) {
-      requestLines.push(`+ ${optionRequests.length - 15} more`);
+    const unavailableRequests = optionRequests.filter(
+      (request) =>
+        !requestIsCurrentlyAvailable(
+          group.signupsEnabled,
+          signupByUserId.get(request.userId) ?? null,
+          request.sourceRequiresPositiveSignup,
+        ),
+    );
+
+    const availableLines = availableRequests
+      .slice(0, 15)
+      .map(
+        (request, index) =>
+          `${index + 1}. <@${request.userId}>${formatSignupMarker(
+            group.signupsEnabled,
+            signupByUserId.get(request.userId) ?? null,
+          )}`,
+      );
+
+    if (availableRequests.length > 15) {
+      availableLines.push(`+ ${availableRequests.length - 15} more`);
+    }
+
+    const unavailableLines = unavailableRequests
+      .slice(0, 8)
+      .map(
+        (request) =>
+          `• <@${request.userId}>${formatSignupMarker(
+            group.signupsEnabled,
+            signupByUserId.get(request.userId) ?? null,
+          )}`,
+      );
+
+    if (unavailableRequests.length > 8) {
+      unavailableLines.push(`+ ${unavailableRequests.length - 8} more`);
+    }
+
+    const valueParts = [
+      "**Available:**",
+      availableLines.length > 0
+        ? availableLines.join("\n")
+        : "No requests yet.",
+    ];
+
+    if (unavailableLines.length > 0) {
+      valueParts.push(
+        "",
+        "**Currently unavailable:**",
+        unavailableLines.join("\n"),
+      );
     }
 
     embed.addFields({
-      name: `${option.displayName} (${optionRequests.length})`,
+      name:
+        `${option.displayName} ` + `(${availableRequests.length} available)`,
 
-      value:
-        requestLines.length > 0 ? requestLines.join("\n") : "No requests yet.",
+      value: valueParts.join("\n").slice(0, 1024),
 
       inline: false,
     });
@@ -269,10 +358,6 @@ export async function refreshRoleRequestGroupMessage(
   await message.edit({
     ...payload,
 
-    /*
-     * Mentions are visible inside the role lists but refreshing the
-     * message must never generate new notifications.
-     */
     allowedMentions: {
       parse: [],
     },
@@ -307,5 +392,52 @@ export async function refreshRoleRequestMessages(
         );
       },
     );
+  }
+}
+
+function requestIsCurrentlyAvailable(
+  signupsEnabled: boolean,
+  signupStatus: "attending" | "tentative" | "not_attending" | null,
+  sourceRequiresPositiveSignup: boolean | null,
+): boolean {
+  if (!signupsEnabled) {
+    return true;
+  }
+
+  if (signupStatus === "not_attending") {
+    return false;
+  }
+
+  if (signupStatus === "attending" || signupStatus === "tentative") {
+    return true;
+  }
+
+  /*
+   * No current signup is acceptable when the request originated
+   * through an early/non-signup request group.
+   */
+  return sourceRequiresPositiveSignup !== true;
+}
+
+function formatSignupMarker(
+  signupsEnabled: boolean,
+  status: "attending" | "tentative" | "not_attending" | null,
+): string {
+  if (!signupsEnabled) {
+    return "";
+  }
+
+  switch (status) {
+    case "attending":
+      return " • ✅ Attending";
+
+    case "tentative":
+      return " • ❔ Tentative";
+
+    case "not_attending":
+      return " • 🚫 Not attending";
+
+    case null:
+      return " • ⚪ No signup";
   }
 }

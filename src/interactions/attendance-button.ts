@@ -12,6 +12,7 @@ import {
   refreshAttendanceMessage,
 } from "../events/attendance-refresh.js";
 import { markAttendanceCloseCompleted } from "../scheduler/action-maintenance.js";
+import { refreshRoleRequestMessages } from "../role-requests/role-request-message.js";
 
 const attendanceRefreshTimers = new Map<string, NodeJS.Timeout>();
 
@@ -151,9 +152,13 @@ function scheduleAttendanceRefresh(
   const timer = setTimeout(() => {
     attendanceRefreshTimers.delete(refreshKey);
 
-    void refreshAttendanceMessage(guild, eventId).catch((error: unknown) => {
+    void Promise.all([
+      refreshAttendanceMessage(guild, eventId),
+
+      refreshRoleRequestMessages(guild, eventId),
+    ]).catch((error: unknown) => {
       console.error(
-        `Failed to refresh attendance for event ${eventId}:`,
+        `Failed to refresh event ${eventId} after an attendance change:`,
         error,
       );
     });

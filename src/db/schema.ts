@@ -404,6 +404,35 @@ export const events = pgTable(
       withTimezone: true,
     }),
 
+    /*
+     * Null means the event exists internally but has not yet been
+     * publicly announced.
+     *
+     * Once set, this records when the normal public event/attendance
+     * message was first published.
+     */
+    publishedAt: timestamp("published_at", {
+      withTimezone: true,
+    }),
+
+    /*
+     * Null means either:
+     * - publish immediately; or
+     * - this is a manually-held draft.
+     *
+     * A value means the public event message should be published
+     * this many minutes before the event starts.
+     */
+    publishMinutesBeforeStart: integer("publish_minutes_before_start"),
+
+    /*
+     * Snapshot the intended public event channel when the event is created.
+     *
+     * This prevents a later server-default change from unexpectedly
+     * moving an already-scheduled announcement somewhere else.
+     */
+    publicationChannelId: text("publication_channel_id"),
+
     status: eventStatusEnum("status").notNull().default("scheduled"),
 
     createdByUserId: text("created_by_user_id").notNull(),
@@ -782,9 +811,15 @@ export const roleRequestGroups = pgTable(
       .defaultNow(),
 
     /*
-     * For the first implementation group closing is relative to the
-     * event start. Storing both the offset and resolved timestamp lets
-     * event schedule edits preserve that relationship.
+     * Signed offset relative to event start:
+     *
+     *  10 = 10 minutes before start
+     *   0 = at event start
+     * -10 = 10 minutes after start
+     *
+     * The database column retains its original name for compatibility.
+     * Storing both the offset and resolved timestamp lets schedule
+     * edits preserve the relationship.
      */
     closeMinutesBeforeStart: integer("close_minutes_before_start")
       .notNull()

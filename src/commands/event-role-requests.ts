@@ -433,13 +433,9 @@ export async function postRoleRequestGroup(
     return;
   }
 
-  if (
-    event.status === "cancelled" ||
-    event.status === "completed" ||
-    event.startsAt <= new Date()
-  ) {
+  if (event.status === "cancelled" || event.status === "completed") {
     await interaction.editReply(
-      "Role-request groups can only be posted for an upcoming active event.",
+      "Role-request groups cannot be posted for a cancelled or completed event.",
     );
 
     return;
@@ -502,8 +498,15 @@ export async function postRoleRequestGroup(
       (option): option is (typeof options)[number] => option !== undefined,
     );
 
+  /*
+   * Unpublished events cannot yet have normal public signups, so
+   * early request groups default to not requiring one.
+   *
+   * Once published, signup-enabled events retain the existing default.
+   */
   const requiresPositiveSignup =
-    interaction.options.getBoolean("requires-signup") ?? event.signupsEnabled;
+    interaction.options.getBoolean("requires-signup") ??
+    (event.signupsEnabled && event.publishedAt !== null);
 
   if (requiresPositiveSignup && !event.signupsEnabled) {
     await interaction.editReply(
@@ -513,8 +516,32 @@ export async function postRoleRequestGroup(
     return;
   }
 
+  const closeMinutesBeforeOption = interaction.options.getInteger(
+    "close-minutes-before-start",
+  );
+
+  const closeMinutesAfterOption = interaction.options.getInteger(
+    "close-minutes-after-start",
+  );
+
+  if (closeMinutesBeforeOption !== null && closeMinutesAfterOption !== null) {
+    await interaction.editReply(
+      "Choose either `close-minutes-before-start` or `close-minutes-after-start`, not both.",
+    );
+
+    return;
+  }
+
+  /*
+   * The stored offset is signed:
+   *
+   *  10 = ten minutes before start
+   *   0 = at start
+   * -10 = ten minutes after start
+   */
   const closeMinutesBeforeStart =
-    interaction.options.getInteger("close-minutes-before-start") ?? 0;
+    closeMinutesBeforeOption ??
+    (closeMinutesAfterOption !== null ? -closeMinutesAfterOption : 0);
 
   const closesAt = new Date(
     event.startsAt.getTime() - closeMinutesBeforeStart * 60_000,
@@ -522,7 +549,7 @@ export async function postRoleRequestGroup(
 
   if (closesAt <= new Date()) {
     await interaction.editReply(
-      "This role-request group would already be closed. Use a smaller `close-minutes-before-start` value.",
+      "The calculated role-request closing time has already passed.",
     );
 
     return;
@@ -720,7 +747,7 @@ export async function postRoleRequestGroup(
 
       requiresPositiveSignup,
 
-      closeMinutesBeforeStart,
+      closeOffsetMinutes: closeMinutesBeforeStart,
 
       closesAt: closesAt.toISOString(),
     },
@@ -740,6 +767,9 @@ export async function postRoleRequestGroup(
       `**Requires Attending/Tentative signup:** ${
         requiresPositiveSignup ? "Yes" : "No"
       }`,
+      `**Close rule:** ${formatRoleRequestCloseOffset(
+        closeMinutesBeforeStart,
+      )}`,
       `**Closes:** <t:${closeTimestamp}:F> (<t:${closeTimestamp}:R>)`,
       `**Message:** ${sentMessage.url}`,
     ].join("\n"),
@@ -785,6 +815,8 @@ export async function listRoleRequestGroups(
 
       closesAt: roleRequestGroups.closesAt,
 
+      closeMinutesBeforeStart: roleRequestGroups.closeMinutesBeforeStart,
+
       closedAt: roleRequestGroups.closedAt,
 
       messageId: roleRequestGroups.messageId,
@@ -812,6 +844,9 @@ export async function listRoleRequestGroups(
       `**#${group.id} — ${group.name}**`,
       `${status} • <#${group.channelId}>`,
       `Signup required: ${group.requiresPositiveSignup ? "Yes" : "No"}`,
+      `Close rule: ${formatRoleRequestCloseOffset(
+        group.closeMinutesBeforeStart,
+      )}`,
       `Closes: <t:${closeTimestamp}:F>`,
     ].join("\n");
   });
@@ -993,7 +1028,7 @@ export async function showEventRoleRequests(
     .where(eq(roleRequests.eventId, event.id))
     .orderBy(asc(roleRequests.createdAt), asc(roleRequests.id));
 
-  const positiveSignupRows = event.signupsEnabled
+  const signupRows = event.signupsEnabled
     ? await db
         .select({
           userId: attendanceResponses.discordUserId,
@@ -1001,17 +1036,20 @@ export async function showEventRoleRequests(
           status: attendanceResponses.status,
         })
         .from(attendanceResponses)
-        .where(
-          and(
-            eq(attendanceResponses.eventId, event.id),
-
-            inArray(attendanceResponses.status, ["attending", "tentative"]),
-          ),
-        )
+        .where(eq(attendanceResponses.eventId, event.id))
     : [];
+
+  const signupByUserId = new Map(
+    signupRows.map((signup) => [signup.userId, signup.status]),
+  );
+
+  const positiveSignupRows = signupRows.filter(
+    (signup) => signup.status === "attending" || signup.status === "tentative",
+  );
 
   const candidateUserIds = new Set<string>([
     ...requestRows.map((row) => row.userId),
+
     ...positiveSignupRows.map((row) => row.userId),
   ]);
 
@@ -1055,6 +1093,7 @@ export async function showEventRoleRequests(
         "",
         "Requests are listed in the order they were first submitted.",
         "`(n)` beside a member means they have requested `n` other roles for this event.",
+        "A request is retained if someone later changes to Not Attending, but is shown as unavailable.",
       ].join("\n"),
     )
     .setFooter({
@@ -1073,7 +1112,38 @@ export async function showEventRoleRequests(
 
     const requesterIds = new Set(optionRequests.map((row) => row.userId));
 
-    const requestedLines = optionRequests.map((request, index) => {
+    const availableRequests = optionRequests.filter(
+      (request) =>
+        !event.signupsEnabled ||
+        signupByUserId.get(request.userId) !== "not_attending",
+    );
+
+    const unavailableRequests = optionRequests.filter(
+      (request) =>
+        event.signupsEnabled &&
+        signupByUserId.get(request.userId) === "not_attending",
+    );
+
+    const requestedLines = availableRequests.map((request, index) => {
+      const member = memberByUserId.get(request.userId) ?? null;
+
+      const qualification = assessQualification(member, rules);
+
+      const totalRequestCount = requestCountByUser.get(request.userId) ?? 1;
+
+      const otherRequestCount = Math.max(totalRequestCount - 1, 0);
+
+      const signupStatus = signupByUserId.get(request.userId) ?? null;
+
+      return [
+        `${index + 1}. <@${request.userId}>`,
+        otherRequestCount > 0 ? ` (${otherRequestCount})` : "",
+        formatSignupMarker(event.signupsEnabled, signupStatus),
+        formatQualificationMarker(qualification),
+      ].join("");
+    });
+
+    const unavailableLines = unavailableRequests.map((request) => {
       const member = memberByUserId.get(request.userId) ?? null;
 
       const qualification = assessQualification(member, rules);
@@ -1083,8 +1153,9 @@ export async function showEventRoleRequests(
       const otherRequestCount = Math.max(totalRequestCount - 1, 0);
 
       return [
-        `${index + 1}. <@${request.userId}>`,
+        `• <@${request.userId}>`,
         otherRequestCount > 0 ? ` (${otherRequestCount})` : "",
+        " 🚫 Not attending",
         formatQualificationMarker(qualification),
       ].join("");
     });
@@ -1100,6 +1171,8 @@ export async function showEventRoleRequests(
 
               return {
                 userId: signup.userId,
+
+                signupStatus: signup.status,
 
                 member,
 
@@ -1124,14 +1197,23 @@ export async function showEventRoleRequests(
       return [
         `• <@${candidate.userId}>`,
         otherRequestCount > 0 ? ` (${otherRequestCount})` : "",
+        formatSignupMarker(true, candidate.signupStatus),
         formatQualificationMarker(candidate.qualification),
       ].join("");
     });
 
     const valueParts = [
-      "**Requested:**",
+      "**Available requests:**",
       requestedLines.length > 0 ? requestedLines.join("\n") : "None",
     ];
+
+    if (unavailableLines.length > 0) {
+      valueParts.push(
+        "",
+        "**Currently unavailable:**",
+        unavailableLines.join("\n"),
+      );
+    }
 
     if (event.signupsEnabled && rules.length > 0) {
       valueParts.push(
@@ -1142,7 +1224,12 @@ export async function showEventRoleRequests(
     }
 
     embed.addFields({
-      name: `${option.name} — ${optionRequests.length} request${optionRequests.length === 1 ? "" : "s"}`,
+      name:
+        `${option.name} — ` +
+        `${availableRequests.length} available` +
+        (unavailableRequests.length > 0
+          ? ` • ${unavailableRequests.length} unavailable`
+          : ""),
 
       value: truncateEmbedField(valueParts.join("\n")),
 
@@ -1202,6 +1289,8 @@ async function findOwnedRoleRequestEvent(
       startsAt: events.startsAt,
 
       status: events.status,
+
+      publishedAt: events.publishedAt,
 
       signupsEnabled: events.signupsEnabled,
 
@@ -1298,6 +1387,41 @@ function formatQualificationMarker(state: QualificationState): string {
     case "unrestricted":
       return "";
   }
+}
+
+function formatSignupMarker(
+  signupsEnabled: boolean,
+  status: "attending" | "tentative" | "not_attending" | null,
+): string {
+  if (!signupsEnabled) {
+    return "";
+  }
+
+  switch (status) {
+    case "attending":
+      return " ✅ Attending";
+
+    case "tentative":
+      return " ❔ Tentative";
+
+    case "not_attending":
+      return " 🚫 Not attending";
+
+    case null:
+      return " ⚪ No signup";
+  }
+}
+
+function formatRoleRequestCloseOffset(offsetMinutes: number): string {
+  if (offsetMinutes > 0) {
+    return `${offsetMinutes} minute(s) before event start`;
+  }
+
+  if (offsetMinutes < 0) {
+    return `${Math.abs(offsetMinutes)} minute(s) after event start`;
+  }
+
+  return "At event start";
 }
 
 function truncateEmbedField(value: string): string {

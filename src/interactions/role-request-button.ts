@@ -90,6 +90,8 @@ async function handleAddRequest(
 
       messageId: roleRequestGroups.messageId,
 
+      signupsEnabled: events.signupsEnabled,
+
       requiresPositiveSignup: roleRequestGroups.requiresPositiveSignup,
 
       opensAt: roleRequestGroups.opensAt,
@@ -99,8 +101,6 @@ async function handleAddRequest(
       closedAt: roleRequestGroups.closedAt,
 
       eventName: events.name,
-
-      eventStartsAt: events.startsAt,
 
       eventStatus: events.status,
 
@@ -155,8 +155,7 @@ async function handleAddRequest(
 
   if (
     context.eventStatus === "cancelled" ||
-    context.eventStatus === "completed" ||
-    context.eventStartsAt <= now
+    context.eventStatus === "completed"
   ) {
     await interaction.editReply(
       "This event is no longer accepting role requests.",
@@ -173,31 +172,45 @@ async function handleAddRequest(
     return;
   }
 
-  if (context.requiresPositiveSignup) {
-    const [signup] = await db
-      .select({
-        status: attendanceResponses.status,
-      })
-      .from(attendanceResponses)
-      .where(
-        and(
-          eq(attendanceResponses.eventId, context.eventId),
+  const [signup] = context.signupsEnabled
+    ? await db
+        .select({
+          status: attendanceResponses.status,
+        })
+        .from(attendanceResponses)
+        .where(
+          and(
+            eq(attendanceResponses.eventId, context.eventId),
 
-          eq(attendanceResponses.discordUserId, interaction.user.id),
-        ),
-      )
-      .limit(1);
+            eq(attendanceResponses.discordUserId, interaction.user.id),
+          ),
+        )
+        .limit(1)
+    : [];
 
-    if (
-      !signup ||
-      (signup.status !== "attending" && signup.status !== "tentative")
-    ) {
-      await interaction.editReply(
-        "You need to be signed **Attending** or **Tentative** before requesting roles through this message.",
-      );
+  /*
+   * Someone who has explicitly said they are not attending should
+   * not add further role requests, even through an early group which
+   * otherwise does not require a signup.
+   */
+  if (signup?.status === "not_attending") {
+    await interaction.editReply(
+      "You are currently marked **Not attending**. Change your attendance response before adding another role request.",
+    );
 
-      return;
-    }
+    return;
+  }
+
+  if (
+    context.requiresPositiveSignup &&
+    (!signup ||
+      (signup.status !== "attending" && signup.status !== "tentative"))
+  ) {
+    await interaction.editReply(
+      "You need to be signed **Attending** or **Tentative** before requesting roles through this message.",
+    );
+
+    return;
   }
 
   if (context.requestRestriction === "qualified_only") {
@@ -280,8 +293,6 @@ async function handleManageRequests(
 
       name: events.name,
 
-      startsAt: events.startsAt,
-
       status: events.status,
 
       discordGuildId: discordGuilds.discordGuildId,
@@ -297,11 +308,7 @@ async function handleManageRequests(
     return;
   }
 
-  if (
-    event.status === "cancelled" ||
-    event.status === "completed" ||
-    event.startsAt <= new Date()
-  ) {
+  if (event.status === "cancelled" || event.status === "completed") {
     await interaction.editReply(
       "Role requests for this event can no longer be changed.",
     );
@@ -394,8 +401,6 @@ async function handleWithdrawRequest(
 
       name: events.name,
 
-      startsAt: events.startsAt,
-
       status: events.status,
 
       discordGuildId: discordGuilds.discordGuildId,
@@ -411,11 +416,7 @@ async function handleWithdrawRequest(
     return;
   }
 
-  if (
-    event.status === "cancelled" ||
-    event.status === "completed" ||
-    event.startsAt <= new Date()
-  ) {
+  if (event.status === "cancelled" || event.status === "completed") {
     await interaction.editReply(
       "Role requests for this event can no longer be changed.",
     );

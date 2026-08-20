@@ -17,8 +17,10 @@ import { eventMessages, eventPingRoles, events } from "../db/schema.js";
 import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
 import { reschedulePendingEventReminders } from "../reminders/reminder-scheduling.js";
 import {
+  cancelEventPublication,
   scheduleAttendanceClose,
   scheduleEventCompletion,
+  scheduleEventPublication,
 } from "../scheduler/action-maintenance.js";
 import { rescheduleOpenRoleRequestGroupCloses } from "../role-requests/role-request-scheduling.js";
 
@@ -97,10 +99,16 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
 
       attendanceClosesAt: events.attendanceClosesAt,
 
+      publishedAt: events.publishedAt,
+
+      publishMinutesBeforeStart: events.publishMinutesBeforeStart,
+
+      publicationChannelId: events.publicationChannelId,
+
       attendanceChannelId: eventMessages.channelId,
     })
     .from(events)
-    .innerJoin(
+    .leftJoin(
       eventMessages,
       and(
         eq(eventMessages.eventId, events.id),
@@ -156,6 +164,32 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
   const detailedDeadlineOption =
     interaction.options.getBoolean("detailed-deadline");
 
+  const publishMinutesBeforeStartOption = interaction.options.getInteger(
+    "publish-minutes-before-start",
+  );
+
+  const clearPublishSchedule =
+    interaction.options.getBoolean("clear-publish-schedule") ?? false;
+
+  if (publishMinutesBeforeStartOption !== null && clearPublishSchedule) {
+    await interaction.editReply(
+      "Choose either a new publication schedule or `clear-publish-schedule`, not both.",
+    );
+
+    return;
+  }
+
+  if (
+    event.publishedAt &&
+    (publishMinutesBeforeStartOption !== null || clearPublishSchedule)
+  ) {
+    await interaction.editReply(
+      "This event has already been published, so its publication schedule can no longer be changed.",
+    );
+
+    return;
+  }
+
   /*
    * Signup-specific settings do not apply to announcement-style
    * events where attendance signups were disabled at creation.
@@ -194,6 +228,8 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
     durationOption !== null ||
     closeOption !== null ||
     detailedDeadlineOption !== null ||
+    publishMinutesBeforeStartOption !== null ||
+    clearPublishSchedule ||
     pingRolesProvided;
 
   if (!anyChangeRequested) {
@@ -364,6 +400,62 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
     return;
   }
 
+  let newPublishMinutesBeforeStart = event.publishMinutesBeforeStart;
+
+  if (publishMinutesBeforeStartOption !== null) {
+    newPublishMinutesBeforeStart = publishMinutesBeforeStartOption;
+  }
+
+  if (clearPublishSchedule) {
+    newPublishMinutesBeforeStart = null;
+  }
+
+  const newScheduledPublicationAt =
+    !event.publishedAt && newPublishMinutesBeforeStart !== null
+      ? new Date(newStartsAt.getTime() - newPublishMinutesBeforeStart * 60_000)
+      : null;
+
+  const publicationTimingAffected =
+    !event.publishedAt &&
+    (hasStartChange ||
+      closeOption !== null ||
+      publishMinutesBeforeStartOption !== null ||
+      clearPublishSchedule);
+
+  if (
+    publicationTimingAffected &&
+    newScheduledPublicationAt &&
+    newScheduledPublicationAt <= new Date()
+  ) {
+    await interaction.editReply(
+      [
+        "The edited publication schedule would already have passed.",
+        "",
+        "Choose a later event time or a smaller `publish-minutes-before-start` value.",
+      ].join("\n"),
+    );
+
+    return;
+  }
+
+  if (
+    publicationTimingAffected &&
+    newScheduledPublicationAt &&
+    event.signupsEnabled &&
+    newAttendanceClosesAt &&
+    newScheduledPublicationAt >= newAttendanceClosesAt
+  ) {
+    await interaction.editReply(
+      [
+        "The edited publication time would occur after the signup deadline.",
+        "",
+        "Publication must occur before attendance signups close.",
+      ].join("\n"),
+    );
+
+    return;
+  }
+
   const uniqueRoles = pingRolesProvided
     ? [...new Map(selectedRoles.map((role) => [role.id, role])).values()]
     : [];
@@ -387,9 +479,21 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
       }
     }
 
-    const channel = await interaction.guild.channels.fetch(
-      event.attendanceChannelId,
-    );
+    const publicationChannelId =
+      event.attendanceChannelId ??
+      event.publicationChannelId ??
+      configuration.attendanceChannelId;
+
+    if (!publicationChannelId) {
+      await interaction.editReply(
+        "No publication channel is available for this event or server.",
+      );
+
+      return;
+    }
+
+    const channel =
+      await interaction.guild.channels.fetch(publicationChannelId);
 
     if (
       !channel ||
@@ -397,7 +501,7 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
         channel.type !== ChannelType.GuildAnnouncement)
     ) {
       await interaction.editReply(
-        "The event's attendance channel is no longer available.",
+        "The event's publication channel is no longer available.",
       );
 
       return;
@@ -415,7 +519,7 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
         !permissions.has(PermissionFlagsBits.MentionEveryone)
       ) {
         await interaction.editReply(
-          `The bot cannot mention **${role.name}** in the event attendance channel.`,
+          `The bot cannot mention **${role.name}** in the event publication channel.`,
         );
 
         return;
@@ -466,17 +570,43 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
     changedFields.push("deadline display");
   }
 
+  if (publishMinutesBeforeStartOption !== null) {
+    changedFields.push("publication schedule");
+  }
+
+  if (clearPublishSchedule) {
+    changedFields.push("publication schedule removed");
+  }
+
   if (pingRolesProvided) {
     changedFields.push("ping roles");
   }
 
   const now = new Date();
 
+  /*
+   * An unpublished signup event may have automatically reached its
+   * old signup deadline and become closed before an admin moves it.
+   *
+   * If its new deadline is in the future, restore the internal draft
+   * state to scheduled. Published events are never implicitly reopened.
+   */
+  const newStatus =
+    !event.publishedAt &&
+    event.signupsEnabled &&
+    event.status === "closed" &&
+    newAttendanceClosesAt &&
+    newAttendanceClosesAt > now
+      ? ("scheduled" as const)
+      : event.status;
+
   await db.transaction(async (transaction) => {
     await transaction
       .update(events)
       .set({
         name: newName,
+
+        status: newStatus,
 
         description: newDescription,
 
@@ -489,6 +619,12 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
         attendanceClosesAt: newAttendanceClosesAt,
 
         showDetailedDeadline: newDetailedDeadline,
+
+        publishMinutesBeforeStart: newPublishMinutesBeforeStart,
+
+        publicationChannelId: event.publishedAt
+          ? event.publicationChannelId
+          : (event.publicationChannelId ?? configuration.attendanceChannelId),
 
         updatedAt: now,
       })
@@ -520,7 +656,7 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
    */
   if (
     event.signupsEnabled &&
-    (event.status === "open" || event.status === "scheduled") &&
+    (newStatus === "open" || newStatus === "scheduled") &&
     newAttendanceClosesAt &&
     (hasStartChange || closeOption !== null)
   ) {
@@ -531,6 +667,17 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
     await scheduleEventCompletion(event.id, newEndsAt);
   }
 
+  if (!event.publishedAt) {
+    if (clearPublishSchedule) {
+      await cancelEventPublication(event.id);
+    } else if (
+      newScheduledPublicationAt &&
+      (hasStartChange || publishMinutesBeforeStartOption !== null)
+    ) {
+      await scheduleEventPublication(event.id, newScheduledPublicationAt);
+    }
+  }
+
   if (hasStartChange || closeOption !== null) {
     await reschedulePendingEventReminders(event.id);
   }
@@ -539,10 +686,9 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
     await rescheduleOpenRoleRequestGroupCloses(event.id);
   }
 
-  const refreshResult = await refreshAttendanceMessage(
-    interaction.guild,
-    event.id,
-  );
+  const refreshResult = event.publishedAt
+    ? await refreshAttendanceMessage(interaction.guild, event.id)
+    : null;
 
   await writeAuditLog({
     guildId: configuration.guildId,
@@ -569,6 +715,10 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
       endsAt: newEndsAt?.toISOString() ?? null,
 
       attendanceClosesAt: newAttendanceClosesAt?.toISOString() ?? null,
+
+      publishMinutesBeforeStart: newPublishMinutesBeforeStart,
+
+      scheduledPublicationAt: newScheduledPublicationAt?.toISOString() ?? null,
 
       timezone: targetTimezone,
 
@@ -599,18 +749,37 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
     `**Scheduled as:** ${localStart.toFormat("dd LLL yyyy, HH:mm ZZZZ")}`,
   ];
 
-  if (event.signupsEnabled && event.status === "closed") {
+  if (event.publishedAt && event.signupsEnabled && newStatus === "closed") {
     response.push(
       "",
       "ℹ️ Attendance was already closed and remains closed. Use `/event reopen` if signups should reopen.",
     );
   }
 
-  if (!refreshResult.ok) {
+  if (refreshResult && !refreshResult.ok) {
     response.push(
       "",
       "⚠️ The database was updated, but the existing attendance message could not be refreshed.",
     );
+  }
+
+  if (!event.publishedAt) {
+    if (newScheduledPublicationAt) {
+      const publicationTimestamp = Math.floor(
+        newScheduledPublicationAt.getTime() / 1000,
+      );
+
+      response.push(
+        "",
+        `🕒 This event remains unpublished and is scheduled to publish <t:${publicationTimestamp}:F> (<t:${publicationTimestamp}:R>).`,
+        `Use \`/event publish event-id:${event.id}\` to publish it earlier.`,
+      );
+    } else {
+      response.push(
+        "",
+        `ℹ️ This event remains unpublished. Use \`/event publish event-id:${event.id}\` when it should go live.`,
+      );
+    }
   }
 
   await interaction.editReply({

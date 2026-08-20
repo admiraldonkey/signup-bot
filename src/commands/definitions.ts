@@ -267,6 +267,24 @@ export const commandDefinitions = [
             ),
         )
 
+        .addBooleanOption((option) =>
+          option
+            .setName("publish-now")
+            .setDescription(
+              "Publish immediately. Defaults to Yes unless a publication schedule is supplied.",
+            ),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("publish-minutes-before-start")
+            .setDescription(
+              "Automatically publish this many minutes before the event starts.",
+            )
+            .setMinValue(1)
+            .setMaxValue(10080),
+        )
+
         .addIntegerOption((option) =>
           option
             .setName("duration-minutes")
@@ -298,6 +316,20 @@ export const commandDefinitions = [
       subcommand
         .setName("list")
         .setDescription("Lists the next scheduled events for this server."),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("publish")
+        .setDescription("Publishes an unpublished event to members.")
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription("The unpublished event to publish.")
+            .setMinValue(1)
+            .setRequired(true),
+        ),
     )
 
     .addSubcommand((subcommand) =>
@@ -623,6 +655,16 @@ export const commandDefinitions = [
             )
             .setMinValue(0)
             .setMaxValue(10080),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("close-minutes-after-start")
+            .setDescription(
+              "Close requests this many minutes after event start.",
+            )
+            .setMinValue(0)
+            .setMaxValue(480),
         )
 
         .addRoleOption((option) =>
@@ -1040,6 +1082,24 @@ export const commandDefinitions = [
           option
             .setName("detailed-deadline")
             .setDescription("Whether to show the detailed signup deadline."),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("publish-minutes-before-start")
+            .setDescription(
+              "Change automatic publication timing for an unpublished event.",
+            )
+            .setMinValue(1)
+            .setMaxValue(10080),
+        )
+
+        .addBooleanOption((option) =>
+          option
+            .setName("clear-publish-schedule")
+            .setDescription(
+              "Remove automatic publication and leave the event unpublished.",
+            ),
         )
 
         .addRoleOption((option) =>
