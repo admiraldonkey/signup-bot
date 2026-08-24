@@ -1,4 +1,29 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
+
+# Environment files / secrets
 .env
+.env.*
+!.env.example
+
+# Test output
+coverage/
+
+# TypeScript build metadata
+*.tsbuildinfo
+
+# Logs
 *.log
+
+# Private keys / certificates
+*.pem
+*.key
+*.p12
+*.pfx
+
+# OS-generated files
+.DS_Store
+Thumbs.db

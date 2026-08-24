@@ -1,5 +1,29 @@
+# Dependencies
 node_modules
+
+# Local/build output
 dist
+coverage
+*.tsbuildinfo
+
+# Git metadata
 .git
+.gitignore
+
+# Environment files / secrets
 .env
+.env.*
+!.env.example
+
+# Logs
 *.log
+
+# Private keys / certificates
+*.pem
+*.key
+*.p12
+*.pfx
+
+# OS-generated files
+.DS_Store
+Thumbs.db
