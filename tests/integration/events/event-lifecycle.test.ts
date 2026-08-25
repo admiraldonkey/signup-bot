@@ -501,6 +501,184 @@ describe("event lifecycle", () => {
 
     expect.soft(auditResult.rows).toEqual([]);
   });
+
+  it("does not allow stale cancellation to overwrite completion or cancel its processing action", async () => {
+    // Arrange
+    const event = await createPublishedSignupEvent(pool, "open");
+
+    /*
+     * Represent a scheduler worker which has already claimed the durable
+     * complete_event action.
+     *
+     * In the real scheduler, the action remains "processing" while
+     * executeCompleteEvent() performs the event transition and associated
+     * lifecycle work. markActionCompleted() runs afterwards.
+     */
+    const completionActionResult = await pool.query<{
+      id: number;
+    }>(
+      `
+        INSERT INTO "scheduled_actions" (
+          "event_id",
+          "action_key",
+          "due_at",
+          "status",
+          "attempt_count",
+          "locked_at"
+        )
+        VALUES (
+          $1,
+          'complete_event',
+          NOW() - INTERVAL '1 minute',
+          'processing',
+          1,
+          NOW()
+        )
+        RETURNING "id"
+      `,
+      [event.id],
+    );
+
+    const completionActionId = completionActionResult.rows[0]?.id;
+
+    if (!completionActionId) {
+      throw new Error("The processing completion action was not created.");
+    }
+
+    const interaction = createEventCommandInteraction("cancel", event.id);
+
+    const lockClient = await pool.connect();
+
+    try {
+      /*
+       * Hold the event row.
+       *
+       * /event cancel can still read the currently committed "open" state,
+       * pass its validation, and then block when its UPDATE reaches this row.
+       */
+      await lockClient.query("BEGIN");
+
+      await lockClient.query(
+        `
+        SELECT "id"
+        FROM "events"
+        WHERE "id" = $1
+        FOR UPDATE
+      `,
+        [event.id],
+      );
+
+      const cancelPromise = handleEventCommand(interaction);
+
+      await waitForBlockedEventUpdate(pool, "cancel");
+
+      /*
+       * Scheduler completion wins the event-state race.
+       *
+       * This represents the point after executeCompleteEvent() has made the
+       * event terminal but before the scheduler's outer loop has called
+       * markActionCompleted() on its still-processing durable action.
+       */
+      await lockClient.query(
+        `
+        UPDATE "events"
+        SET
+          "status" = 'completed',
+          "updated_at" = NOW()
+        WHERE "id" = $1
+      `,
+        [event.id],
+      );
+
+      await lockClient.query("COMMIT");
+
+      /*
+       * The stale cancellation, which made its decision from the old "open"
+       * snapshot, is now allowed to continue.
+       */
+      await cancelPromise;
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+    }
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+      SELECT "status"
+      FROM "events"
+      WHERE "id" = $1
+    `,
+      [event.id],
+    );
+
+    expect(eventResult.rows).toHaveLength(1);
+
+    /*
+     * Completion won first and is terminal.
+     * A cancellation based on stale state must not overwrite it.
+     */
+    expect.soft(eventResult.rows[0]?.status).toBe("completed");
+
+    const actionResult = await pool.query<{
+      status: string;
+      locked_at: Date | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "locked_at"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [completionActionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    const completionAction = actionResult.rows[0];
+
+    /*
+     * The stale cancellation must not call cancelEventScheduledActions()
+     * after losing the event-state race.
+     *
+     * At this precise simulated point the scheduler still owns the action,
+     * so it should remain processing until its normal markActionCompleted()
+     * step runs.
+     */
+    expect.soft(completionAction?.status).toBe("processing");
+
+    expect.soft(completionAction?.locked_at).toBeInstanceOf(Date);
+
+    /*
+     * A cancellation which lost the lifecycle race must not be recorded as
+     * a successful administrative cancellation.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'event'
+        AND "target_id" = $1
+        AND "action" = 'event.cancel'
+        AND "outcome" = 'success'
+    `,
+      [String(event.id)],
+    );
+
+    expect.soft(auditResult.rows).toEqual([]);
+  });
 });
 
 async function createPublishedSignupEvent(
@@ -617,7 +795,7 @@ async function createPublishedSignupEvent(
 }
 
 function createEventCommandInteraction(
-  subcommand: "close" | "reopen",
+  subcommand: "close" | "reopen" | "cancel",
   eventId: number,
 ): ChatInputCommandInteraction {
   const interaction = {
@@ -661,7 +839,7 @@ function createEventCommandInteraction(
 
 async function waitForBlockedEventUpdate(
   pool: Pool,
-  commandName: "close" | "reopen" | "edit",
+  commandName: "close" | "reopen" | "edit" | "cancel",
 ): Promise<void> {
   const timeoutAt = Date.now() + 3_000;
 
