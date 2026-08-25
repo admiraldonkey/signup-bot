@@ -72,7 +72,7 @@ describe("event lifecycle", () => {
        */
       const closePromise = handleEventCommand(interaction);
 
-      await waitForBlockedEventUpdate(pool);
+      await waitForBlockedEventUpdate(pool, "close");
 
       /*
        * Cancellation wins while the stale close operation is waiting.
@@ -159,6 +159,147 @@ describe("event lifecycle", () => {
           AND "action" = 'event.close'
           AND "outcome" = 'success'
       `,
+      [String(event.id)],
+    );
+
+    expect.soft(auditResult.rows).toEqual([]);
+  });
+
+  it("does not allow a stale attendance reopen to overwrite cancellation", async () => {
+    // Arrange
+    const event = await createPublishedSignupEvent(pool, "closed");
+
+    const interaction = createEventCommandInteraction("reopen", event.id);
+
+    const lockClient = await pool.connect();
+
+    try {
+      /*
+       * Hold the event row so /event reopen can read the currently
+       * committed "closed" state but must wait when it tries to update it.
+       */
+      await lockClient.query("BEGIN");
+
+      await lockClient.query(
+        `
+        SELECT "id"
+        FROM "events"
+        WHERE "id" = $1
+        FOR UPDATE
+      `,
+        [event.id],
+      );
+
+      /*
+       * Start the real /event reopen command.
+       *
+       * It sees the event as closed, passes its checks, calculates a new
+       * attendance deadline, then blocks on the UPDATE.
+       */
+      const reopenPromise = handleEventCommand(interaction);
+
+      await waitForBlockedEventUpdate(pool, "reopen");
+
+      /*
+       * Cancellation wins before the stale reopen can apply its update.
+       */
+      await lockClient.query(
+        `
+        UPDATE "events"
+        SET
+          "status" = 'cancelled',
+          "updated_at" = NOW()
+        WHERE "id" = $1
+      `,
+        [event.id],
+      );
+
+      await lockClient.query("COMMIT");
+
+      /*
+       * The stale reopen is now allowed to continue.
+       */
+      await reopenPromise;
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+    }
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+      attendance_closes_at: Date | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attendance_closes_at"
+      FROM "events"
+      WHERE "id" = $1
+    `,
+      [event.id],
+    );
+
+    expect(eventResult.rows).toHaveLength(1);
+
+    const storedEvent = eventResult.rows[0];
+
+    /*
+     * Cancellation is final. A reopen command which made its decision
+     * using stale state must not restore the event to "open".
+     */
+    expect.soft(storedEvent?.status).toBe("cancelled");
+
+    /*
+     * The losing reopen must not replace the previous attendance deadline.
+     */
+    expect
+      .soft(storedEvent?.attendance_closes_at?.getTime())
+      .toBe(event.originalAttendanceClosesAt.getTime());
+
+    /*
+     * Reopening normally schedules a new automatic attendance close.
+     * A stale reopen which lost to cancellation must create no such work.
+     */
+    const scheduledActionResult = await pool.query<{
+      action_key: string;
+      status: string;
+    }>(
+      `
+      SELECT
+        "action_key",
+        "status"
+      FROM "scheduled_actions"
+      WHERE
+        "event_id" = $1
+        AND "action_key" = 'close_attendance'
+    `,
+      [event.id],
+    );
+
+    expect.soft(scheduledActionResult.rows).toEqual([]);
+
+    /*
+     * Nor may the losing command record a successful reopen.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'event'
+        AND "target_id" = $1
+        AND "action" = 'event.reopen'
+        AND "outcome" = 'success'
+    `,
       [String(event.id)],
     );
 
@@ -280,7 +421,7 @@ async function createPublishedSignupEvent(
 }
 
 function createEventCommandInteraction(
-  subcommand: "close",
+  subcommand: "close" | "reopen",
   eventId: number,
 ): ChatInputCommandInteraction {
   const interaction = {
@@ -322,7 +463,10 @@ function createEventCommandInteraction(
   return interaction as unknown as ChatInputCommandInteraction;
 }
 
-async function waitForBlockedEventUpdate(pool: Pool): Promise<void> {
+async function waitForBlockedEventUpdate(
+  pool: Pool,
+  commandName: "close" | "reopen",
+): Promise<void> {
   const timeoutAt = Date.now() + 3_000;
 
   while (Date.now() < timeoutAt) {
@@ -350,6 +494,6 @@ async function waitForBlockedEventUpdate(pool: Pool): Promise<void> {
   }
 
   throw new Error(
-    "Timed out waiting for /event close to block on the event row lock.",
+    `Timed out waiting for /event ${commandName} to block on the event row lock.`,
   );
 }
