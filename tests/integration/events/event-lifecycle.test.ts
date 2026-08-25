@@ -11,6 +11,7 @@ import {
 } from "vitest";
 
 import { handleEventCommand } from "../../../src/commands/event.js";
+import { editEvent } from "../../../src/commands/event-edit.js";
 import { pool as applicationPool } from "../../../src/db/client.js";
 import {
   createIntegrationPool,
@@ -305,6 +306,201 @@ describe("event lifecycle", () => {
 
     expect.soft(auditResult.rows).toEqual([]);
   });
+
+  it("does not allow a stale event edit to overwrite cancellation or resurrect scheduler actions", async () => {
+    // Arrange
+    const event = await createPublishedSignupEvent(pool, "open");
+
+    const originalCompletionDueAt = new Date(Date.now() + 26 * 60 * 60 * 1000);
+
+    /*
+     * Represent the event's existing automatic completion work.
+     *
+     * Cancellation normally retires this action. The stale edit must not
+     * be allowed to bring it back afterwards.
+     */
+    await pool.query(
+      `
+      INSERT INTO "scheduled_actions" (
+        "event_id",
+        "action_key",
+        "due_at",
+        "status"
+      )
+      VALUES (
+        $1,
+        'complete_event',
+        $2,
+        'pending'
+      )
+    `,
+      [event.id, originalCompletionDueAt],
+    );
+
+    const interaction = createEventEditInteraction(event.id);
+
+    const lockClient = await pool.connect();
+
+    try {
+      /*
+       * Lock the event row.
+       *
+       * /event edit can still read the committed "open" event and perform
+       * all of its validation/calculation, but its later UPDATE must wait.
+       */
+      await lockClient.query("BEGIN");
+
+      await lockClient.query(
+        `
+        SELECT "id"
+        FROM "events"
+        WHERE "id" = $1
+        FOR UPDATE
+      `,
+        [event.id],
+      );
+
+      /*
+       * The edit requests a new 120-minute duration.
+       *
+       * That means a successful edit would change ends_at and reschedule
+       * the durable complete_event action.
+       */
+      const editPromise = editEvent(interaction);
+
+      await waitForBlockedEventUpdate(pool, "edit");
+
+      /*
+       * Cancellation now wins the race.
+       *
+       * We reproduce the authoritative state cancellation leaves behind:
+       * the event is terminal and its existing scheduled work is retired.
+       */
+      await lockClient.query(
+        `
+        UPDATE "events"
+        SET
+          "status" = 'cancelled',
+          "updated_at" = NOW()
+        WHERE "id" = $1
+      `,
+        [event.id],
+      );
+
+      await lockClient.query(
+        `
+        UPDATE "scheduled_actions"
+        SET
+          "status" = 'cancelled',
+          "locked_at" = null,
+          "updated_at" = NOW()
+        WHERE
+          "event_id" = $1
+          AND "action_key" = 'complete_event'
+      `,
+        [event.id],
+      );
+
+      await lockClient.query("COMMIT");
+
+      /*
+       * Allow the stale edit, which made its decisions from the old "open"
+       * snapshot, to continue.
+       */
+      await editPromise;
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+    }
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+      ends_at: Date | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "ends_at"
+      FROM "events"
+      WHERE "id" = $1
+    `,
+      [event.id],
+    );
+
+    expect(eventResult.rows).toHaveLength(1);
+
+    const storedEvent = eventResult.rows[0];
+
+    /*
+     * Cancellation is final. A stale edit cannot restore the lifecycle
+     * status which it read before cancellation occurred.
+     */
+    expect.soft(storedEvent?.status).toBe("cancelled");
+
+    /*
+     * The event originally had no stored end time. The losing edit must
+     * not apply its requested 120-minute duration.
+     */
+    expect.soft(storedEvent?.ends_at).toBeNull();
+
+    const completionActionResult = await pool.query<{
+      status: string;
+      due_at: Date;
+    }>(
+      `
+        SELECT
+          "status",
+          "due_at"
+        FROM "scheduled_actions"
+        WHERE
+          "event_id" = $1
+          AND "action_key" = 'complete_event'
+      `,
+      [event.id],
+    );
+
+    expect(completionActionResult.rows).toHaveLength(1);
+
+    const completionAction = completionActionResult.rows[0];
+
+    /*
+     * Cancellation retired the scheduler action. The stale edit must not
+     * use scheduleEventCompletion() to upsert it back to pending.
+     */
+    expect.soft(completionAction?.status).toBe("cancelled");
+
+    expect
+      .soft(completionAction?.due_at.getTime())
+      .toBe(originalCompletionDueAt.getTime());
+
+    /*
+     * Finally, a command which lost the lifecycle race must not record
+     * itself as a successful edit.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'event'
+        AND "target_id" = $1
+        AND "action" = 'event.edit'
+        AND "outcome" = 'success'
+    `,
+      [String(event.id)],
+    );
+
+    expect.soft(auditResult.rows).toEqual([]);
+  });
 });
 
 async function createPublishedSignupEvent(
@@ -465,7 +661,7 @@ function createEventCommandInteraction(
 
 async function waitForBlockedEventUpdate(
   pool: Pool,
-  commandName: "close" | "reopen",
+  commandName: "close" | "reopen" | "edit",
 ): Promise<void> {
   const timeoutAt = Date.now() + 3_000;
 
@@ -496,4 +692,56 @@ async function waitForBlockedEventUpdate(
   throw new Error(
     `Timed out waiting for /event ${commandName} to block on the event row lock.`,
   );
+}
+
+function createEventEditInteraction(
+  eventId: number,
+): ChatInputCommandInteraction<"cached"> {
+  const interaction = {
+    guildId: DISCORD_GUILD_ID,
+
+    guild: {
+      id: DISCORD_GUILD_ID,
+    },
+
+    user: {
+      id: ADMIN_USER_ID,
+    },
+
+    member: {
+      permissions: {
+        has: () => true,
+      },
+
+      roles: {
+        cache: {
+          has: () => false,
+        },
+      },
+    },
+
+    options: {
+      getInteger: (name: string): number | null => {
+        if (name === "event-id") {
+          return eventId;
+        }
+
+        if (name === "duration-minutes") {
+          return 120;
+        }
+
+        return null;
+      },
+
+      getString: () => null,
+
+      getBoolean: () => null,
+
+      getRole: () => null,
+    },
+
+    editReply: vi.fn().mockResolvedValue(undefined),
+  };
+
+  return interaction as unknown as ChatInputCommandInteraction<"cached">;
 }
