@@ -1608,19 +1608,41 @@ async function cancelEvent(
     return;
   }
 
-  await db
+  const now = new Date();
+
+  const [cancelledEvent] = await db
     .update(events)
     .set({
       status: "cancelled",
 
-      updatedAt: new Date(),
+      updatedAt: now,
     })
     .where(
       and(
         eq(events.id, eventId),
         eq(events.ownerGuildId, configuration.guildId),
+
+        /*
+         * Cancellation was validated using the lifecycle state read above.
+         *
+         * If completion or another lifecycle transition changes that state
+         * before this UPDATE executes, the stale cancellation must lose
+         * rather than overwrite the newer authoritative state.
+         */
+        eq(events.status, event.status),
       ),
+    )
+    .returning({
+      id: events.id,
+    });
+
+  if (!cancelledEvent) {
+    await interaction.editReply(
+      `Event #${eventId} changed while the cancellation was being processed. No cancellation changes were made.`,
     );
+
+    return;
+  }
 
   await cancelEventScheduledActions(eventId);
 
