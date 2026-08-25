@@ -145,6 +145,9 @@ export async function setEventOrganiser(
 
   const now = new Date();
 
+  const shouldActivatePrimary =
+    slot === "primary" && event.publishedAt !== null;
+
   const assignment = await db.transaction(async (transaction) => {
     if (existing) {
       await transaction
@@ -230,15 +233,14 @@ export async function setEventOrganiser(
         );
     }
 
-    const activatedAt = slot === "primary" ? now : null;
+    const activatedAt = shouldActivatePrimary ? now : null;
 
-    const responseDeadlineAt =
-      slot === "primary"
-        ? calculateOrganiserResponseDeadline(
-            now,
-            context.organiserPrimaryResponseMinutes,
-          )
-        : null;
+    const responseDeadlineAt = shouldActivatePrimary
+      ? calculateOrganiserResponseDeadline(
+          now,
+          context.organiserPrimaryResponseMinutes,
+        )
+      : null;
 
     const [created] = await transaction
       .insert(eventOrganiserAssignments)
@@ -273,7 +275,7 @@ export async function setEventOrganiser(
       );
     }
 
-    if (slot === "primary") {
+    if (shouldActivatePrimary) {
       if (!activatedAt || !responseDeadlineAt) {
         throw new Error(
           "The primary organiser activation times were not created.",
@@ -300,7 +302,7 @@ export async function setEventOrganiser(
 
   let notification: OrganiserNotificationDelivery | null = null;
 
-  if (slot === "primary") {
+  if (shouldActivatePrimary) {
     notification = await sendOrganiserAssignmentNotification({
       guild: interaction.guild,
 
@@ -537,6 +539,7 @@ async function findOwnedEvent(guildDatabaseId: number, eventId: number) {
       name: events.name,
 
       status: events.status,
+      publishedAt: events.publishedAt,
     })
     .from(events)
     .where(
