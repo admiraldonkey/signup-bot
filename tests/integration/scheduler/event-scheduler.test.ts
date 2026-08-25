@@ -504,6 +504,132 @@ describe("event scheduler", () => {
 
     expect.soft(auditResult.rows).toEqual([]);
   });
+
+  it("closes a due role-request group normally while the parent event is active", async () => {
+    // Arrange
+    const fixture = await createEventWithDueRoleGroupClose(pool, "open");
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+      SELECT "status"
+      FROM "events"
+      WHERE "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toHaveLength(1);
+
+    /*
+     * Closing role requests is not itself an event lifecycle transition.
+     */
+    expect.soft(eventResult.rows[0]?.status).toBe("open");
+
+    const groupResult = await pool.query<{
+      closed_at: Date | null;
+    }>(
+      `
+      SELECT "closed_at"
+      FROM "role_request_groups"
+      WHERE "id" = $1
+    `,
+      [fixture.groupId],
+    );
+
+    expect(groupResult.rows).toHaveLength(1);
+
+    /*
+     * With a still-active parent event, the scheduler should perform the
+     * intended role-request lifecycle transition.
+     */
+    expect(groupResult.rows[0]?.closed_at).toBeInstanceOf(Date);
+
+    const actionResult = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+      completed_at: Date | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect.soft(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+      attempt_count: 1,
+      locked_at: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    /*
+     * A genuine role-group close should refresh its Discord message exactly
+     * once.
+     */
+    expect(
+      roleRequestMessageMocks.refreshRoleRequestGroupMessage,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      roleRequestMessageMocks.refreshRoleRequestGroupMessage,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+      fixture.groupId,
+    );
+
+    /*
+     * Unlike the obsolete/race cases, this really was a successful domain
+     * transition and should therefore have exactly one success audit.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'role_request_group'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.role_group_close'
+        AND "outcome" = 'success'
+    `,
+      [String(fixture.groupId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "scheduler.role_group_close",
+        outcome: "success",
+      },
+    ]);
+  });
 });
 
 async function createOpenEventWithDueAttendanceClose(
