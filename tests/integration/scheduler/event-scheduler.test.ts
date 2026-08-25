@@ -10,7 +10,19 @@ import {
   it,
   vi,
 } from "vitest";
+const roleRequestMessageMocks = vi.hoisted(() => ({
+  refreshRoleRequestGroupMessage: vi.fn().mockResolvedValue(undefined),
 
+  refreshRoleRequestMessages: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("../../../src/role-requests/role-request-message.js", () => ({
+  refreshRoleRequestGroupMessage:
+    roleRequestMessageMocks.refreshRoleRequestGroupMessage,
+
+  refreshRoleRequestMessages:
+    roleRequestMessageMocks.refreshRoleRequestMessages,
+}));
 import {
   startEventScheduler,
   stopEventScheduler,
@@ -34,6 +46,9 @@ describe("event scheduler", () => {
   beforeEach(async () => {
     stopEventScheduler();
     await resetIntegrationDatabase(pool);
+
+    roleRequestMessageMocks.refreshRoleRequestGroupMessage.mockClear();
+    roleRequestMessageMocks.refreshRoleRequestMessages.mockClear();
   });
 
   afterEach(() => {
@@ -219,6 +234,107 @@ describe("event scheduler", () => {
     );
 
     expect(auditResult.rows).toEqual([]);
+  });
+
+  it("treats a due role-request group close as obsolete after the event has completed", async () => {
+    // Arrange
+    const fixture = await createCompletedEventWithDueRoleGroupClose(pool);
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    /*
+     * A terminal parent event makes this group-close action obsolete.
+     *
+     * The action itself should still complete normally so it is not retried,
+     * but it must not mutate the role-request group or perform success
+     * side-effects.
+     */
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const groupResult = await pool.query<{
+      closed_at: Date | null;
+    }>(
+      `
+      SELECT "closed_at"
+      FROM "role_request_groups"
+      WHERE "id" = $1
+    `,
+      [fixture.groupId],
+    );
+
+    expect(groupResult.rows).toHaveLength(1);
+
+    /*
+     * The event was already completed before this scheduler action ran.
+     * There is no live role-request lifecycle left for this action to close.
+     */
+    expect.soft(groupResult.rows[0]?.closed_at).toBeNull();
+
+    const actionResult = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+      completed_at: Date | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect.soft(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+      attempt_count: 1,
+      locked_at: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    /*
+     * Discord should not be refreshed for lifecycle work which became
+     * obsolete when the parent event completed.
+     */
+    expect
+      .soft(roleRequestMessageMocks.refreshRoleRequestGroupMessage)
+      .not.toHaveBeenCalled();
+
+    /*
+     * Nor should an obsolete action claim that it successfully closed
+     * the group.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'role_request_group'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.role_group_close'
+        AND "outcome" = 'success'
+    `,
+      [String(fixture.groupId)],
+    );
+
+    expect.soft(auditResult.rows).toEqual([]);
   });
 });
 
@@ -420,4 +536,175 @@ async function waitForScheduledActionStatus(
   throw new Error(
     `Timed out waiting for scheduled action #${actionId} to reach status "${expectedStatus}".`,
   );
+}
+
+async function createCompletedEventWithDueRoleGroupClose(pool: Pool): Promise<{
+  eventId: number;
+  groupId: number;
+  actionId: number;
+}> {
+  const guildResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "discord_guilds" (
+        "discord_guild_id",
+        "name"
+      )
+      VALUES ($1, $2)
+      RETURNING "id"
+    `,
+    [DISCORD_GUILD_ID, "Scheduler Role Request Test Guild"],
+  );
+
+  const guildId = guildResult.rows[0]?.id;
+
+  if (!guildId) {
+    throw new Error("The integration-test guild was not created.");
+  }
+
+  /*
+   * Keep the bot-log channel unset so successful/obsolete scheduler
+   * behaviour can be asserted from PostgreSQL without needing Discord.
+   */
+  await pool.query(
+    `
+      INSERT INTO "guild_settings" (
+        "guild_id"
+      )
+      VALUES ($1)
+    `,
+    [guildId],
+  );
+
+  const eventTypeResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "event_types" (
+        "owner_guild_id",
+        "code",
+        "name"
+      )
+      VALUES ($1, $2, $3)
+      RETURNING "id"
+    `,
+    [guildId, "naval", "Naval Event"],
+  );
+
+  const eventTypeId = eventTypeResult.rows[0]?.id;
+
+  if (!eventTypeId) {
+    throw new Error("The integration-test event type was not created.");
+  }
+
+  const eventResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "events" (
+        "owner_guild_id",
+        "event_type_id",
+        "name",
+        "starts_at",
+        "signups_enabled",
+        "published_at",
+        "status",
+        "created_by_user_id"
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        NOW() - INTERVAL '2 hours',
+        true,
+        NOW() - INTERVAL '3 hours',
+        'completed',
+        $4
+      )
+      RETURNING "id"
+    `,
+    [guildId, eventTypeId, "Completed Role Request Test Event", ADMIN_USER_ID],
+  );
+
+  const eventId = eventResult.rows[0]?.id;
+
+  if (!eventId) {
+    throw new Error("The integration-test event was not created.");
+  }
+
+  const groupResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "role_request_groups" (
+        "event_id",
+        "name",
+        "channel_id",
+        "requires_positive_signup",
+        "opens_at",
+        "close_minutes_before_start",
+        "closes_at",
+        "closed_at",
+        "created_by_user_id"
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        false,
+        NOW() - INTERVAL '3 hours',
+        0,
+        NOW() - INTERVAL '2 hours',
+        null,
+        $4
+      )
+      RETURNING "id"
+    `,
+    [
+      eventId,
+      "Completed Event Role Requests",
+      "300000000000000003",
+      ADMIN_USER_ID,
+    ],
+  );
+
+  const groupId = groupResult.rows[0]?.id;
+
+  if (!groupId) {
+    throw new Error("The integration-test role-request group was not created.");
+  }
+
+  const actionResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "scheduled_actions" (
+        "event_id",
+        "action_key",
+        "due_at",
+        "status"
+      )
+      VALUES (
+        $1,
+        $2,
+        NOW() - INTERVAL '1 minute',
+        'pending'
+      )
+      RETURNING "id"
+    `,
+    [eventId, `role_request_group_close:${groupId}`],
+  );
+
+  const actionId = actionResult.rows[0]?.id;
+
+  if (!actionId) {
+    throw new Error("The role-request group close action was not created.");
+  }
+
+  return {
+    eventId,
+    groupId,
+    actionId,
+  };
 }
