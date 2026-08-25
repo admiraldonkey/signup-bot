@@ -674,6 +674,18 @@ async function executeRoleRequestGroupClose(
     return;
   }
 
+  /*
+   * A terminal parent event makes any outstanding role-request group close
+   * action obsolete.
+   *
+   * The scheduler action itself may complete normally so it is not retried,
+   * but there is no longer any live role-request lifecycle to mutate or
+   * report as successfully closed.
+   */
+  if (group.eventStatus === "cancelled" || group.eventStatus === "completed") {
+    return;
+  }
+
   if (!group.closedAt) {
     const now = new Date();
 
