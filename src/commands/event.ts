@@ -1491,7 +1491,7 @@ async function reopenEvent(
     return;
   }
 
-  await db
+  const [reopenedEvent] = await db
     .update(events)
     .set({
       status: "open",
@@ -1504,8 +1504,28 @@ async function reopenEvent(
       and(
         eq(events.id, eventId),
         eq(events.ownerGuildId, configuration.guildId),
+
+        /*
+         * The event may have changed after our earlier SELECT.
+         *
+         * Only reopen attendance if the event is still in the exact
+         * lifecycle state we validated. In particular, cancellation or
+         * completion winning a concurrent race must remain final.
+         */
+        eq(events.status, event.status),
       ),
+    )
+    .returning({
+      id: events.id,
+    });
+
+  if (!reopenedEvent) {
+    await interaction.editReply(
+      `Event #${eventId} changed while the reopen command was being processed. No attendance changes were made.`,
     );
+
+    return;
+  }
 
   await scheduleAttendanceClose(eventId, newClosingTime);
   await reschedulePendingEventReminders(eventId);
