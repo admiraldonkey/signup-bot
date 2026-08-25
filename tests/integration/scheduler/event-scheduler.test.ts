@@ -238,7 +238,7 @@ describe("event scheduler", () => {
 
   it("treats a due role-request group close as obsolete after the event has completed", async () => {
     // Arrange
-    const fixture = await createCompletedEventWithDueRoleGroupClose(pool);
+    const fixture = await createEventWithDueRoleGroupClose(pool, "completed");
 
     const client = createSchedulerClient();
 
@@ -315,6 +315,174 @@ describe("event scheduler", () => {
     /*
      * Nor should an obsolete action claim that it successfully closed
      * the group.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'role_request_group'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.role_group_close'
+        AND "outcome" = 'success'
+    `,
+      [String(fixture.groupId)],
+    );
+
+    expect.soft(auditResult.rows).toEqual([]);
+  });
+
+  it("does not close a role-request group when the event completes after the scheduler reads it", async () => {
+    // Arrange
+    const fixture = await createEventWithDueRoleGroupClose(pool, "open");
+
+    const client = createSchedulerClient();
+
+    const lockClient = await pool.connect();
+
+    try {
+      /*
+       * Hold the role-request group row.
+       *
+       * A normal SELECT can still read the group and its currently-open
+       * parent event, so the scheduler will pass its terminal-state guard.
+       * Its later UPDATE of the group must then wait here.
+       */
+      await lockClient.query("BEGIN");
+
+      await lockClient.query(
+        `
+        SELECT "id"
+        FROM "role_request_groups"
+        WHERE "id" = $1
+        FOR UPDATE
+      `,
+        [fixture.groupId],
+      );
+
+      /*
+       * The scheduler claims the due action and reads the parent event
+       * while it is still "open".
+       */
+      startEventScheduler(client);
+
+      await waitForBlockedSchedulerRoleGroupUpdate(pool);
+
+      /*
+       * Completion wins after the scheduler's read but before its stale
+       * role-group UPDATE is allowed to proceed.
+       */
+      await lockClient.query(
+        `
+        UPDATE "events"
+        SET
+          "status" = 'completed',
+          "updated_at" = NOW()
+        WHERE "id" = $1
+      `,
+        [fixture.eventId],
+      );
+
+      await lockClient.query("COMMIT");
+
+      /*
+       * Releasing the group lock allows the stale scheduler operation to
+       * continue. Once the durable action is completed, all executor
+       * side-effects have finished and the assertions are deterministic.
+       */
+      await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+      stopEventScheduler();
+    }
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+      SELECT "status"
+      FROM "events"
+      WHERE "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toHaveLength(1);
+
+    /*
+     * Completion won the lifecycle race and remains authoritative.
+     */
+    expect.soft(eventResult.rows[0]?.status).toBe("completed");
+
+    const groupResult = await pool.query<{
+      closed_at: Date | null;
+    }>(
+      `
+      SELECT "closed_at"
+      FROM "role_request_groups"
+      WHERE "id" = $1
+    `,
+      [fixture.groupId],
+    );
+
+    expect(groupResult.rows).toHaveLength(1);
+
+    /*
+     * The scheduler made its close decision using stale "open" state.
+     * It must not mutate the group after completion has won.
+     */
+    expect.soft(groupResult.rows[0]?.closed_at).toBeNull();
+
+    const actionResult = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+      completed_at: Date | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    /*
+     * Losing the domain race makes the action obsolete, not retryable.
+     */
+    expect.soft(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+      attempt_count: 1,
+      locked_at: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    /*
+     * No Discord work should be performed for the stale close.
+     */
+    expect
+      .soft(roleRequestMessageMocks.refreshRoleRequestGroupMessage)
+      .not.toHaveBeenCalled();
+
+    /*
+     * Nor may it claim a successful role-group close.
      */
     const auditResult = await pool.query<{
       action: string;
@@ -505,6 +673,40 @@ async function waitForBlockedSchedulerEventUpdate(pool: Pool): Promise<void> {
   );
 }
 
+async function waitForBlockedSchedulerRoleGroupUpdate(
+  pool: Pool,
+): Promise<void> {
+  const timeoutAt = Date.now() + 3_000;
+
+  while (Date.now() < timeoutAt) {
+    const result = await pool.query<{
+      blocked: boolean;
+    }>(`
+      SELECT EXISTS (
+        SELECT 1
+        FROM pg_stat_activity
+        WHERE
+          datname = current_database()
+          AND state = 'active'
+          AND wait_event_type = 'Lock'
+          AND query ILIKE '%update "role_request_groups"%'
+      ) AS blocked
+    `);
+
+    if (result.rows[0]?.blocked) {
+      return;
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+
+  throw new Error(
+    "Timed out waiting for the role-request group close UPDATE to block on the group row.",
+  );
+}
+
 async function waitForScheduledActionStatus(
   pool: Pool,
   actionId: number,
@@ -538,7 +740,10 @@ async function waitForScheduledActionStatus(
   );
 }
 
-async function createCompletedEventWithDueRoleGroupClose(pool: Pool): Promise<{
+async function createEventWithDueRoleGroupClose(
+  pool: Pool,
+  status: "open" | "completed",
+): Promise<{
   eventId: number;
   groupId: number;
   actionId: number;
@@ -619,12 +824,18 @@ async function createCompletedEventWithDueRoleGroupClose(pool: Pool): Promise<{
         NOW() - INTERVAL '2 hours',
         true,
         NOW() - INTERVAL '3 hours',
-        'completed',
-        $4
+        $4,
+        $5
       )
       RETURNING "id"
     `,
-    [guildId, eventTypeId, "Completed Role Request Test Event", ADMIN_USER_ID],
+    [
+      guildId,
+      eventTypeId,
+      "Role Request Scheduler Test Event",
+      status,
+      ADMIN_USER_ID,
+    ],
   );
 
   const eventId = eventResult.rows[0]?.id;
