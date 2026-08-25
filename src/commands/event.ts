@@ -1338,7 +1338,7 @@ async function closeEvent(
 
   const now = new Date();
 
-  await db
+  const [closedEvent] = await db
     .update(events)
     .set({
       status: "closed",
@@ -1351,8 +1351,28 @@ async function closeEvent(
       and(
         eq(events.id, eventId),
         eq(events.ownerGuildId, configuration.guildId),
+
+        /*
+         * The event may change after our earlier SELECT.
+         *
+         * Only apply this close if it is still in the exact lifecycle
+         * state that we validated above. In particular, cancellation or
+         * completion winning a concurrent race must remain final.
+         */
+        eq(events.status, event.status),
       ),
+    )
+    .returning({
+      id: events.id,
+    });
+
+  if (!closedEvent) {
+    await interaction.editReply(
+      `Event #${eventId} changed while the close command was being processed. No attendance changes were made.`,
     );
+
+    return;
+  }
 
   const refreshResult = await refreshAttendanceMessage(
     interaction.guild,
