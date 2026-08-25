@@ -842,7 +842,7 @@ async function executeCloseAttendance(
   }
 
   if (event.status !== "closed") {
-    await db
+    const [closedEvent] = await db
       .update(events)
       .set({
         status: "closed",
@@ -853,7 +853,22 @@ async function executeCloseAttendance(
           eq(events.id, eventId),
           inArray(events.status, ["scheduled", "open"]),
         ),
-      );
+      )
+      .returning({
+        id: events.id,
+      });
+
+    /*
+     * Another lifecycle transition may have won after loadScheduledEvent()
+     * read the event but before this conditional UPDATE ran.
+     *
+     * In that case the scheduler action itself is obsolete and may complete
+     * normally, but attendance was not actually closed by this action.
+     * Do not refresh Discord, log success or write a success audit.
+     */
+    if (!closedEvent) {
+      return;
+    }
   }
 
   if (event.publishedAt) {
