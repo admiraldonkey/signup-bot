@@ -600,8 +600,8 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
       ? ("scheduled" as const)
       : event.status;
 
-  await db.transaction(async (transaction) => {
-    await transaction
+  const editApplied = await db.transaction(async (transaction) => {
+    const [updatedEvent] = await transaction
       .update(events)
       .set({
         name: newName,
@@ -628,8 +628,33 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
 
         updatedAt: now,
       })
-      .where(eq(events.id, event.id));
+      .where(
+        and(
+          eq(events.id, event.id),
+          eq(events.ownerGuildId, configuration.guildId),
 
+          /*
+           * The edit was validated using the lifecycle state read above.
+           *
+           * If cancellation, completion or another lifecycle transition
+           * changes that state before this UPDATE executes, the stale edit
+           * must lose rather than overwrite the newer authoritative state.
+           */
+          eq(events.status, event.status),
+        ),
+      )
+      .returning({
+        id: events.id,
+      });
+
+    if (!updatedEvent) {
+      return false;
+    }
+
+    /*
+     * Ping-role changes belong to the same edit transaction.
+     * Do not apply them if the lifecycle update lost a race.
+     */
     if (pingRolesProvided) {
       await transaction
         .delete(eventPingRoles)
@@ -638,7 +663,6 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
       await transaction.insert(eventPingRoles).values(
         uniqueRoles.map((role, index) => ({
           eventId: event.id,
-
           discordRoleId: role.id,
 
           roleName: role.name,
@@ -647,7 +671,17 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
         })),
       );
     }
+
+    return true;
   });
+
+  if (!editApplied) {
+    await interaction.editReply(
+      `Event #${event.id} changed while the edit command was being processed. No changes were made.`,
+    );
+
+    return;
+  }
 
   /*
    * Keep core scheduled actions synchronised.

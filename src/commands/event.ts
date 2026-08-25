@@ -1338,7 +1338,7 @@ async function closeEvent(
 
   const now = new Date();
 
-  await db
+  const [closedEvent] = await db
     .update(events)
     .set({
       status: "closed",
@@ -1351,8 +1351,28 @@ async function closeEvent(
       and(
         eq(events.id, eventId),
         eq(events.ownerGuildId, configuration.guildId),
+
+        /*
+         * The event may change after our earlier SELECT.
+         *
+         * Only apply this close if it is still in the exact lifecycle
+         * state that we validated above. In particular, cancellation or
+         * completion winning a concurrent race must remain final.
+         */
+        eq(events.status, event.status),
       ),
+    )
+    .returning({
+      id: events.id,
+    });
+
+  if (!closedEvent) {
+    await interaction.editReply(
+      `Event #${eventId} changed while the close command was being processed. No attendance changes were made.`,
     );
+
+    return;
+  }
 
   const refreshResult = await refreshAttendanceMessage(
     interaction.guild,
@@ -1471,7 +1491,7 @@ async function reopenEvent(
     return;
   }
 
-  await db
+  const [reopenedEvent] = await db
     .update(events)
     .set({
       status: "open",
@@ -1484,8 +1504,28 @@ async function reopenEvent(
       and(
         eq(events.id, eventId),
         eq(events.ownerGuildId, configuration.guildId),
+
+        /*
+         * The event may have changed after our earlier SELECT.
+         *
+         * Only reopen attendance if the event is still in the exact
+         * lifecycle state we validated. In particular, cancellation or
+         * completion winning a concurrent race must remain final.
+         */
+        eq(events.status, event.status),
       ),
+    )
+    .returning({
+      id: events.id,
+    });
+
+  if (!reopenedEvent) {
+    await interaction.editReply(
+      `Event #${eventId} changed while the reopen command was being processed. No attendance changes were made.`,
     );
+
+    return;
+  }
 
   await scheduleAttendanceClose(eventId, newClosingTime);
   await reschedulePendingEventReminders(eventId);
@@ -1568,19 +1608,41 @@ async function cancelEvent(
     return;
   }
 
-  await db
+  const now = new Date();
+
+  const [cancelledEvent] = await db
     .update(events)
     .set({
       status: "cancelled",
 
-      updatedAt: new Date(),
+      updatedAt: now,
     })
     .where(
       and(
         eq(events.id, eventId),
         eq(events.ownerGuildId, configuration.guildId),
+
+        /*
+         * Cancellation was validated using the lifecycle state read above.
+         *
+         * If completion or another lifecycle transition changes that state
+         * before this UPDATE executes, the stale cancellation must lose
+         * rather than overwrite the newer authoritative state.
+         */
+        eq(events.status, event.status),
       ),
+    )
+    .returning({
+      id: events.id,
+    });
+
+  if (!cancelledEvent) {
+    await interaction.editReply(
+      `Event #${eventId} changed while the cancellation was being processed. No cancellation changes were made.`,
     );
+
+    return;
+  }
 
   await cancelEventScheduledActions(eventId);
 
