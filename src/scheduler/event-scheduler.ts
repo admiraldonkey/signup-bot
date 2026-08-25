@@ -10,6 +10,7 @@ import {
   isNotNull,
   ne,
 } from "drizzle-orm";
+import { TransactionRollbackError } from "drizzle-orm/errors";
 
 import { db } from "../db/client.js";
 import {
@@ -687,16 +688,82 @@ async function executeRoleRequestGroupClose(
   }
 
   if (!group.closedAt) {
-    const now = new Date();
+    let groupClosed = false;
 
-    await db
-      .update(roleRequestGroups)
-      .set({
-        closedAt: now,
+    try {
+      groupClosed = await db.transaction(async (transaction) => {
+        const now = new Date();
 
-        updatedAt: now,
-      })
-      .where(eq(roleRequestGroups.id, group.id));
+        /*
+         * Acquire the group row first.
+         *
+         * The closedAt predicate also means another successful close
+         * which wins this race makes this scheduler action obsolete.
+         */
+        const [closedGroup] = await transaction
+          .update(roleRequestGroups)
+          .set({
+            closedAt: now,
+
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(roleRequestGroups.id, group.id),
+              isNull(roleRequestGroups.closedAt),
+            ),
+          )
+          .returning({
+            id: roleRequestGroups.id,
+          });
+
+        if (!closedGroup) {
+          return false;
+        }
+
+        /*
+         * Re-read and lock the parent event after acquiring the group row.
+         *
+         * This closes the race between the earlier eventStatus check and
+         * the group mutation. If completion/cancellation already won, this
+         * SELECT observes it. If the event is still active, FOR UPDATE
+         * prevents a terminal lifecycle transition from slipping in before
+         * this transaction commits.
+         */
+        const [currentEvent] = await transaction
+          .select({
+            status: events.status,
+          })
+          .from(events)
+          .where(eq(events.id, eventId))
+          .for("update")
+          .limit(1);
+
+        if (
+          !currentEvent ||
+          currentEvent.status === "cancelled" ||
+          currentEvent.status === "completed"
+        ) {
+          transaction.rollback();
+        }
+
+        return true;
+      });
+    } catch (error) {
+      /*
+       * rollback() is intentional here: the scheduler discovered that its
+       * group close became obsolete while the transaction was in flight.
+       */
+      if (error instanceof TransactionRollbackError) {
+        return;
+      }
+
+      throw error;
+    }
+
+    if (!groupClosed) {
+      return;
+    }
   }
 
   const guild = await client.guilds.fetch(group.discordGuildId);
