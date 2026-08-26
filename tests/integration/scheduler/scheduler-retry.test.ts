@@ -186,6 +186,73 @@ describe("scheduler retry and recovery", () => {
       .soft(action?.last_error)
       .not.toContain("maximum attempt count had already been reached");
   });
+
+  it("does not execute an exhausted action which is already pending at the maximum attempt count", async () => {
+    // Arrange
+    const fixture = await createPendingExhaustedAction(pool);
+
+    /*
+     * If the scheduler incorrectly claims this action, the invalid key makes
+     * that sixth execution immediately visible in both attempt_count and
+     * last_error.
+     */
+    const client = {} as Client<true>;
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "failed");
+
+    stopEventScheduler();
+
+    // Assert
+    const result = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+      completed_at: Date | null;
+      last_error: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at",
+        "last_error"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(result.rows).toHaveLength(1);
+
+    const action = result.rows[0];
+
+    /*
+     * Five attempts have already been consumed.
+     *
+     * Merely being pending must not entitle the action to another claim.
+     */
+    expect.soft(action?.attempt_count).toBe(5);
+
+    expect.soft(action?.status).toBe("failed");
+
+    expect.soft(action?.locked_at).toBeNull();
+
+    expect.soft(action?.completed_at).toBeNull();
+
+    /*
+     * This should be terminalised as an exhausted scheduler action without
+     * executing its payload for an impermissible sixth time.
+     */
+    expect.soft(action?.last_error).toContain("maximum attempt count");
+
+    expect
+      .soft(action?.last_error)
+      .not.toContain("Unknown scheduled action key");
+  });
 });
 
 async function createStaleProcessingAction(
@@ -342,4 +409,128 @@ async function waitForScheduledActionStatus(
   throw new Error(
     `Timed out waiting for scheduled action #${actionId} to reach status "${expectedStatus}".`,
   );
+}
+
+async function createPendingExhaustedAction(pool: Pool): Promise<{
+  eventId: number;
+  actionId: number;
+}> {
+  const guildResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "discord_guilds" (
+        "discord_guild_id",
+        "name"
+      )
+      VALUES ($1, $2)
+      RETURNING "id"
+    `,
+    [DISCORD_GUILD_ID, "Scheduler Pending Retry Test Guild"],
+  );
+
+  const guildId = guildResult.rows[0]?.id;
+
+  if (!guildId) {
+    throw new Error("The integration-test guild was not created.");
+  }
+
+  const eventTypeResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "event_types" (
+          "owner_guild_id",
+          "code",
+          "name"
+        )
+        VALUES ($1, $2, $3)
+        RETURNING "id"
+      `,
+    [guildId, "naval", "Naval Event"],
+  );
+
+  const eventTypeId = eventTypeResult.rows[0]?.id;
+
+  if (!eventTypeId) {
+    throw new Error("The integration-test event type was not created.");
+  }
+
+  const eventResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "events" (
+        "owner_guild_id",
+        "event_type_id",
+        "name",
+        "starts_at",
+        "status",
+        "created_by_user_id"
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        NOW() + INTERVAL '1 hour',
+        'open',
+        $4
+      )
+      RETURNING "id"
+    `,
+    [
+      guildId,
+      eventTypeId,
+      "Pending Exhausted Action Test Event",
+      ADMIN_USER_ID,
+    ],
+  );
+
+  const eventId = eventResult.rows[0]?.id;
+
+  if (!eventId) {
+    throw new Error("The integration-test event was not created.");
+  }
+
+  /*
+   * This represents an exhausted action left pending by interrupted legacy
+   * recovery or otherwise inconsistent persisted scheduler state.
+   *
+   * The scheduler should repair it rather than execute attempt 6.
+   */
+  const actionResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "scheduled_actions" (
+          "event_id",
+          "action_key",
+          "due_at",
+          "status",
+          "attempt_count",
+          "locked_at"
+        )
+        VALUES (
+          $1,
+          'integration_test_invalid_action',
+          NOW() - INTERVAL '1 minute',
+          'pending',
+          5,
+          null
+        )
+        RETURNING "id"
+      `,
+    [eventId],
+  );
+
+  const actionId = actionResult.rows[0]?.id;
+
+  if (!actionId) {
+    throw new Error("The exhausted pending action was not created.");
+  }
+
+  return {
+    eventId,
+    actionId,
+  };
 }
