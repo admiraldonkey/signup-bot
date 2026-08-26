@@ -363,6 +363,44 @@ async function executeOrganiserWarning(
 
   const guild = await client.guilds.fetch(assignment.discordGuildId);
 
+  /*
+   * Fetching the guild crosses an external boundary and may take long enough
+   * for the organiser assignment or parent event to change.
+   *
+   * Revalidate immediately before sending the warning so a confirmation,
+   * decline, replacement, cancellation or completion which won after our
+   * initial SELECT makes this action obsolete.
+   */
+  const [currentAssignment] = await db
+    .select({
+      id: eventOrganiserAssignments.id,
+    })
+    .from(eventOrganiserAssignments)
+    .innerJoin(events, eq(events.id, eventOrganiserAssignments.eventId))
+    .where(
+      and(
+        eq(eventOrganiserAssignments.id, assignment.id),
+
+        eq(eventOrganiserAssignments.eventId, eventId),
+
+        eq(eventOrganiserAssignments.isCurrent, true),
+
+        eq(eventOrganiserAssignments.status, "pending"),
+
+        isNotNull(eventOrganiserAssignments.activatedAt),
+
+        isNotNull(eventOrganiserAssignments.responseDeadlineAt),
+
+        ne(events.status, "cancelled"),
+        ne(events.status, "completed"),
+      ),
+    )
+    .limit(1);
+
+  if (!currentAssignment) {
+    return;
+  }
+
   const sent = await sendOrganiserPendingWarning({
     guild,
 
