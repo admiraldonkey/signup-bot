@@ -269,7 +269,7 @@ async function processDueActions(client: Client<true>): Promise<void> {
     try {
       await executeAction(client, claimedAction);
 
-      await markActionCompleted(claimedAction.id);
+      await markActionCompleted(claimedAction.id, claimedAction.attemptCount);
     } catch (error) {
       await handleActionFailure(claimedAction, error);
     }
@@ -1389,7 +1389,10 @@ async function refreshEventMessage(
   }
 }
 
-async function markActionCompleted(actionId: number): Promise<void> {
+async function markActionCompleted(
+  actionId: number,
+  attemptCount: number,
+): Promise<void> {
   const now = new Date();
 
   await db
@@ -1398,7 +1401,6 @@ async function markActionCompleted(actionId: number): Promise<void> {
       status: "completed",
 
       lockedAt: null,
-
       completedAt: now,
 
       lastError: null,
@@ -1410,13 +1412,17 @@ async function markActionCompleted(actionId: number): Promise<void> {
         eq(scheduledActions.id, actionId),
 
         /*
-         * Only the worker which still owns the processing action may
-         * complete it.
+         * Only the worker which still owns this exact processing attempt
+         * may complete the durable action.
          *
-         * An administrator may have cancelled the action while it was
-         * executing, in which case that newer terminal state wins.
+         * A newer terminal state may have replaced processing while this
+         * worker was executing, or stale recovery may have returned the
+         * action to pending and allowed another worker to claim a newer
+         * attempt.
          */
         eq(scheduledActions.status, "processing"),
+
+        eq(scheduledActions.attemptCount, attemptCount),
       ),
     );
 }
