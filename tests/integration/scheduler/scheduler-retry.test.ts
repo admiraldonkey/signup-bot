@@ -49,7 +49,7 @@ describe("scheduler retry and recovery", () => {
 
   it("does not give a stale processing action a sixth attempt after the maximum attempt count was already reached", async () => {
     // Arrange
-    const fixture = await createStaleExhaustedAction(pool);
+    const fixture = await createStaleProcessingAction(pool, 5);
 
     /*
      * No Discord functionality is needed for this regression.
@@ -115,9 +115,83 @@ describe("scheduler retry and recovery", () => {
       .soft(action?.last_error)
       .not.toContain("Unknown scheduled action key");
   });
+
+  it("recovers a stale fourth attempt and gives it exactly one final fifth attempt", async () => {
+    // Arrange
+    const fixture = await createStaleProcessingAction(pool, 4);
+
+    /*
+     * The invalid key makes execution fail deterministically once the
+     * recovered action is claimed. That lets us observe that attempt 5
+     * genuinely occurred without involving Discord or a domain executor.
+     */
+    const client = {} as Client<true>;
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "failed");
+
+    stopEventScheduler();
+
+    // Assert
+    const result = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+      completed_at: Date | null;
+      last_error: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at",
+        "last_error"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(result.rows).toHaveLength(1);
+
+    const action = result.rows[0];
+
+    /*
+     * Attempt 4 was interrupted. Recovery should return it to pending and
+     * claimAction() should consume the one remaining permitted attempt.
+     */
+    expect.soft(action?.attempt_count).toBe(5);
+
+    /*
+     * The deliberately-invalid action then fails on that final attempt, so
+     * normal retry handling should make the action terminal.
+     */
+    expect.soft(action?.status).toBe("failed");
+
+    expect.soft(action?.locked_at).toBeNull();
+
+    expect.soft(action?.completed_at).toBeNull();
+
+    /*
+     * The final error should come from actually executing attempt 5.
+     * This distinguishes successful stale recovery from simply marking the
+     * fourth attempt failed during recovery.
+     */
+    expect.soft(action?.last_error).toContain("Unknown scheduled action key");
+
+    expect
+      .soft(action?.last_error)
+      .not.toContain("maximum attempt count had already been reached");
+  });
 });
 
-async function createStaleExhaustedAction(pool: Pool): Promise<{
+async function createStaleProcessingAction(
+  pool: Pool,
+  attemptCount: number,
+): Promise<{
   eventId: number;
   actionId: number;
 }> {
@@ -194,11 +268,11 @@ async function createStaleExhaustedAction(pool: Pool): Promise<{
   }
 
   /*
-   * Simulate a process which crashed during its fifth and final allowed
-   * execution attempt.
+   * Simulate a process which crashed while this action was being executed.
    *
-   * The lock is older than the scheduler's five-minute stale threshold,
-   * so recoverStaleActions() will inspect it on the next tick.
+   * The lock is older than the scheduler's five-minute stale threshold, so
+   * recoverStaleActions() will decide whether the action may be retried or
+   * has already exhausted its permitted attempts.
    */
   const actionResult = await pool.query<{
     id: number;
@@ -217,12 +291,12 @@ async function createStaleExhaustedAction(pool: Pool): Promise<{
           'integration_test_invalid_action',
           NOW() - INTERVAL '10 minutes',
           'processing',
-          5,
+          $2,
           NOW() - INTERVAL '6 minutes'
         )
         RETURNING "id"
       `,
-    [eventId],
+    [eventId, attemptCount],
   );
 
   const actionId = actionResult.rows[0]?.id;
