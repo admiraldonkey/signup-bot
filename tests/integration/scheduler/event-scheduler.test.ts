@@ -630,6 +630,174 @@ describe("event scheduler", () => {
       },
     ]);
   });
+
+  it("does not time out an organiser assignment when the event completes after the scheduler reads it", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserTimeout(pool);
+
+    const client = createSchedulerClient();
+
+    const lockClient = await pool.connect();
+
+    try {
+      /*
+       * Hold the organiser assignment row.
+       *
+       * The scheduler can still read both the pending assignment and its
+       * currently-open event, so it passes all of its initial checks.
+       * Its later assignment UPDATE must then wait on this lock.
+       */
+      await lockClient.query("BEGIN");
+
+      await lockClient.query(
+        `
+        SELECT "id"
+        FROM "event_organiser_assignments"
+        WHERE "id" = $1
+        FOR UPDATE
+      `,
+        [fixture.assignmentId],
+      );
+
+      startEventScheduler(client);
+
+      await waitForBlockedSchedulerOrganiserAssignmentUpdate(pool);
+
+      /*
+       * Event completion wins after executeOrganiserTimeout() has already
+       * read the old "open" state but before its assignment mutation is
+       * allowed to proceed.
+       */
+      await lockClient.query(
+        `
+        UPDATE "events"
+        SET
+          "status" = 'completed',
+          "updated_at" = NOW()
+        WHERE "id" = $1
+      `,
+        [fixture.eventId],
+      );
+
+      await lockClient.query("COMMIT");
+
+      /*
+       * The timeout action is now obsolete rather than retryable.
+       * Wait for the real scheduler loop to finish processing it.
+       */
+      await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+      stopEventScheduler();
+    }
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+      SELECT "status"
+      FROM "events"
+      WHERE "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toHaveLength(1);
+
+    expect.soft(eventResult.rows[0]?.status).toBe("completed");
+
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      ended_at: Date | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current",
+        "ended_at"
+      FROM "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toHaveLength(1);
+
+    const assignment = assignmentResult.rows[0];
+
+    /*
+     * Completion made the pending organiser workflow obsolete.
+     *
+     * A timeout decision made using the earlier "open" snapshot must not
+     * turn the assignment into timed_out afterwards.
+     */
+    expect.soft(assignment?.status).toBe("pending");
+
+    expect.soft(assignment?.is_current).toBe(true);
+
+    expect.soft(assignment?.ended_at).toBeNull();
+
+    const actionResult = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+      completed_at: Date | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    /*
+     * The durable timeout action itself may finish normally because the
+     * event lifecycle has made its work obsolete.
+     */
+    expect.soft(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+      attempt_count: 1,
+      locked_at: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    /*
+     * An obsolete timeout must not claim successful organiser failure.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'organiser_assignment'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.organiser_timeout'
+        AND "outcome" = 'success'
+    `,
+      [String(fixture.assignmentId)],
+    );
+
+    expect.soft(auditResult.rows).toEqual([]);
+  });
 });
 
 async function createOpenEventWithDueAttendanceClose(
@@ -830,6 +998,40 @@ async function waitForBlockedSchedulerRoleGroupUpdate(
 
   throw new Error(
     "Timed out waiting for the role-request group close UPDATE to block on the group row.",
+  );
+}
+
+async function waitForBlockedSchedulerOrganiserAssignmentUpdate(
+  pool: Pool,
+): Promise<void> {
+  const timeoutAt = Date.now() + 3_000;
+
+  while (Date.now() < timeoutAt) {
+    const result = await pool.query<{
+      blocked: boolean;
+    }>(`
+      SELECT EXISTS (
+        SELECT 1
+        FROM pg_stat_activity
+        WHERE
+          datname = current_database()
+          AND state = 'active'
+          AND wait_event_type = 'Lock'
+          AND query ILIKE '%update "event_organiser_assignments"%'
+      ) AS blocked
+    `);
+
+    if (result.rows[0]?.blocked) {
+      return;
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+
+  throw new Error(
+    "Timed out waiting for the organiser-timeout UPDATE to block on the assignment row.",
   );
 }
 
@@ -1042,6 +1244,170 @@ async function createEventWithDueRoleGroupClose(
   return {
     eventId,
     groupId,
+    actionId,
+  };
+}
+
+async function createOpenEventWithDueOrganiserTimeout(pool: Pool): Promise<{
+  eventId: number;
+  assignmentId: number;
+  actionId: number;
+}> {
+  const guildResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "discord_guilds" (
+        "discord_guild_id",
+        "name"
+      )
+      VALUES ($1, $2)
+      RETURNING "id"
+    `,
+    [DISCORD_GUILD_ID, "Scheduler Organiser Test Guild"],
+  );
+
+  const guildId = guildResult.rows[0]?.id;
+
+  if (!guildId) {
+    throw new Error("The integration-test guild was not created.");
+  }
+
+  await pool.query(
+    `
+      INSERT INTO "guild_settings" (
+        "guild_id"
+      )
+      VALUES ($1)
+    `,
+    [guildId],
+  );
+
+  const eventTypeResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "event_types" (
+        "owner_guild_id",
+        "code",
+        "name"
+      )
+      VALUES ($1, $2, $3)
+      RETURNING "id"
+    `,
+    [guildId, "naval", "Naval Event"],
+  );
+
+  const eventTypeId = eventTypeResult.rows[0]?.id;
+
+  if (!eventTypeId) {
+    throw new Error("The integration-test event type was not created.");
+  }
+
+  const eventResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "events" (
+        "owner_guild_id",
+        "event_type_id",
+        "name",
+        "starts_at",
+        "signups_enabled",
+        "published_at",
+        "status",
+        "created_by_user_id"
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        NOW() + INTERVAL '1 hour',
+        true,
+        NOW() - INTERVAL '1 hour',
+        'open',
+        $4
+      )
+      RETURNING "id"
+    `,
+    [guildId, eventTypeId, "Organiser Timeout Race Event", ADMIN_USER_ID],
+  );
+
+  const eventId = eventResult.rows[0]?.id;
+
+  if (!eventId) {
+    throw new Error("The integration-test event was not created.");
+  }
+
+  const assignmentResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "event_organiser_assignments" (
+          "event_id",
+          "slot",
+          "discord_user_id",
+          "display_name_snapshot",
+          "status",
+          "is_current",
+          "assigned_by_user_id",
+          "activated_at",
+          "response_deadline_at"
+        )
+        VALUES (
+          $1,
+          'primary',
+          $2,
+          $3,
+          'pending',
+          true,
+          $4,
+          NOW() - INTERVAL '90 minutes',
+          NOW() - INTERVAL '1 minute'
+        )
+        RETURNING "id"
+      `,
+    [eventId, "300000000000000004", "Test Primary Organiser", ADMIN_USER_ID],
+  );
+
+  const assignmentId = assignmentResult.rows[0]?.id;
+
+  if (!assignmentId) {
+    throw new Error(
+      "The integration-test organiser assignment was not created.",
+    );
+  }
+
+  const actionResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "scheduled_actions" (
+        "event_id",
+        "action_key",
+        "due_at",
+        "status"
+      )
+      VALUES (
+        $1,
+        $2,
+        NOW() - INTERVAL '1 minute',
+        'pending'
+      )
+      RETURNING "id"
+    `,
+    [eventId, `organiser_timeout:${assignmentId}`],
+  );
+
+  const actionId = actionResult.rows[0]?.id;
+
+  if (!actionId) {
+    throw new Error("The organiser timeout action was not created.");
+  }
+
+  return {
+    eventId,
+    assignmentId,
     actionId,
   };
 }
