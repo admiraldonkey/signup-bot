@@ -25,7 +25,10 @@ vi.mock("../../../src/role-requests/role-request-message.js", () => ({
 }));
 
 const attendanceRefreshMocks = vi.hoisted(() => ({
-  refreshAttendanceMessage: vi.fn().mockResolvedValue(undefined),
+  refreshAttendanceMessage: vi.fn().mockResolvedValue({
+    ok: true,
+    messageUrl: "https://discord.test/messages/attendance-refresh",
+  }),
 }));
 
 vi.mock("../../../src/events/attendance-refresh.js", () => ({
@@ -1509,6 +1512,188 @@ describe("event scheduler", () => {
       },
     ]);
   });
+
+  it("does not report or refresh a successful automatic completion after cancellation wins the event-state race", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueCompletion(pool);
+
+    const client = createSchedulerClient();
+
+    const lockClient = await pool.connect();
+
+    try {
+      /*
+       * Hold the event row.
+       *
+       * The scheduler can still claim the due complete_event action and read
+       * the currently-open event, but its later conditional lifecycle UPDATE
+       * must wait here.
+       */
+      await lockClient.query("BEGIN");
+
+      await lockClient.query(
+        `
+        SELECT "id"
+        FROM "events"
+        WHERE "id" = $1
+        FOR UPDATE
+      `,
+        [fixture.eventId],
+      );
+
+      startEventScheduler(client);
+
+      await waitForBlockedSchedulerEventUpdate(pool);
+
+      /*
+       * Cancellation wins after executeCompleteEvent() has read "open" but
+       * before its UPDATE can apply.
+       *
+       * Mirror the authoritative scheduler cleanup performed by cancellation:
+       * every still-pending/processing action for the event becomes cancelled.
+       */
+      await lockClient.query(
+        `
+        UPDATE "events"
+        SET
+          "status" = 'cancelled',
+          "updated_at" = NOW()
+        WHERE "id" = $1
+      `,
+        [fixture.eventId],
+      );
+
+      await lockClient.query(
+        `
+        UPDATE "scheduled_actions"
+        SET
+          "status" = 'cancelled',
+          "locked_at" = null,
+          "updated_at" = NOW()
+        WHERE
+          "event_id" = $1
+          AND "status" IN (
+            'pending',
+            'processing'
+          )
+      `,
+        [fixture.eventId],
+      );
+
+      await lockClient.query("COMMIT");
+
+      /*
+       * The scheduler worker no longer owns its complete_event action, so its
+       * final markActionCompleted() must not overwrite cancellation.
+       */
+      await waitForScheduledActionStatus(pool, fixture.actionId, "cancelled");
+
+      /*
+       * The status change above happens before executeCompleteEvent() finishes
+       * its stale post-update work. Yield until the observable success side
+       * effects have had an opportunity to run.
+       *
+       * The scheduler executor is awaited within the current tick, so polling
+       * for its audit gives us a deterministic completion signal in the buggy
+       * implementation.
+       */
+      await waitForSchedulerCompletionExecutorToFinish(pool, fixture.eventId);
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+      stopEventScheduler();
+    }
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+      SELECT "status"
+      FROM "events"
+      WHERE "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toHaveLength(1);
+
+    /*
+     * Cancellation won the conditional lifecycle transition.
+     */
+    expect.soft(eventResult.rows[0]?.status).toBe("cancelled");
+
+    const actionResult = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    /*
+     * Cancellation also won ownership of the durable scheduler action.
+     * markActionCompleted() must not steal it back.
+     */
+    expect.soft(actionResult.rows[0]).toMatchObject({
+      status: "cancelled",
+      attempt_count: 1,
+      locked_at: null,
+    });
+
+    /*
+     * A completion transition which affected zero event rows must not refresh
+     * role-request state as though the event genuinely completed.
+     */
+    expect
+      .soft(roleRequestMessageMocks.refreshRoleRequestMessages)
+      .not.toHaveBeenCalled();
+
+    /*
+     * This fixture is published, so the buggy executor also attempts to
+     * refresh the attendance/event message after losing the race.
+     */
+    expect
+      .soft(attendanceRefreshMocks.refreshAttendanceMessage)
+      .not.toHaveBeenCalled();
+
+    /*
+     * Most importantly, it must not claim that automatic completion
+     * succeeded.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'event'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.complete_event'
+        AND "outcome" = 'success'
+    `,
+      [String(fixture.eventId)],
+    );
+
+    expect.soft(auditResult.rows).toEqual([]);
+  });
 });
 
 async function createOpenEventWithDueAttendanceClose(
@@ -1823,6 +2008,49 @@ async function waitForScheduledActionStatus(
   throw new Error(
     `Timed out waiting for scheduled action #${actionId} to reach status "${expectedStatus}".`,
   );
+}
+
+async function waitForSchedulerCompletionExecutorToFinish(
+  pool: Pool,
+  eventId: number,
+): Promise<void> {
+  const timeoutAt = Date.now() + 3_000;
+
+  while (Date.now() < timeoutAt) {
+    /*
+     * The current buggy executor always writes this audit after its Discord
+     * refresh work. Seeing it therefore proves all stale side-effects have
+     * finished before the assertions run.
+     *
+     * Once production is fixed, the audit will correctly never appear.
+     * In that case a short event-loop yield lets the executor return through
+     * its new obsolete-action branch.
+     */
+    const result = await pool.query<{
+      exists: boolean;
+    }>(
+      `
+        SELECT EXISTS (
+          SELECT 1
+          FROM "audit_logs"
+          WHERE
+            "target_type" = 'event'
+            AND "target_id" = $1
+            AND "action" = 'scheduler.complete_event'
+            AND "outcome" = 'success'
+        ) AS "exists"
+      `,
+      [String(eventId)],
+    );
+
+    if (result.rows[0]?.exists) {
+      return;
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
 }
 
 async function createEventWithDueRoleGroupClose(
@@ -2504,6 +2732,131 @@ async function createOpenEventWithDueOrganiserCoverRequest(
   return {
     eventId,
     assignmentId,
+    actionId,
+  };
+}
+
+async function createOpenEventWithDueCompletion(pool: Pool): Promise<{
+  eventId: number;
+  actionId: number;
+}> {
+  const guildResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "discord_guilds" (
+        "discord_guild_id",
+        "name"
+      )
+      VALUES ($1, $2)
+      RETURNING "id"
+    `,
+    [DISCORD_GUILD_ID, "Scheduler Completion Test Guild"],
+  );
+
+  const guildId = guildResult.rows[0]?.id;
+
+  if (!guildId) {
+    throw new Error("The integration-test guild was not created.");
+  }
+
+  await pool.query(
+    `
+      INSERT INTO "guild_settings" (
+        "guild_id"
+      )
+      VALUES ($1)
+    `,
+    [guildId],
+  );
+
+  const eventTypeResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "event_types" (
+        "owner_guild_id",
+        "code",
+        "name"
+      )
+      VALUES ($1, $2, $3)
+      RETURNING "id"
+    `,
+    [guildId, "naval", "Naval Event"],
+  );
+
+  const eventTypeId = eventTypeResult.rows[0]?.id;
+
+  if (!eventTypeId) {
+    throw new Error("The integration-test event type was not created.");
+  }
+
+  const eventResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "events" (
+        "owner_guild_id",
+        "event_type_id",
+        "name",
+        "starts_at",
+        "ends_at",
+        "signups_enabled",
+        "published_at",
+        "status",
+        "created_by_user_id"
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        NOW() - INTERVAL '2 hours',
+        NOW() - INTERVAL '1 minute',
+        true,
+        NOW() - INTERVAL '3 hours',
+        'open',
+        $4
+      )
+      RETURNING "id"
+    `,
+    [guildId, eventTypeId, "Automatic Completion Race Event", ADMIN_USER_ID],
+  );
+
+  const eventId = eventResult.rows[0]?.id;
+
+  if (!eventId) {
+    throw new Error("The integration-test event was not created.");
+  }
+
+  const actionResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "scheduled_actions" (
+        "event_id",
+        "action_key",
+        "due_at",
+        "status"
+      )
+      VALUES (
+        $1,
+        'complete_event',
+        NOW() - INTERVAL '1 minute',
+        'pending'
+      )
+      RETURNING "id"
+    `,
+    [eventId],
+  );
+
+  const actionId = actionResult.rows[0]?.id;
+
+  if (!actionId) {
+    throw new Error("The automatic completion action was not created.");
+  }
+
+  return {
+    eventId,
     actionId,
   };
 }
