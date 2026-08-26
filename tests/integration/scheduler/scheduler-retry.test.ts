@@ -709,6 +709,166 @@ describe("scheduler retry and recovery", () => {
       },
     ]);
   });
+
+  it("does not let a stale failed attempt reschedule a newer claimed attempt", async () => {
+    // Arrange
+    const fixture = await createDueFailingReminderAction(pool, 0);
+
+    const delivery = createBlockedFailingReminderDelivery();
+
+    const client = createSchedulerClient();
+
+    const lockClient = await pool.connect();
+
+    try {
+      /*
+       * Worker A claims attempt 1 and then remains suspended at the external
+       * delivery boundary.
+       */
+      startEventScheduler(client);
+
+      await delivery.waitUntilStarted();
+
+      const firstClaimResult = await pool.query<{
+        status: string;
+        attempt_count: number;
+      }>(
+        `
+          SELECT
+            "status",
+            "attempt_count"
+          FROM "scheduled_actions"
+          WHERE "id" = $1
+        `,
+        [fixture.actionId],
+      );
+
+      expect(firstClaimResult.rows[0]).toMatchObject({
+        status: "processing",
+        attempt_count: 1,
+      });
+
+      /*
+       * Simulate another scheduler process deciding that Worker A's lock has
+       * become stale.
+       *
+       * We perform the recovery transition directly so the test does not need
+       * to wait five real minutes merely to prove that clocks exist.
+       */
+      await pool.query(
+        `
+        UPDATE "scheduled_actions"
+        SET
+          "status" = 'pending',
+          "locked_at" = null,
+          "last_error" = $2,
+          "updated_at" = NOW()
+        WHERE "id" = $1
+      `,
+        [fixture.actionId, "Simulated stale recovery before second claim."],
+      );
+
+      /*
+       * Worker B now claims the recovered action as attempt 2.
+       */
+      const secondClaim = await claimAction(fixture.actionId);
+
+      expect(secondClaim).toMatchObject({
+        id: fixture.actionId,
+        eventId: fixture.eventId,
+        attemptCount: 2,
+      });
+
+      /*
+       * Hold Worker B's newly-claimed row while Worker A is allowed to fail.
+       * This gives us a deterministic barrier around A's failure UPDATE.
+       */
+      await lockClient.query("BEGIN");
+
+      await lockClient.query(
+        `
+        SELECT "id"
+        FROM "scheduled_actions"
+        WHERE "id" = $1
+        FOR UPDATE
+      `,
+        [fixture.actionId],
+      );
+
+      /*
+       * Worker A's external operation now fails.
+       *
+       * Its handleActionFailure() call should recognise that attempt 1 no
+       * longer owns the row and leave attempt 2 untouched.
+       */
+      delivery.release();
+
+      const failureUpdatePid = await waitForBlockedSchedulerActionUpdate(pool);
+
+      await lockClient.query("COMMIT");
+
+      await waitForDatabaseQueryToFinish(pool, failureUpdatePid);
+    } catch (error) {
+      delivery.release();
+
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+
+      stopEventScheduler();
+    }
+
+    // Assert
+    const result = await pool.query<{
+      status: string;
+      attempt_count: number;
+      due_at: Date;
+      locked_at: Date | null;
+      completed_at: Date | null;
+      last_error: string | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "attempt_count",
+          "due_at",
+          "locked_at",
+          "completed_at",
+          "last_error"
+        FROM "scheduled_actions"
+        WHERE "id" = $1
+      `,
+      [fixture.actionId],
+    );
+
+    expect(result.rows).toHaveLength(1);
+
+    const action = result.rows[0];
+
+    /*
+     * Attempt 2 is now the current owner. Attempt 1's eventual failure must
+     * not reschedule, unlock or otherwise overwrite it.
+     */
+    expect.soft(action?.status).toBe("processing");
+
+    expect.soft(action?.attempt_count).toBe(2);
+
+    expect.soft(action?.locked_at).toBeInstanceOf(Date);
+
+    expect.soft(action?.completed_at).toBeNull();
+
+    expect.soft(action?.due_at.getTime()).toBe(fixture.originalDueAt.getTime());
+
+    expect
+      .soft(action?.last_error)
+      .toBe("Simulated stale recovery before second claim.");
+
+    expect
+      .soft(action?.last_error)
+      .not.toContain("Integration reminder delivery failure");
+  });
 });
 
 async function createStaleProcessingAction(
