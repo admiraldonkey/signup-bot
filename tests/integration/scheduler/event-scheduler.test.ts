@@ -1547,57 +1547,34 @@ describe("event scheduler", () => {
 
       /*
        * Cancellation wins after executeCompleteEvent() has read "open" but
-       * before its UPDATE can apply.
+       * before its conditional UPDATE can apply.
        *
-       * Mirror the authoritative scheduler cleanup performed by cancellation:
-       * every still-pending/processing action for the event becomes cancelled.
+       * This test isolates the event lifecycle race itself. We deliberately
+       * leave the already-claimed complete_event action in "processing" so the
+       * scheduler's normal markActionCompleted() step gives us a deterministic
+       * signal that executeCompleteEvent() has fully returned.
        */
       await lockClient.query(
         `
-        UPDATE "events"
-        SET
-          "status" = 'cancelled',
-          "updated_at" = NOW()
-        WHERE "id" = $1
-      `,
-        [fixture.eventId],
-      );
-
-      await lockClient.query(
-        `
-        UPDATE "scheduled_actions"
-        SET
-          "status" = 'cancelled',
-          "locked_at" = null,
-          "updated_at" = NOW()
-        WHERE
-          "event_id" = $1
-          AND "status" IN (
-            'pending',
-            'processing'
-          )
-      `,
+    UPDATE "events"
+    SET
+      "status" = 'cancelled',
+      "updated_at" = NOW()
+    WHERE "id" = $1
+  `,
         [fixture.eventId],
       );
 
       await lockClient.query("COMMIT");
 
       /*
-       * The scheduler worker no longer owns its complete_event action, so its
-       * final markActionCompleted() must not overwrite cancellation.
-       */
-      await waitForScheduledActionStatus(pool, fixture.actionId, "cancelled");
-
-      /*
-       * The status change above happens before executeCompleteEvent() finishes
-       * its stale post-update work. Yield until the observable success side
-       * effects have had an opportunity to run.
+       * executeCompleteEvent() must now discover that its conditional event
+       * UPDATE affected zero rows and return without any completion side-effects.
        *
-       * The scheduler executor is awaited within the current tick, so polling
-       * for its audit gives us a deterministic completion signal in the buggy
-       * implementation.
+       * Only after that return can the outer scheduler mark this obsolete
+       * durable action completed.
        */
-      await waitForSchedulerCompletionExecutorToFinish(pool, fixture.eventId);
+      await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
     } catch (error) {
       await lockClient.query("ROLLBACK").catch(() => undefined);
 
@@ -1630,29 +1607,34 @@ describe("event scheduler", () => {
       status: string;
       attempt_count: number;
       locked_at: Date | null;
+      completed_at: Date | null;
     }>(
       `
-      SELECT
-        "status",
-        "attempt_count",
-        "locked_at"
-      FROM "scheduled_actions"
-      WHERE "id" = $1
-    `,
+    SELECT
+      "status",
+      "attempt_count",
+      "locked_at",
+      "completed_at"
+    FROM "scheduled_actions"
+    WHERE "id" = $1
+  `,
       [fixture.actionId],
     );
 
     expect(actionResult.rows).toHaveLength(1);
 
     /*
-     * Cancellation also won ownership of the durable scheduler action.
-     * markActionCompleted() must not steal it back.
+     * Losing the event-state race makes this completion action obsolete rather
+     * than retryable. The executor returns harmlessly and the scheduler then
+     * completes the durable action normally.
      */
     expect.soft(actionResult.rows[0]).toMatchObject({
-      status: "cancelled",
+      status: "completed",
       attempt_count: 1,
       locked_at: null,
     });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
 
     /*
      * A completion transition which affected zero event rows must not refresh
@@ -1693,6 +1675,131 @@ describe("event scheduler", () => {
     );
 
     expect.soft(auditResult.rows).toEqual([]);
+  });
+
+  it("completes an overdue event normally while its lifecycle remains active", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueCompletion(pool);
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+      SELECT "status"
+      FROM "events"
+      WHERE "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toHaveLength(1);
+
+    /*
+     * With no competing lifecycle transition, the due completion action
+     * should perform the intended terminal state change.
+     */
+    expect(eventResult.rows[0]?.status).toBe("completed");
+
+    const actionResult = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+      completed_at: Date | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect.soft(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+      attempt_count: 1,
+      locked_at: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    /*
+     * Completion refreshes role-request state so any remaining controls
+     * reflect that the event has ended.
+     */
+    expect(
+      roleRequestMessageMocks.refreshRoleRequestMessages,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      roleRequestMessageMocks.refreshRoleRequestMessages,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+      fixture.eventId,
+    );
+
+    /*
+     * This fixture is published, so its attendance/event message should also
+     * be refreshed exactly once.
+     */
+    expect(
+      attendanceRefreshMocks.refreshAttendanceMessage,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      attendanceRefreshMocks.refreshAttendanceMessage,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+      fixture.eventId,
+    );
+
+    /*
+     * A genuine automatic completion should produce exactly one success
+     * audit.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'event'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.complete_event'
+        AND "outcome" = 'success'
+    `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "scheduler.complete_event",
+        outcome: "success",
+      },
+    ]);
   });
 });
 
@@ -2008,49 +2115,6 @@ async function waitForScheduledActionStatus(
   throw new Error(
     `Timed out waiting for scheduled action #${actionId} to reach status "${expectedStatus}".`,
   );
-}
-
-async function waitForSchedulerCompletionExecutorToFinish(
-  pool: Pool,
-  eventId: number,
-): Promise<void> {
-  const timeoutAt = Date.now() + 3_000;
-
-  while (Date.now() < timeoutAt) {
-    /*
-     * The current buggy executor always writes this audit after its Discord
-     * refresh work. Seeing it therefore proves all stale side-effects have
-     * finished before the assertions run.
-     *
-     * Once production is fixed, the audit will correctly never appear.
-     * In that case a short event-loop yield lets the executor return through
-     * its new obsolete-action branch.
-     */
-    const result = await pool.query<{
-      exists: boolean;
-    }>(
-      `
-        SELECT EXISTS (
-          SELECT 1
-          FROM "audit_logs"
-          WHERE
-            "target_type" = 'event'
-            AND "target_id" = $1
-            AND "action" = 'scheduler.complete_event'
-            AND "outcome" = 'success'
-        ) AS "exists"
-      `,
-      [String(eventId)],
-    );
-
-    if (result.rows[0]?.exists) {
-      return;
-    }
-
-    await new Promise((resolve) => {
-      setTimeout(resolve, 20);
-    });
-  }
 }
 
 async function createEventWithDueRoleGroupClose(
