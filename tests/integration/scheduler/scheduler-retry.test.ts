@@ -18,6 +18,7 @@ vi.mock("../../../src/events/event-custom-message.js", () => ({
   sendEventCustomMessage: eventCustomMessageMocks.sendEventCustomMessage,
 }));
 import {
+  claimAction,
   startEventScheduler,
   stopEventScheduler,
 } from "../../../src/scheduler/event-scheduler.js";
@@ -607,6 +608,107 @@ describe("scheduler retry and recovery", () => {
       expect(reminderResult.rows[0]?.sent_at).toBeNull();
     },
   );
+
+  it("allows only one worker to claim the same pending action", async () => {
+    // Arrange
+    const fixture = await createDuePendingFailingAction(pool, 0);
+
+    /*
+     * Two independent scheduler workers may both discover the same due row.
+     *
+     * claimAction() is the authoritative ownership boundary, so race two
+     * calls against the same persisted action without serialising them in
+     * the test.
+     */
+    // Act
+    const [firstClaim, secondClaim] = await Promise.all([
+      claimAction(fixture.actionId),
+      claimAction(fixture.actionId),
+    ]);
+
+    // Assert
+    const successfulClaims = [firstClaim, secondClaim].filter(
+      (claim): claim is NonNullable<typeof claim> => claim !== null,
+    );
+
+    expect(successfulClaims).toHaveLength(1);
+
+    expect(successfulClaims[0]).toMatchObject({
+      id: fixture.actionId,
+      eventId: fixture.eventId,
+      attemptCount: 1,
+    });
+
+    const failedClaims = [firstClaim, secondClaim].filter(
+      (claim) => claim === null,
+    );
+
+    expect(failedClaims).toHaveLength(1);
+
+    /*
+     * Most importantly, the database must show one consumed attempt and one
+     * owner. Competing discovery must not increment the counter twice.
+     */
+    const result = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(result.rows).toHaveLength(1);
+
+    expect(result.rows[0]).toMatchObject({
+      status: "processing",
+      attempt_count: 1,
+    });
+
+    expect(result.rows[0]?.locked_at).toBeInstanceOf(Date);
+  });
+
+  it("refuses to claim a pending action which has already exhausted its attempts", async () => {
+    // Arrange
+    const fixture = await createDuePendingFailingAction(pool, 5);
+
+    // Act
+    const claim = await claimAction(fixture.actionId);
+
+    // Assert
+    expect(claim).toBeNull();
+
+    const result = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(result.rows).toEqual([
+      {
+        status: "pending",
+        attempt_count: 5,
+        locked_at: null,
+      },
+    ]);
+  });
 });
 
 async function createStaleProcessingAction(

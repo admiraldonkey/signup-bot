@@ -276,7 +276,7 @@ async function processDueActions(client: Client<true>): Promise<void> {
   }
 }
 
-async function claimAction(actionId: number) {
+export async function claimAction(actionId: number) {
   const now = new Date();
 
   const [claimedAction] = await db
