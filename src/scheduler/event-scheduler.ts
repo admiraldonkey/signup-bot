@@ -446,38 +446,95 @@ async function executeOrganiserTimeout(
     return;
   }
 
-  const now = new Date();
+  let assignmentTimedOut = false;
 
-  const [timedOut] = await db
-    .update(eventOrganiserAssignments)
-    .set({
-      status: "timed_out",
+  try {
+    assignmentTimedOut = await db.transaction(async (transaction) => {
+      const now = new Date();
 
-      isCurrent: false,
+      /*
+       * Acquire the assignment row first.
+       *
+       * The predicates preserve the existing protection against an
+       * organiser confirming, declining or being replaced while the
+       * timeout action is running.
+       */
+      const [timedOut] = await transaction
+        .update(eventOrganiserAssignments)
+        .set({
+          status: "timed_out",
 
-      endedAt: now,
+          isCurrent: false,
 
-      updatedAt: now,
-    })
-    .where(
-      and(
-        eq(eventOrganiserAssignments.id, assignment.id),
+          endedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(eventOrganiserAssignments.id, assignment.id),
 
-        eq(eventOrganiserAssignments.isCurrent, true),
+            eq(eventOrganiserAssignments.eventId, eventId),
 
-        eq(eventOrganiserAssignments.status, "pending"),
+            eq(eventOrganiserAssignments.isCurrent, true),
 
-        isNotNull(eventOrganiserAssignments.activatedAt),
-      ),
-    )
-    .returning({
-      id: eventOrganiserAssignments.id,
+            eq(eventOrganiserAssignments.status, "pending"),
+
+            isNotNull(eventOrganiserAssignments.activatedAt),
+          ),
+        )
+        .returning({
+          id: eventOrganiserAssignments.id,
+        });
+
+      /*
+       * Confirmation, decline or replacement won the assignment race.
+       */
+      if (!timedOut) {
+        return false;
+      }
+
+      /*
+       * Re-read and lock the parent event after acquiring the assignment.
+       *
+       * If completion/cancellation won while this timeout was waiting,
+       * roll the assignment mutation back. If the event is still active,
+       * FOR UPDATE prevents a terminal transition from slipping in before
+       * this transaction commits.
+       */
+      const [currentEvent] = await transaction
+        .select({
+          status: events.status,
+        })
+        .from(events)
+        .where(eq(events.id, eventId))
+        .for("update")
+        .limit(1);
+
+      if (
+        !currentEvent ||
+        currentEvent.status === "cancelled" ||
+        currentEvent.status === "completed"
+      ) {
+        transaction.rollback();
+      }
+
+      return true;
     });
+  } catch (error) {
+    /*
+     * rollback() here means the timeout became obsolete because the parent
+     * event reached a terminal state while the action was in flight.
+     *
+     * That is not retryable scheduler failure.
+     */
+    if (error instanceof TransactionRollbackError) {
+      return;
+    }
 
-  /*
-   * Confirmation, decline or replacement won the race.
-   */
-  if (!timedOut) {
+    throw error;
+  }
+
+  if (!assignmentTimedOut) {
     return;
   }
 
