@@ -2,6 +2,7 @@ import { type Client } from "discord.js";
 import {
   and,
   eq,
+  gte,
   inArray,
   lt,
   lte,
@@ -105,6 +106,8 @@ async function runSchedulerTickSafely(client: Client<true>): Promise<void> {
   try {
     await recoverStaleActions();
 
+    await failExhaustedPendingActions();
+
     await processDueActions(client);
   } catch (error) {
     console.error("Event scheduler tick failed:", error);
@@ -118,26 +121,120 @@ async function recoverStaleActions(): Promise<void> {
 
   const staleBefore = new Date(now.getTime() - STALE_LOCK_AFTER_MS);
 
-  const recovered = await db
+  /*
+   * A processing action has already consumed an attempt when it was
+   * claimed.
+   *
+   * If that final allowed attempt was interrupted and its lock later
+   * becomes stale, recovering it to pending would let claimAction()
+   * increment the counter again and execute an impermissible extra
+   * attempt.
+   *
+   * Exhausted stale actions therefore become terminal failures directly.
+   */
+  const exhausted = await db
     .update(scheduledActions)
     .set({
-      status: "pending",
+      status: "failed",
+
       lockedAt: null,
-      lastError: "Recovered after interrupted processing.",
+
+      lastError:
+        "Failed after interrupted processing because the maximum attempt count had already been reached.",
+
       updatedAt: now,
     })
     .where(
       and(
         eq(scheduledActions.status, "processing"),
+
         lt(scheduledActions.lockedAt, staleBefore),
+
+        gte(scheduledActions.attemptCount, MAX_ATTEMPTS),
       ),
     )
     .returning({
       id: scheduledActions.id,
     });
 
+  /*
+   * Stale actions which still have an attempt remaining may safely return
+   * to pending. processDueActions() can then claim them normally, which
+   * consumes their next attempt.
+   */
+  const recovered = await db
+    .update(scheduledActions)
+    .set({
+      status: "pending",
+
+      lockedAt: null,
+
+      lastError: "Recovered after interrupted processing.",
+
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(scheduledActions.status, "processing"),
+
+        lt(scheduledActions.lockedAt, staleBefore),
+
+        lt(scheduledActions.attemptCount, MAX_ATTEMPTS),
+      ),
+    )
+    .returning({
+      id: scheduledActions.id,
+    });
+
+  if (exhausted.length > 0) {
+    console.warn(
+      `Failed ${exhausted.length} stale scheduled action(s) which had already exhausted their allowed attempts.`,
+    );
+  }
+
   if (recovered.length > 0) {
     console.warn(`Recovered ${recovered.length} stale scheduled action(s).`);
+  }
+}
+
+async function failExhaustedPendingActions(): Promise<void> {
+  const now = new Date();
+
+  /*
+   * A persisted pending action which has already consumed every permitted
+   * attempt must never be claimed again.
+   *
+   * This can exist after interrupted legacy recovery or inconsistent
+   * persisted scheduler state. Repair it proactively rather than leaving
+   * an unclaimable pending row behind forever.
+   */
+  const failed = await db
+    .update(scheduledActions)
+    .set({
+      status: "failed",
+
+      lockedAt: null,
+
+      lastError:
+        "Failed without execution because the maximum attempt count had already been reached.",
+
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(scheduledActions.status, "pending"),
+
+        gte(scheduledActions.attemptCount, MAX_ATTEMPTS),
+      ),
+    )
+    .returning({
+      id: scheduledActions.id,
+    });
+
+  if (failed.length > 0) {
+    console.warn(
+      `Failed ${failed.length} pending scheduled action(s) which had already exhausted their allowed attempts.`,
+    );
   }
 }
 
@@ -172,14 +269,14 @@ async function processDueActions(client: Client<true>): Promise<void> {
     try {
       await executeAction(client, claimedAction);
 
-      await markActionCompleted(claimedAction.id);
+      await markActionCompleted(claimedAction.id, claimedAction.attemptCount);
     } catch (error) {
       await handleActionFailure(claimedAction, error);
     }
   }
 }
 
-async function claimAction(actionId: number) {
+export async function claimAction(actionId: number) {
   const now = new Date();
 
   const [claimedAction] = await db
@@ -196,8 +293,19 @@ async function claimAction(actionId: number) {
     .where(
       and(
         eq(scheduledActions.id, actionId),
+
         eq(scheduledActions.status, "pending"),
+
         lte(scheduledActions.dueAt, now),
+
+        /*
+         * This is the authoritative attempt-limit fence.
+         *
+         * Even if inconsistent persisted state appears after the scheduler's
+         * cleanup/select phase, claimAction() itself must never create attempt
+         * MAX_ATTEMPTS + 1.
+         */
+        lt(scheduledActions.attemptCount, MAX_ATTEMPTS),
       ),
     )
     .returning({
@@ -1281,7 +1389,10 @@ async function refreshEventMessage(
   }
 }
 
-async function markActionCompleted(actionId: number): Promise<void> {
+async function markActionCompleted(
+  actionId: number,
+  attemptCount: number,
+): Promise<void> {
   const now = new Date();
 
   await db
@@ -1290,7 +1401,6 @@ async function markActionCompleted(actionId: number): Promise<void> {
       status: "completed",
 
       lockedAt: null,
-
       completedAt: now,
 
       lastError: null,
@@ -1302,13 +1412,17 @@ async function markActionCompleted(actionId: number): Promise<void> {
         eq(scheduledActions.id, actionId),
 
         /*
-         * Only the worker which still owns the processing action may
-         * complete it.
+         * Only the worker which still owns this exact processing attempt
+         * may complete the durable action.
          *
-         * An administrator may have cancelled the action while it was
-         * executing, in which case that newer terminal state wins.
+         * A newer terminal state may have replaced processing while this
+         * worker was executing, or stale recovery may have returned the
+         * action to pending and allowed another worker to claim a newer
+         * attempt.
          */
         eq(scheduledActions.status, "processing"),
+
+        eq(scheduledActions.attemptCount, attemptCount),
       ),
     );
 }
@@ -1349,6 +1463,16 @@ async function handleActionFailure(
           eq(scheduledActions.id, action.id),
 
           eq(scheduledActions.status, "processing"),
+
+          /*
+           * A stale worker may finish after this action has already been
+           * recovered and claimed for a newer attempt.
+           *
+           * Processing status alone therefore does not prove ownership. The
+           * persisted attempt number must still match the attempt which produced
+           * this failure.
+           */
+          eq(scheduledActions.attemptCount, action.attemptCount),
         ),
       );
 
@@ -1384,6 +1508,12 @@ async function handleActionFailure(
         eq(scheduledActions.id, action.id),
 
         eq(scheduledActions.status, "processing"),
+
+        /*
+         * Do not let an older failed attempt reschedule or unlock a newer
+         * attempt which now owns this durable action.
+         */
+        eq(scheduledActions.attemptCount, action.attemptCount),
       ),
     );
 }
