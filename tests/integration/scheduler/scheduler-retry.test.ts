@@ -883,6 +883,163 @@ describe("scheduler retry and recovery", () => {
       .soft(action?.last_error)
       .not.toContain("Integration reminder delivery failure");
   });
+
+  it("does not let a stale successful attempt complete a newer claimed attempt", async () => {
+    // Arrange
+    const fixture = await createDueFailingReminderAction(pool, 0);
+
+    const delivery = createBlockedSuccessfulReminderDelivery();
+
+    const client = createSchedulerClient();
+
+    const lockClient = await pool.connect();
+
+    try {
+      /*
+       * Worker A claims attempt 1 and pauses while sending the reminder.
+       */
+      startEventScheduler(client);
+
+      await delivery.waitUntilStarted();
+
+      const firstClaimResult = await pool.query<{
+        status: string;
+        attempt_count: number;
+      }>(
+        `
+          SELECT
+            "status",
+            "attempt_count"
+          FROM "scheduled_actions"
+          WHERE "id" = $1
+        `,
+        [fixture.actionId],
+      );
+
+      expect(firstClaimResult.rows[0]).toMatchObject({
+        status: "processing",
+        attempt_count: 1,
+      });
+
+      /*
+       * Hold the scheduler-action table while simulating another scheduler
+       * process recovering the stale first attempt and claiming attempt 2.
+       *
+       * We only need to reproduce the resulting persisted ownership state
+       * here. Stale recovery and claimAction() are covered separately.
+       */
+      await lockClient.query("BEGIN");
+
+      await lockClient.query(
+        `
+        LOCK TABLE "scheduled_actions"
+        IN ACCESS EXCLUSIVE MODE
+      `,
+      );
+
+      await lockClient.query(
+        `
+        UPDATE "scheduled_actions"
+        SET
+          "status" = 'processing',
+          "attempt_count" = 2,
+          "locked_at" = NOW(),
+          "last_error" = $2,
+          "updated_at" = NOW()
+        WHERE "id" = $1
+      `,
+        [fixture.actionId, "Simulated stale recovery and second claim."],
+      );
+
+      /*
+       * Worker A now completes its external work successfully.
+       *
+       * Once executeAction() returns it will call markActionCompleted(), whose
+       * UPDATE is forced to wait on our table lock.
+       */
+      delivery.release();
+
+      const completionUpdatePid =
+        await waitForBlockedSchedulerActionUpdate(pool);
+
+      /*
+       * Commit attempt 2 as the current persisted owner, then let Worker A's
+       * stale completion UPDATE continue.
+       */
+      await lockClient.query("COMMIT");
+
+      await waitForDatabaseQueryToFinish(pool, completionUpdatePid);
+    } catch (error) {
+      delivery.release();
+
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+
+      stopEventScheduler();
+    }
+
+    // Assert
+    const actionResult = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+      completed_at: Date | null;
+      last_error: string | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "attempt_count",
+          "locked_at",
+          "completed_at",
+          "last_error"
+        FROM "scheduled_actions"
+        WHERE "id" = $1
+      `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    const action = actionResult.rows[0];
+
+    /*
+     * Attempt 2 owns the durable action. Attempt 1's eventual success must
+     * not complete, unlock or otherwise overwrite it.
+     */
+    expect.soft(action?.status).toBe("processing");
+
+    expect.soft(action?.attempt_count).toBe(2);
+
+    expect.soft(action?.locked_at).toBeInstanceOf(Date);
+
+    expect.soft(action?.completed_at).toBeNull();
+
+    expect
+      .soft(action?.last_error)
+      .toBe("Simulated stale recovery and second claim.");
+
+    /*
+     * Worker A really did finish its reminder executor successfully.
+     * The regression concerns ownership of the durable scheduled action,
+     * not whether attempt 1 reached the end of executeAction().
+     */
+    const reminderResult = await pool.query<{
+      sent_at: Date | null;
+    }>(
+      `
+        SELECT "sent_at"
+        FROM "event_reminders"
+        WHERE "id" = $1
+      `,
+      [fixture.reminderId],
+    );
+
+    expect(reminderResult.rows[0]?.sent_at).toBeInstanceOf(Date);
+  });
 });
 
 async function createStaleProcessingAction(
@@ -1303,6 +1460,47 @@ function createBlockedFailingReminderDelivery(): {
       await released;
 
       throw new Error("Integration reminder delivery failure.");
+    },
+  );
+
+  return {
+    waitUntilStarted: async () => {
+      await started;
+    },
+
+    release: () => {
+      resolveRelease?.();
+    },
+  };
+}
+
+function createBlockedSuccessfulReminderDelivery(): {
+  waitUntilStarted: () => Promise<void>;
+  release: () => void;
+} {
+  let resolveStarted: (() => void) | undefined;
+
+  let resolveRelease: (() => void) | undefined;
+
+  const started = new Promise<void>((resolve) => {
+    resolveStarted = resolve;
+  });
+
+  const released = new Promise<void>((resolve) => {
+    resolveRelease = resolve;
+  });
+
+  eventCustomMessageMocks.sendEventCustomMessage.mockImplementation(
+    async () => {
+      resolveStarted?.();
+
+      await released;
+
+      return {
+        messageId: "400000000000000004",
+        channelId: "400000000000000003",
+        url: "https://discord.test/messages/reminder-success",
+      };
     },
   );
 
