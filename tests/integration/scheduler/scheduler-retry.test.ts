@@ -189,7 +189,7 @@ describe("scheduler retry and recovery", () => {
 
   it("does not execute an exhausted action which is already pending at the maximum attempt count", async () => {
     // Arrange
-    const fixture = await createPendingExhaustedAction(pool);
+    const fixture = await createDuePendingFailingAction(pool, 5);
 
     /*
      * If the scheduler incorrectly claims this action, the invalid key makes
@@ -252,6 +252,173 @@ describe("scheduler retry and recovery", () => {
     expect
       .soft(action?.last_error)
       .not.toContain("Unknown scheduled action key");
+  });
+
+  it.each([
+    {
+      initialAttemptCount: 0,
+      expectedAttemptCount: 1,
+      retryDelayMinutes: 1,
+    },
+    {
+      initialAttemptCount: 1,
+      expectedAttemptCount: 2,
+      retryDelayMinutes: 2,
+    },
+    {
+      initialAttemptCount: 2,
+      expectedAttemptCount: 3,
+      retryDelayMinutes: 4,
+    },
+    {
+      initialAttemptCount: 3,
+      expectedAttemptCount: 4,
+      retryDelayMinutes: 8,
+    },
+  ])(
+    "reschedules failed attempt $expectedAttemptCount with a $retryDelayMinutes-minute retry delay",
+    async ({
+      initialAttemptCount,
+      expectedAttemptCount,
+      retryDelayMinutes,
+    }) => {
+      // Arrange
+      const fixture = await createDuePendingFailingAction(
+        pool,
+        initialAttemptCount,
+      );
+
+      const client = {} as Client<true>;
+
+      /*
+       * handleActionFailure() calculates retryAt using its own current time.
+       * Capture a window around scheduler execution rather than asserting an
+       * exact millisecond timestamp.
+       */
+      const executionStartedAt = new Date();
+
+      // Act
+      startEventScheduler(client);
+
+      await waitForScheduledActionAttempt(
+        pool,
+        fixture.actionId,
+        expectedAttemptCount,
+        "pending",
+      );
+
+      const executionFinishedAt = new Date();
+
+      stopEventScheduler();
+
+      // Assert
+      const result = await pool.query<{
+        status: string;
+        attempt_count: number;
+        due_at: Date;
+        locked_at: Date | null;
+        completed_at: Date | null;
+        last_error: string | null;
+      }>(
+        `
+          SELECT
+            "status",
+            "attempt_count",
+            "due_at",
+            "locked_at",
+            "completed_at",
+            "last_error"
+          FROM "scheduled_actions"
+          WHERE "id" = $1
+        `,
+        [fixture.actionId],
+      );
+
+      expect(result.rows).toHaveLength(1);
+
+      const action = result.rows[0];
+
+      expect.soft(action?.status).toBe("pending");
+
+      expect.soft(action?.attempt_count).toBe(expectedAttemptCount);
+
+      expect.soft(action?.locked_at).toBeNull();
+
+      expect.soft(action?.completed_at).toBeNull();
+
+      expect.soft(action?.last_error).toContain("Unknown scheduled action key");
+
+      const expectedDelayMs = retryDelayMinutes * 60_000;
+
+      const earliestRetryAt = executionStartedAt.getTime() + expectedDelayMs;
+
+      const latestRetryAt = executionFinishedAt.getTime() + expectedDelayMs;
+
+      /*
+       * The scheduler's failure timestamp must have occurred somewhere
+       * between executionStartedAt and executionFinishedAt.
+       */
+      expect(action?.due_at.getTime()).toBeGreaterThanOrEqual(earliestRetryAt);
+
+      expect(action?.due_at.getTime()).toBeLessThanOrEqual(latestRetryAt);
+    },
+  );
+
+  it("makes an ordinary fifth execution failure terminal instead of scheduling another retry", async () => {
+    // Arrange
+    const fixture = await createDuePendingFailingAction(pool, 4);
+
+    const client = {} as Client<true>;
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionAttempt(pool, fixture.actionId, 5, "failed");
+
+    stopEventScheduler();
+
+    // Assert
+    const result = await pool.query<{
+      status: string;
+      attempt_count: number;
+      due_at: Date;
+      locked_at: Date | null;
+      completed_at: Date | null;
+      last_error: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "due_at",
+        "locked_at",
+        "completed_at",
+        "last_error"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(result.rows).toHaveLength(1);
+
+    const action = result.rows[0];
+
+    expect.soft(action?.status).toBe("failed");
+
+    expect.soft(action?.attempt_count).toBe(5);
+
+    expect.soft(action?.locked_at).toBeNull();
+
+    expect.soft(action?.completed_at).toBeNull();
+
+    expect.soft(action?.last_error).toContain("Unknown scheduled action key");
+
+    /*
+     * A terminal fifth failure is not rescheduled. Its original due time
+     * remains in the past.
+     */
+    expect(action?.due_at.getTime()).toBeLessThan(Date.now());
   });
 });
 
@@ -411,7 +578,52 @@ async function waitForScheduledActionStatus(
   );
 }
 
-async function createPendingExhaustedAction(pool: Pool): Promise<{
+async function waitForScheduledActionAttempt(
+  pool: Pool,
+  actionId: number,
+  expectedAttemptCount: number,
+  expectedStatus: "pending" | "failed",
+): Promise<void> {
+  const timeoutAt = Date.now() + 3_000;
+
+  while (Date.now() < timeoutAt) {
+    const result = await pool.query<{
+      status: string;
+      attempt_count: number;
+    }>(
+      `
+          SELECT
+            "status",
+            "attempt_count"
+          FROM "scheduled_actions"
+          WHERE "id" = $1
+        `,
+      [actionId],
+    );
+
+    const action = result.rows[0];
+
+    if (
+      action?.attempt_count === expectedAttemptCount &&
+      action.status === expectedStatus
+    ) {
+      return;
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+
+  throw new Error(
+    `Timed out waiting for scheduled action #${actionId} to reach attempt ${expectedAttemptCount} with status "${expectedStatus}".`,
+  );
+}
+
+async function createDuePendingFailingAction(
+  pool: Pool,
+  attemptCount: number,
+): Promise<{
   eventId: number;
   actionId: number;
 }> {
@@ -493,10 +705,11 @@ async function createPendingExhaustedAction(pool: Pool): Promise<{
   }
 
   /*
-   * This represents an exhausted action left pending by interrupted legacy
-   * recovery or otherwise inconsistent persisted scheduler state.
+   * Create due pending work at a chosen retry count.
    *
-   * The scheduler should repair it rather than execute attempt 6.
+   * The invalid action key makes execution fail deterministically, allowing
+   * the tests to observe the real claim and failure-handling behaviour
+   * without involving Discord or a domain-specific executor.
    */
   const actionResult = await pool.query<{
     id: number;
@@ -511,16 +724,16 @@ async function createPendingExhaustedAction(pool: Pool): Promise<{
           "locked_at"
         )
         VALUES (
-          $1,
-          'integration_test_invalid_action',
-          NOW() - INTERVAL '1 minute',
-          'pending',
-          5,
-          null
+        $1,
+        'integration_test_invalid_action',
+        NOW() - INTERVAL '1 minute',
+        'pending',
+        $2,
+        null
         )
         RETURNING "id"
       `,
-    [eventId],
+    [eventId, attemptCount],
   );
 
   const actionId = actionResult.rows[0]?.id;
