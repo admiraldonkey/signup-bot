@@ -1148,11 +1148,10 @@ async function executeCompleteEvent(
   }
 
   if (event.status !== "completed") {
-    await db
+    const [completedEvent] = await db
       .update(events)
       .set({
         status: "completed",
-
         updatedAt: new Date(),
       })
       .where(
@@ -1160,7 +1159,22 @@ async function executeCompleteEvent(
           eq(events.id, eventId),
           inArray(events.status, ["scheduled", "open", "closed"]),
         ),
-      );
+      )
+      .returning({
+        id: events.id,
+      });
+
+    /*
+     * Another lifecycle transition may have won after loadScheduledEvent()
+     * read the event but before this conditional UPDATE ran.
+     *
+     * In that case this completion action is now obsolete. The scheduler
+     * action itself may finish normally, but this executor must not perform
+     * completion cleanup, refresh Discord or claim successful completion.
+     */
+    if (!completedEvent) {
+      return;
+    }
   }
 
   /*
