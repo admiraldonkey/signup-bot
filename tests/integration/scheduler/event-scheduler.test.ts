@@ -23,6 +23,15 @@ vi.mock("../../../src/role-requests/role-request-message.js", () => ({
   refreshRoleRequestMessages:
     roleRequestMessageMocks.refreshRoleRequestMessages,
 }));
+
+const attendanceRefreshMocks = vi.hoisted(() => ({
+  refreshAttendanceMessage: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("../../../src/events/attendance-refresh.js", () => ({
+  refreshAttendanceMessage: attendanceRefreshMocks.refreshAttendanceMessage,
+}));
+
 import {
   startEventScheduler,
   stopEventScheduler,
@@ -49,6 +58,7 @@ describe("event scheduler", () => {
 
     roleRequestMessageMocks.refreshRoleRequestGroupMessage.mockClear();
     roleRequestMessageMocks.refreshRoleRequestMessages.mockClear();
+    attendanceRefreshMocks.refreshAttendanceMessage.mockClear();
   });
 
   afterEach(() => {
@@ -797,6 +807,191 @@ describe("event scheduler", () => {
     );
 
     expect.soft(auditResult.rows).toEqual([]);
+  });
+
+  it("times out an overdue organiser normally while the parent event remains active", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserTimeout(pool);
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+      SELECT "status"
+      FROM "events"
+      WHERE "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toHaveLength(1);
+
+    /*
+     * Timing out an organiser does not itself change the event lifecycle.
+     */
+    expect.soft(eventResult.rows[0]?.status).toBe("open");
+
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      ended_at: Date | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current",
+        "ended_at"
+      FROM "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toHaveLength(1);
+
+    /*
+     * Unlike the lifecycle-race case, this assignment really is overdue
+     * and the parent event remains active.
+     */
+    expect.soft(assignmentResult.rows[0]?.status).toBe("timed_out");
+
+    expect.soft(assignmentResult.rows[0]?.is_current).toBe(false);
+
+    expect(assignmentResult.rows[0]?.ended_at).toBeInstanceOf(Date);
+
+    const timeoutActionResult = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+      completed_at: Date | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "attempt_count",
+          "locked_at",
+          "completed_at"
+        FROM "scheduled_actions"
+        WHERE "id" = $1
+      `,
+      [fixture.actionId],
+    );
+
+    expect(timeoutActionResult.rows).toHaveLength(1);
+
+    expect.soft(timeoutActionResult.rows[0]).toMatchObject({
+      status: "completed",
+      attempt_count: 1,
+      locked_at: null,
+    });
+
+    expect(timeoutActionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    /*
+     * The timeout itself should have one genuine success audit.
+     */
+    const timeoutAuditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+        SELECT
+          "action",
+          "outcome"
+        FROM "audit_logs"
+        WHERE
+          "target_type" = 'organiser_assignment'
+          AND "target_id" = $1
+          AND "action" = 'scheduler.organiser_timeout'
+          AND "outcome" = 'success'
+      `,
+      [String(fixture.assignmentId)],
+    );
+
+    expect(timeoutAuditResult.rows).toEqual([
+      {
+        action: "scheduler.organiser_timeout",
+        outcome: "success",
+      },
+    ]);
+
+    /*
+     * This fixture deliberately has no backup organiser.
+     *
+     * The intended escalation is therefore to queue a durable cover
+     * request for another eligible organiser.
+     */
+    const coverActionResult = await pool.query<{
+      action_key: string;
+      status: string;
+      attempt_count: number;
+    }>(
+      `
+        SELECT
+          "action_key",
+          "status",
+          "attempt_count"
+        FROM "scheduled_actions"
+        WHERE
+          "event_id" = $1
+          AND "action_key" = $2
+      `,
+      [fixture.eventId, `organiser_cover_request:${fixture.assignmentId}`],
+    );
+
+    expect(coverActionResult.rows).toEqual([
+      {
+        action_key: `organiser_cover_request:${fixture.assignmentId}`,
+        status: "pending",
+        attempt_count: 0,
+      },
+    ]);
+
+    /*
+     * Escalation should also record why that cover request was queued.
+     */
+    const escalationAuditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+        SELECT
+          "action",
+          "outcome"
+        FROM "audit_logs"
+        WHERE
+          "target_type" = 'event'
+          AND "target_id" = $1
+          AND "action" = 'event.organiser.cover.queue'
+          AND "outcome" = 'success'
+      `,
+      [String(fixture.eventId)],
+    );
+
+    expect(escalationAuditResult.rows).toEqual([
+      {
+        action: "event.organiser.cover.queue",
+        outcome: "success",
+      },
+    ]);
+
+    /*
+     * The escalation path refreshes the event message after changing the
+     * organiser workflow.
+     */
+    expect(
+      attendanceRefreshMocks.refreshAttendanceMessage,
+    ).toHaveBeenCalledTimes(1);
   });
 });
 
