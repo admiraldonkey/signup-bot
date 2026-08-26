@@ -32,6 +32,19 @@ vi.mock("../../../src/events/attendance-refresh.js", () => ({
   refreshAttendanceMessage: attendanceRefreshMocks.refreshAttendanceMessage,
 }));
 
+const organiserNotificationMocks = vi.hoisted(() => ({
+  sendOrganiserPendingWarning: vi.fn().mockResolvedValue(true),
+
+  sendOrganiserCoverRequest: vi.fn().mockResolvedValue("pinged"),
+}));
+
+vi.mock("../../../src/events/organiser-notification.js", () => ({
+  sendOrganiserPendingWarning:
+    organiserNotificationMocks.sendOrganiserPendingWarning,
+
+  sendOrganiserCoverRequest:
+    organiserNotificationMocks.sendOrganiserCoverRequest,
+}));
 import {
   startEventScheduler,
   stopEventScheduler,
@@ -59,6 +72,8 @@ describe("event scheduler", () => {
     roleRequestMessageMocks.refreshRoleRequestGroupMessage.mockClear();
     roleRequestMessageMocks.refreshRoleRequestMessages.mockClear();
     attendanceRefreshMocks.refreshAttendanceMessage.mockClear();
+    organiserNotificationMocks.sendOrganiserPendingWarning.mockClear();
+    organiserNotificationMocks.sendOrganiserCoverRequest.mockClear();
   });
 
   afterEach(() => {
@@ -993,6 +1008,129 @@ describe("event scheduler", () => {
       attendanceRefreshMocks.refreshAttendanceMessage,
     ).toHaveBeenCalledTimes(1);
   });
+
+  it("does not send an organiser warning when the event completes after the scheduler reads it", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserWarning(pool);
+
+    const guildFetch = createBlockedGuildFetchSchedulerClient();
+
+    // Act
+    startEventScheduler(guildFetch.client);
+
+    /*
+     * executeOrganiserWarning() has already read the assignment and event
+     * before it fetches the guild. Pausing that fetch gives us a
+     * deterministic point between the stale read and the external warning.
+     */
+    await guildFetch.waitUntilFetchStarted();
+
+    await pool.query(
+      `
+      UPDATE "events"
+      SET
+        "status" = 'completed',
+        "updated_at" = NOW()
+      WHERE "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    /*
+     * Completion makes outstanding organiser warning work obsolete.
+     *
+     * We mirror that scheduler state as well, although the important
+     * assertion is that no stale Discord warning is sent.
+     */
+    await pool.query(
+      `
+      UPDATE "scheduled_actions"
+      SET
+        "status" = 'cancelled',
+        "locked_at" = null,
+        "updated_at" = NOW()
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    guildFetch.releaseFetch();
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "cancelled");
+
+    stopEventScheduler();
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+      SELECT "status"
+      FROM "events"
+      WHERE "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toHaveLength(1);
+
+    expect.soft(eventResult.rows[0]?.status).toBe("completed");
+
+    /*
+     * The assignment itself remains untouched by an organiser warning.
+     */
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current"
+      FROM "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toHaveLength(1);
+
+    expect.soft(assignmentResult.rows[0]).toMatchObject({
+      status: "pending",
+      is_current: true,
+    });
+
+    /*
+     * Most importantly, a warning based on stale event state must not cross
+     * the Discord boundary after completion made it irrelevant.
+     */
+    expect
+      .soft(organiserNotificationMocks.sendOrganiserPendingWarning)
+      .not.toHaveBeenCalled();
+
+    /*
+     * No Discord delivery means no successful warning audit either.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'organiser_assignment'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.organiser_warning'
+        AND "outcome" = 'success'
+    `,
+      [String(fixture.assignmentId)],
+    );
+
+    expect.soft(auditResult.rows).toEqual([]);
+  });
 });
 
 async function createOpenEventWithDueAttendanceClose(
@@ -1128,6 +1266,52 @@ function createSchedulerClient(): Client<true> {
   };
 
   return client as unknown as Client<true>;
+}
+
+function createBlockedGuildFetchSchedulerClient(): {
+  client: Client<true>;
+  waitUntilFetchStarted: () => Promise<void>;
+  releaseFetch: () => void;
+} {
+  let resolveFetchStarted: (() => void) | undefined;
+
+  let resolveFetch: (() => void) | undefined;
+
+  const fetchStarted = new Promise<void>((resolve) => {
+    resolveFetchStarted = resolve;
+  });
+
+  const release = new Promise<void>((resolve) => {
+    resolveFetch = resolve;
+  });
+
+  const guild = {
+    id: DISCORD_GUILD_ID,
+  };
+
+  const client = {
+    guilds: {
+      fetch: vi.fn().mockImplementation(async () => {
+        resolveFetchStarted?.();
+
+        await release;
+
+        return guild;
+      }),
+    },
+  };
+
+  return {
+    client: client as unknown as Client<true>,
+
+    waitUntilFetchStarted: async () => {
+      await fetchStarted;
+    },
+
+    releaseFetch: () => {
+      resolveFetch?.();
+    },
+  };
 }
 
 async function waitForBlockedSchedulerEventUpdate(pool: Pool): Promise<void> {
@@ -1598,6 +1782,171 @@ async function createOpenEventWithDueOrganiserTimeout(pool: Pool): Promise<{
 
   if (!actionId) {
     throw new Error("The organiser timeout action was not created.");
+  }
+
+  return {
+    eventId,
+    assignmentId,
+    actionId,
+  };
+}
+
+async function createOpenEventWithDueOrganiserWarning(pool: Pool): Promise<{
+  eventId: number;
+  assignmentId: number;
+  actionId: number;
+}> {
+  const guildResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "discord_guilds" (
+        "discord_guild_id",
+        "name"
+      )
+      VALUES ($1, $2)
+      RETURNING "id"
+    `,
+    [DISCORD_GUILD_ID, "Scheduler Organiser Warning Test Guild"],
+  );
+
+  const guildId = guildResult.rows[0]?.id;
+
+  if (!guildId) {
+    throw new Error("The integration-test guild was not created.");
+  }
+
+  await pool.query(
+    `
+      INSERT INTO "guild_settings" (
+        "guild_id",
+        "event_admin_channel_id"
+      )
+      VALUES ($1, $2)
+    `,
+    [guildId, "300000000000000005"],
+  );
+
+  const eventTypeResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "event_types" (
+        "owner_guild_id",
+        "code",
+        "name"
+      )
+      VALUES ($1, $2, $3)
+      RETURNING "id"
+    `,
+    [guildId, "naval", "Naval Event"],
+  );
+
+  const eventTypeId = eventTypeResult.rows[0]?.id;
+
+  if (!eventTypeId) {
+    throw new Error("The integration-test event type was not created.");
+  }
+
+  const eventResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "events" (
+        "owner_guild_id",
+        "event_type_id",
+        "name",
+        "starts_at",
+        "signups_enabled",
+        "published_at",
+        "status",
+        "created_by_user_id"
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        NOW() + INTERVAL '1 hour',
+        true,
+        NOW() - INTERVAL '1 hour',
+        'open',
+        $4
+      )
+      RETURNING "id"
+    `,
+    [guildId, eventTypeId, "Organiser Warning Race Event", ADMIN_USER_ID],
+  );
+
+  const eventId = eventResult.rows[0]?.id;
+
+  if (!eventId) {
+    throw new Error("The integration-test event was not created.");
+  }
+
+  const assignmentResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "event_organiser_assignments" (
+          "event_id",
+          "slot",
+          "discord_user_id",
+          "display_name_snapshot",
+          "status",
+          "is_current",
+          "assigned_by_user_id",
+          "activated_at",
+          "response_deadline_at"
+        )
+        VALUES (
+          $1,
+          'primary',
+          $2,
+          $3,
+          'pending',
+          true,
+          $4,
+          NOW() - INTERVAL '60 minutes',
+          NOW() + INTERVAL '10 minutes'
+        )
+        RETURNING "id"
+      `,
+    [eventId, "300000000000000004", "Test Primary Organiser", ADMIN_USER_ID],
+  );
+
+  const assignmentId = assignmentResult.rows[0]?.id;
+
+  if (!assignmentId) {
+    throw new Error(
+      "The integration-test organiser assignment was not created.",
+    );
+  }
+
+  const actionResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "scheduled_actions" (
+        "event_id",
+        "action_key",
+        "due_at",
+        "status"
+      )
+      VALUES (
+        $1,
+        $2,
+        NOW() - INTERVAL '1 minute',
+        'pending'
+      )
+      RETURNING "id"
+    `,
+    [eventId, `organiser_warning:${assignmentId}`],
+  );
+
+  const actionId = actionResult.rows[0]?.id;
+
+  if (!actionId) {
+    throw new Error("The organiser warning action was not created.");
   }
 
   return {
