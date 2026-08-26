@@ -1372,6 +1372,143 @@ describe("event scheduler", () => {
 
     expect.soft(auditResult.rows).toEqual([]);
   });
+
+  it("sends an organiser cover request normally while the event remains active and no replacement exists", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserCoverRequest(pool);
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+      SELECT "status"
+      FROM "events"
+      WHERE "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toHaveLength(1);
+
+    /*
+     * Requesting organiser cover does not itself change the event lifecycle.
+     */
+    expect.soft(eventResult.rows[0]?.status).toBe("open");
+
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current"
+      FROM "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toHaveLength(1);
+
+    /*
+     * Sending the cover request does not rewrite the failed source
+     * assignment. It remains the reason cover was required.
+     */
+    expect.soft(assignmentResult.rows[0]).toMatchObject({
+      status: "timed_out",
+      is_current: false,
+    });
+
+    const actionResult = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+      completed_at: Date | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect.soft(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+      attempt_count: 1,
+      locked_at: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    /*
+     * With every eligibility condition still true after the fresh
+     * revalidation, exactly one Discord cover request should be sent.
+     */
+    expect(
+      organiserNotificationMocks.sendOrganiserCoverRequest,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      organiserNotificationMocks.sendOrganiserCoverRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventId: fixture.eventId,
+        eventName: "Organiser Cover Race Event",
+        eventAdminChannelId: "300000000000000005",
+        eventOrganiserRoleId: "300000000000000006",
+      }),
+    );
+
+    /*
+     * A real successful delivery should produce exactly one success audit,
+     * including the delivery mode returned by the notification boundary.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+      delivery: string | null;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome",
+        "details" ->> 'delivery' AS "delivery"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'event'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.organiser_cover_request'
+        AND "outcome" = 'success'
+    `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "scheduler.organiser_cover_request",
+        outcome: "success",
+        delivery: "pinged",
+      },
+    ]);
+  });
 });
 
 async function createOpenEventWithDueAttendanceClose(
