@@ -785,26 +785,40 @@ describe("scheduler retry and recovery", () => {
        */
       await lockClient.query("BEGIN");
 
+      /*
+       * Use a table-level lock rather than a row lock for this barrier.
+       *
+       * With attempt ownership correctly included in handleActionFailure()'s
+       * predicate, PostgreSQL can reject stale attempt 1 after observing that
+       * the persisted row belongs to attempt 2. In that case it never needs to
+       * acquire a row lock, so SELECT ... FOR UPDATE is no longer a reliable
+       * synchronization point.
+       *
+       * A table lock pauses the UPDATE before it can evaluate that ownership
+       * predicate, giving the test a deterministic signal that Worker A has
+       * reached failure handling.
+       */
       await lockClient.query(
         `
-        SELECT "id"
-        FROM "scheduled_actions"
-        WHERE "id" = $1
-        FOR UPDATE
-      `,
-        [fixture.actionId],
+    LOCK TABLE "scheduled_actions"
+    IN ACCESS EXCLUSIVE MODE
+  `,
       );
 
       /*
-       * Worker A's external operation now fails.
-       *
-       * Its handleActionFailure() call should recognise that attempt 1 no
-       * longer owns the row and leave attempt 2 untouched.
+       * Worker A's external operation now fails and proceeds into
+       * handleActionFailure().
        */
       delivery.release();
 
       const failureUpdatePid = await waitForBlockedSchedulerActionUpdate(pool);
 
+      /*
+       * Allow failure handling to continue.
+       *
+       * Once PostgreSQL evaluates the UPDATE predicate, attempt 1 must lose
+       * ownership because the persisted action is already attempt 2.
+       */
       await lockClient.query("COMMIT");
 
       await waitForDatabaseQueryToFinish(pool, failureUpdatePid);

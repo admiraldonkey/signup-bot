@@ -1457,6 +1457,16 @@ async function handleActionFailure(
           eq(scheduledActions.id, action.id),
 
           eq(scheduledActions.status, "processing"),
+
+          /*
+           * A stale worker may finish after this action has already been
+           * recovered and claimed for a newer attempt.
+           *
+           * Processing status alone therefore does not prove ownership. The
+           * persisted attempt number must still match the attempt which produced
+           * this failure.
+           */
+          eq(scheduledActions.attemptCount, action.attemptCount),
         ),
       );
 
@@ -1492,6 +1502,12 @@ async function handleActionFailure(
         eq(scheduledActions.id, action.id),
 
         eq(scheduledActions.status, "processing"),
+
+        /*
+         * Do not let an older failed attempt reschedule or unlock a newer
+         * attempt which now owns this durable action.
+         */
+        eq(scheduledActions.attemptCount, action.attemptCount),
       ),
     );
 }
