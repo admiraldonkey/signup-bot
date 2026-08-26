@@ -2,6 +2,7 @@ import { type Client } from "discord.js";
 import {
   and,
   eq,
+  gte,
   inArray,
   lt,
   lte,
@@ -118,23 +119,76 @@ async function recoverStaleActions(): Promise<void> {
 
   const staleBefore = new Date(now.getTime() - STALE_LOCK_AFTER_MS);
 
-  const recovered = await db
+  /*
+   * A processing action has already consumed an attempt when it was
+   * claimed.
+   *
+   * If that final allowed attempt was interrupted and its lock later
+   * becomes stale, recovering it to pending would let claimAction()
+   * increment the counter again and execute an impermissible extra
+   * attempt.
+   *
+   * Exhausted stale actions therefore become terminal failures directly.
+   */
+  const exhausted = await db
     .update(scheduledActions)
     .set({
-      status: "pending",
+      status: "failed",
+
       lockedAt: null,
-      lastError: "Recovered after interrupted processing.",
+
+      lastError:
+        "Failed after interrupted processing because the maximum attempt count had already been reached.",
+
       updatedAt: now,
     })
     .where(
       and(
         eq(scheduledActions.status, "processing"),
+
         lt(scheduledActions.lockedAt, staleBefore),
+
+        gte(scheduledActions.attemptCount, MAX_ATTEMPTS),
       ),
     )
     .returning({
       id: scheduledActions.id,
     });
+
+  /*
+   * Stale actions which still have an attempt remaining may safely return
+   * to pending. processDueActions() can then claim them normally, which
+   * consumes their next attempt.
+   */
+  const recovered = await db
+    .update(scheduledActions)
+    .set({
+      status: "pending",
+
+      lockedAt: null,
+
+      lastError: "Recovered after interrupted processing.",
+
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(scheduledActions.status, "processing"),
+
+        lt(scheduledActions.lockedAt, staleBefore),
+
+        lt(scheduledActions.attemptCount, MAX_ATTEMPTS),
+      ),
+    )
+    .returning({
+      id: scheduledActions.id,
+    });
+
+  if (exhausted.length > 0) {
+    console.warn(
+      `Failed ${exhausted.length} stale scheduled action(s) which had already exhausted their allowed attempts.`,
+    );
+  }
 
   if (recovered.length > 0) {
     console.warn(`Recovered ${recovered.length} stale scheduled action(s).`);
