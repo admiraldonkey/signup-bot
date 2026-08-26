@@ -106,6 +106,8 @@ async function runSchedulerTickSafely(client: Client<true>): Promise<void> {
   try {
     await recoverStaleActions();
 
+    await failExhaustedPendingActions();
+
     await processDueActions(client);
   } catch (error) {
     console.error("Event scheduler tick failed:", error);
@@ -195,6 +197,47 @@ async function recoverStaleActions(): Promise<void> {
   }
 }
 
+async function failExhaustedPendingActions(): Promise<void> {
+  const now = new Date();
+
+  /*
+   * A persisted pending action which has already consumed every permitted
+   * attempt must never be claimed again.
+   *
+   * This can exist after interrupted legacy recovery or inconsistent
+   * persisted scheduler state. Repair it proactively rather than leaving
+   * an unclaimable pending row behind forever.
+   */
+  const failed = await db
+    .update(scheduledActions)
+    .set({
+      status: "failed",
+
+      lockedAt: null,
+
+      lastError:
+        "Failed without execution because the maximum attempt count had already been reached.",
+
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(scheduledActions.status, "pending"),
+
+        gte(scheduledActions.attemptCount, MAX_ATTEMPTS),
+      ),
+    )
+    .returning({
+      id: scheduledActions.id,
+    });
+
+  if (failed.length > 0) {
+    console.warn(
+      `Failed ${failed.length} pending scheduled action(s) which had already exhausted their allowed attempts.`,
+    );
+  }
+}
+
 async function processDueActions(client: Client<true>): Promise<void> {
   const now = new Date();
 
@@ -250,8 +293,19 @@ async function claimAction(actionId: number) {
     .where(
       and(
         eq(scheduledActions.id, actionId),
+
         eq(scheduledActions.status, "pending"),
+
         lte(scheduledActions.dueAt, now),
+
+        /*
+         * This is the authoritative attempt-limit fence.
+         *
+         * Even if inconsistent persisted state appears after the scheduler's
+         * cleanup/select phase, claimAction() itself must never create attempt
+         * MAX_ATTEMPTS + 1.
+         */
+        lt(scheduledActions.attemptCount, MAX_ATTEMPTS),
       ),
     )
     .returning({
