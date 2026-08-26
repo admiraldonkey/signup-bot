@@ -1131,6 +1131,142 @@ describe("event scheduler", () => {
 
     expect.soft(auditResult.rows).toEqual([]);
   });
+
+  it("sends an organiser warning normally while the assignment and event remain active", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserWarning(pool);
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+      SELECT "status"
+      FROM "events"
+      WHERE "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toHaveLength(1);
+
+    /*
+     * Sending a warning does not change the event lifecycle.
+     */
+    expect.soft(eventResult.rows[0]?.status).toBe("open");
+
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      ended_at: Date | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current",
+        "ended_at"
+      FROM "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toHaveLength(1);
+
+    /*
+     * A warning is informational. The organiser remains pending/current
+     * until they respond or their actual timeout occurs.
+     */
+    expect.soft(assignmentResult.rows[0]).toMatchObject({
+      status: "pending",
+      is_current: true,
+      ended_at: null,
+    });
+
+    const actionResult = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+      completed_at: Date | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect.soft(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+      attempt_count: 1,
+      locked_at: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    /*
+     * With the event and assignment still eligible after the fresh
+     * revalidation, the warning should cross the Discord boundary once.
+     */
+    expect(
+      organiserNotificationMocks.sendOrganiserPendingWarning,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      organiserNotificationMocks.sendOrganiserPendingWarning,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventId: fixture.eventId,
+        discordUserId: "300000000000000004",
+        slot: "primary",
+      }),
+    );
+
+    /*
+     * This was a real successful delivery, so exactly one success audit
+     * should be recorded.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'organiser_assignment'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.organiser_warning'
+        AND "outcome" = 'success'
+    `,
+      [String(fixture.assignmentId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "scheduler.organiser_warning",
+        outcome: "success",
+      },
+    ]);
+  });
 });
 
 async function createOpenEventWithDueAttendanceClose(
