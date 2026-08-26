@@ -1267,6 +1267,111 @@ describe("event scheduler", () => {
       },
     ]);
   });
+
+  it("does not send an organiser cover request when the event completes after the scheduler reads it", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserCoverRequest(pool);
+
+    const guildFetch = createBlockedGuildFetchSchedulerClient();
+
+    // Act
+    startEventScheduler(guildFetch.client);
+
+    /*
+     * executeOrganiserCoverRequest() has already established that:
+     * - the event is active,
+     * - the failed assignment is eligible for escalation,
+     * - no replacement organiser is active.
+     *
+     * It then fetches the Discord guild. Pause at that external boundary.
+     */
+    await guildFetch.waitUntilFetchStarted();
+
+    /*
+     * Event completion wins while the cover request is preparing to cross
+     * the Discord boundary.
+     */
+    await pool.query(
+      `
+      UPDATE "events"
+      SET
+        "status" = 'completed',
+        "updated_at" = NOW()
+      WHERE "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    /*
+     * Real event completion also cancels outstanding organiser escalation
+     * actions. Reproduce that state so the processing action no longer
+     * belongs to this scheduler worker.
+     */
+    await pool.query(
+      `
+      UPDATE "scheduled_actions"
+      SET
+        "status" = 'cancelled',
+        "locked_at" = null,
+        "updated_at" = NOW()
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    guildFetch.releaseFetch();
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "cancelled");
+
+    stopEventScheduler();
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+      SELECT "status"
+      FROM "events"
+      WHERE "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toHaveLength(1);
+
+    expect.soft(eventResult.rows[0]?.status).toBe("completed");
+
+    /*
+     * A cover request which became obsolete while Discord was being fetched
+     * must never reach the notification boundary.
+     */
+    expect
+      .soft(organiserNotificationMocks.sendOrganiserCoverRequest)
+      .not.toHaveBeenCalled();
+
+    /*
+     * Nor may the stale executor claim successful delivery.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'event'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.organiser_cover_request'
+        AND "outcome" = 'success'
+    `,
+      [String(fixture.eventId)],
+    );
+
+    expect.soft(auditResult.rows).toEqual([]);
+  });
 });
 
 async function createOpenEventWithDueAttendanceClose(
@@ -2083,6 +2188,180 @@ async function createOpenEventWithDueOrganiserWarning(pool: Pool): Promise<{
 
   if (!actionId) {
     throw new Error("The organiser warning action was not created.");
+  }
+
+  return {
+    eventId,
+    assignmentId,
+    actionId,
+  };
+}
+
+async function createOpenEventWithDueOrganiserCoverRequest(
+  pool: Pool,
+): Promise<{
+  eventId: number;
+  assignmentId: number;
+  actionId: number;
+}> {
+  const guildResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "discord_guilds" (
+        "discord_guild_id",
+        "name"
+      )
+      VALUES ($1, $2)
+      RETURNING "id"
+    `,
+    [DISCORD_GUILD_ID, "Scheduler Organiser Cover Test Guild"],
+  );
+
+  const guildId = guildResult.rows[0]?.id;
+
+  if (!guildId) {
+    throw new Error("The integration-test guild was not created.");
+  }
+
+  await pool.query(
+    `
+      INSERT INTO "guild_settings" (
+        "guild_id",
+        "event_admin_channel_id",
+        "event_organiser_role_id"
+      )
+      VALUES ($1, $2, $3)
+    `,
+    [guildId, "300000000000000005", "300000000000000006"],
+  );
+
+  const eventTypeResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "event_types" (
+        "owner_guild_id",
+        "code",
+        "name"
+      )
+      VALUES ($1, $2, $3)
+      RETURNING "id"
+    `,
+    [guildId, "naval", "Naval Event"],
+  );
+
+  const eventTypeId = eventTypeResult.rows[0]?.id;
+
+  if (!eventTypeId) {
+    throw new Error("The integration-test event type was not created.");
+  }
+
+  const eventResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "events" (
+        "owner_guild_id",
+        "event_type_id",
+        "name",
+        "starts_at",
+        "signups_enabled",
+        "published_at",
+        "status",
+        "created_by_user_id"
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        NOW() + INTERVAL '1 hour',
+        true,
+        NOW() - INTERVAL '1 hour',
+        'open',
+        $4
+      )
+      RETURNING "id"
+    `,
+    [guildId, eventTypeId, "Organiser Cover Race Event", ADMIN_USER_ID],
+  );
+
+  const eventId = eventResult.rows[0]?.id;
+
+  if (!eventId) {
+    throw new Error("The integration-test event was not created.");
+  }
+
+  /*
+   * Cover is only appropriate after the source assignment has already
+   * failed and there is no active replacement organiser.
+   */
+  const assignmentResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "event_organiser_assignments" (
+          "event_id",
+          "slot",
+          "discord_user_id",
+          "display_name_snapshot",
+          "status",
+          "is_current",
+          "assigned_by_user_id",
+          "activated_at",
+          "response_deadline_at",
+          "ended_at"
+        )
+        VALUES (
+          $1,
+          'primary',
+          $2,
+          $3,
+          'timed_out',
+          false,
+          $4,
+          NOW() - INTERVAL '2 hours',
+          NOW() - INTERVAL '1 hour',
+          NOW() - INTERVAL '1 hour'
+        )
+        RETURNING "id"
+      `,
+    [eventId, "300000000000000004", "Test Primary Organiser", ADMIN_USER_ID],
+  );
+
+  const assignmentId = assignmentResult.rows[0]?.id;
+
+  if (!assignmentId) {
+    throw new Error(
+      "The integration-test organiser assignment was not created.",
+    );
+  }
+
+  const actionResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "scheduled_actions" (
+        "event_id",
+        "action_key",
+        "due_at",
+        "status"
+      )
+      VALUES (
+        $1,
+        $2,
+        NOW() - INTERVAL '1 minute',
+        'pending'
+      )
+      RETURNING "id"
+    `,
+    [eventId, `organiser_cover_request:${assignmentId}`],
+  );
+
+  const actionId = actionResult.rows[0]?.id;
+
+  if (!actionId) {
+    throw new Error("The organiser cover-request action was not created.");
   }
 
   return {
