@@ -10,6 +10,7 @@ import {
   isNotNull,
   ne,
 } from "drizzle-orm";
+import { TransactionRollbackError } from "drizzle-orm/errors";
 
 import { db } from "../db/client.js";
 import {
@@ -362,6 +363,44 @@ async function executeOrganiserWarning(
 
   const guild = await client.guilds.fetch(assignment.discordGuildId);
 
+  /*
+   * Fetching the guild crosses an external boundary and may take long enough
+   * for the organiser assignment or parent event to change.
+   *
+   * Revalidate immediately before sending the warning so a confirmation,
+   * decline, replacement, cancellation or completion which won after our
+   * initial SELECT makes this action obsolete.
+   */
+  const [currentAssignment] = await db
+    .select({
+      id: eventOrganiserAssignments.id,
+    })
+    .from(eventOrganiserAssignments)
+    .innerJoin(events, eq(events.id, eventOrganiserAssignments.eventId))
+    .where(
+      and(
+        eq(eventOrganiserAssignments.id, assignment.id),
+
+        eq(eventOrganiserAssignments.eventId, eventId),
+
+        eq(eventOrganiserAssignments.isCurrent, true),
+
+        eq(eventOrganiserAssignments.status, "pending"),
+
+        isNotNull(eventOrganiserAssignments.activatedAt),
+
+        isNotNull(eventOrganiserAssignments.responseDeadlineAt),
+
+        ne(events.status, "cancelled"),
+        ne(events.status, "completed"),
+      ),
+    )
+    .limit(1);
+
+  if (!currentAssignment) {
+    return;
+  }
+
   const sent = await sendOrganiserPendingWarning({
     guild,
 
@@ -445,38 +484,95 @@ async function executeOrganiserTimeout(
     return;
   }
 
-  const now = new Date();
+  let assignmentTimedOut = false;
 
-  const [timedOut] = await db
-    .update(eventOrganiserAssignments)
-    .set({
-      status: "timed_out",
+  try {
+    assignmentTimedOut = await db.transaction(async (transaction) => {
+      const now = new Date();
 
-      isCurrent: false,
+      /*
+       * Acquire the assignment row first.
+       *
+       * The predicates preserve the existing protection against an
+       * organiser confirming, declining or being replaced while the
+       * timeout action is running.
+       */
+      const [timedOut] = await transaction
+        .update(eventOrganiserAssignments)
+        .set({
+          status: "timed_out",
 
-      endedAt: now,
+          isCurrent: false,
 
-      updatedAt: now,
-    })
-    .where(
-      and(
-        eq(eventOrganiserAssignments.id, assignment.id),
+          endedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(eventOrganiserAssignments.id, assignment.id),
 
-        eq(eventOrganiserAssignments.isCurrent, true),
+            eq(eventOrganiserAssignments.eventId, eventId),
 
-        eq(eventOrganiserAssignments.status, "pending"),
+            eq(eventOrganiserAssignments.isCurrent, true),
 
-        isNotNull(eventOrganiserAssignments.activatedAt),
-      ),
-    )
-    .returning({
-      id: eventOrganiserAssignments.id,
+            eq(eventOrganiserAssignments.status, "pending"),
+
+            isNotNull(eventOrganiserAssignments.activatedAt),
+          ),
+        )
+        .returning({
+          id: eventOrganiserAssignments.id,
+        });
+
+      /*
+       * Confirmation, decline or replacement won the assignment race.
+       */
+      if (!timedOut) {
+        return false;
+      }
+
+      /*
+       * Re-read and lock the parent event after acquiring the assignment.
+       *
+       * If completion/cancellation won while this timeout was waiting,
+       * roll the assignment mutation back. If the event is still active,
+       * FOR UPDATE prevents a terminal transition from slipping in before
+       * this transaction commits.
+       */
+      const [currentEvent] = await transaction
+        .select({
+          status: events.status,
+        })
+        .from(events)
+        .where(eq(events.id, eventId))
+        .for("update")
+        .limit(1);
+
+      if (
+        !currentEvent ||
+        currentEvent.status === "cancelled" ||
+        currentEvent.status === "completed"
+      ) {
+        transaction.rollback();
+      }
+
+      return true;
     });
+  } catch (error) {
+    /*
+     * rollback() here means the timeout became obsolete because the parent
+     * event reached a terminal state while the action was in flight.
+     *
+     * That is not retryable scheduler failure.
+     */
+    if (error instanceof TransactionRollbackError) {
+      return;
+    }
 
-  /*
-   * Confirmation, decline or replacement won the race.
-   */
-  if (!timedOut) {
+    throw error;
+  }
+
+  if (!assignmentTimedOut) {
     return;
   }
 
@@ -592,6 +688,64 @@ async function executeOrganiserCoverRequest(
 
   const guild = await client.guilds.fetch(event.discordGuildId);
 
+  /*
+   * Fetching the guild crosses an external boundary. The event lifecycle or
+   * organiser assignments may change while that request is in flight.
+   *
+   * Revalidate every prerequisite for requesting cover immediately before
+   * sending the Discord notification.
+   */
+  const [currentSourceAssignment] = await db
+    .select({
+      status: eventOrganiserAssignments.status,
+    })
+    .from(eventOrganiserAssignments)
+    .innerJoin(events, eq(events.id, eventOrganiserAssignments.eventId))
+    .where(
+      and(
+        eq(eventOrganiserAssignments.id, sourceAssignmentId),
+
+        eq(eventOrganiserAssignments.eventId, event.id),
+
+        inArray(eventOrganiserAssignments.status, ["declined", "timed_out"]),
+
+        ne(events.status, "cancelled"),
+        ne(events.status, "completed"),
+      ),
+    )
+    .limit(1);
+
+  if (!currentSourceAssignment) {
+    return;
+  }
+
+  /*
+   * A replacement organiser may also have been assigned while the Discord
+   * guild was being fetched. In that case asking the wider organiser group
+   * for cover is now obsolete.
+   */
+  const [currentActiveAssignment] = await db
+    .select({
+      id: eventOrganiserAssignments.id,
+    })
+    .from(eventOrganiserAssignments)
+    .where(
+      and(
+        eq(eventOrganiserAssignments.eventId, event.id),
+
+        eq(eventOrganiserAssignments.isCurrent, true),
+
+        isNotNull(eventOrganiserAssignments.activatedAt),
+
+        inArray(eventOrganiserAssignments.status, ["pending", "confirmed"]),
+      ),
+    )
+    .limit(1);
+
+  if (currentActiveAssignment) {
+    return;
+  }
+
   const delivery = await sendOrganiserCoverRequest({
     guild,
 
@@ -674,17 +828,95 @@ async function executeRoleRequestGroupClose(
     return;
   }
 
+  /*
+   * A terminal parent event makes any outstanding role-request group close
+   * action obsolete.
+   *
+   * The scheduler action itself may complete normally so it is not retried,
+   * but there is no longer any live role-request lifecycle to mutate or
+   * report as successfully closed.
+   */
+  if (group.eventStatus === "cancelled" || group.eventStatus === "completed") {
+    return;
+  }
+
   if (!group.closedAt) {
-    const now = new Date();
+    let groupClosed = false;
 
-    await db
-      .update(roleRequestGroups)
-      .set({
-        closedAt: now,
+    try {
+      groupClosed = await db.transaction(async (transaction) => {
+        const now = new Date();
 
-        updatedAt: now,
-      })
-      .where(eq(roleRequestGroups.id, group.id));
+        /*
+         * Acquire the group row first.
+         *
+         * The closedAt predicate also means another successful close
+         * which wins this race makes this scheduler action obsolete.
+         */
+        const [closedGroup] = await transaction
+          .update(roleRequestGroups)
+          .set({
+            closedAt: now,
+
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(roleRequestGroups.id, group.id),
+              isNull(roleRequestGroups.closedAt),
+            ),
+          )
+          .returning({
+            id: roleRequestGroups.id,
+          });
+
+        if (!closedGroup) {
+          return false;
+        }
+
+        /*
+         * Re-read and lock the parent event after acquiring the group row.
+         *
+         * This closes the race between the earlier eventStatus check and
+         * the group mutation. If completion/cancellation already won, this
+         * SELECT observes it. If the event is still active, FOR UPDATE
+         * prevents a terminal lifecycle transition from slipping in before
+         * this transaction commits.
+         */
+        const [currentEvent] = await transaction
+          .select({
+            status: events.status,
+          })
+          .from(events)
+          .where(eq(events.id, eventId))
+          .for("update")
+          .limit(1);
+
+        if (
+          !currentEvent ||
+          currentEvent.status === "cancelled" ||
+          currentEvent.status === "completed"
+        ) {
+          transaction.rollback();
+        }
+
+        return true;
+      });
+    } catch (error) {
+      /*
+       * rollback() is intentional here: the scheduler discovered that its
+       * group close became obsolete while the transaction was in flight.
+       */
+      if (error instanceof TransactionRollbackError) {
+        return;
+      }
+
+      throw error;
+    }
+
+    if (!groupClosed) {
+      return;
+    }
   }
 
   const guild = await client.guilds.fetch(group.discordGuildId);
@@ -842,7 +1074,7 @@ async function executeCloseAttendance(
   }
 
   if (event.status !== "closed") {
-    await db
+    const [closedEvent] = await db
       .update(events)
       .set({
         status: "closed",
@@ -853,7 +1085,22 @@ async function executeCloseAttendance(
           eq(events.id, eventId),
           inArray(events.status, ["scheduled", "open"]),
         ),
-      );
+      )
+      .returning({
+        id: events.id,
+      });
+
+    /*
+     * Another lifecycle transition may have won after loadScheduledEvent()
+     * read the event but before this conditional UPDATE ran.
+     *
+     * In that case the scheduler action itself is obsolete and may complete
+     * normally, but attendance was not actually closed by this action.
+     * Do not refresh Discord, log success or write a success audit.
+     */
+    if (!closedEvent) {
+      return;
+    }
   }
 
   if (event.publishedAt) {
@@ -901,11 +1148,10 @@ async function executeCompleteEvent(
   }
 
   if (event.status !== "completed") {
-    await db
+    const [completedEvent] = await db
       .update(events)
       .set({
         status: "completed",
-
         updatedAt: new Date(),
       })
       .where(
@@ -913,7 +1159,22 @@ async function executeCompleteEvent(
           eq(events.id, eventId),
           inArray(events.status, ["scheduled", "open", "closed"]),
         ),
-      );
+      )
+      .returning({
+        id: events.id,
+      });
+
+    /*
+     * Another lifecycle transition may have won after loadScheduledEvent()
+     * read the event but before this conditional UPDATE ran.
+     *
+     * In that case this completion action is now obsolete. The scheduler
+     * action itself may finish normally, but this executor must not perform
+     * completion cleanup, refresh Discord or claim successful completion.
+     */
+    if (!completedEvent) {
+      return;
+    }
   }
 
   /*
