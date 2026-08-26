@@ -688,6 +688,64 @@ async function executeOrganiserCoverRequest(
 
   const guild = await client.guilds.fetch(event.discordGuildId);
 
+  /*
+   * Fetching the guild crosses an external boundary. The event lifecycle or
+   * organiser assignments may change while that request is in flight.
+   *
+   * Revalidate every prerequisite for requesting cover immediately before
+   * sending the Discord notification.
+   */
+  const [currentSourceAssignment] = await db
+    .select({
+      status: eventOrganiserAssignments.status,
+    })
+    .from(eventOrganiserAssignments)
+    .innerJoin(events, eq(events.id, eventOrganiserAssignments.eventId))
+    .where(
+      and(
+        eq(eventOrganiserAssignments.id, sourceAssignmentId),
+
+        eq(eventOrganiserAssignments.eventId, event.id),
+
+        inArray(eventOrganiserAssignments.status, ["declined", "timed_out"]),
+
+        ne(events.status, "cancelled"),
+        ne(events.status, "completed"),
+      ),
+    )
+    .limit(1);
+
+  if (!currentSourceAssignment) {
+    return;
+  }
+
+  /*
+   * A replacement organiser may also have been assigned while the Discord
+   * guild was being fetched. In that case asking the wider organiser group
+   * for cover is now obsolete.
+   */
+  const [currentActiveAssignment] = await db
+    .select({
+      id: eventOrganiserAssignments.id,
+    })
+    .from(eventOrganiserAssignments)
+    .where(
+      and(
+        eq(eventOrganiserAssignments.eventId, event.id),
+
+        eq(eventOrganiserAssignments.isCurrent, true),
+
+        isNotNull(eventOrganiserAssignments.activatedAt),
+
+        inArray(eventOrganiserAssignments.status, ["pending", "confirmed"]),
+      ),
+    )
+    .limit(1);
+
+  if (currentActiveAssignment) {
+    return;
+  }
+
   const delivery = await sendOrganiserCoverRequest({
     guild,
 
