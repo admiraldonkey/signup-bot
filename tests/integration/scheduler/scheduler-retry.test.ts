@@ -8,8 +8,15 @@ import {
   describe,
   expect,
   it,
+  vi,
 } from "vitest";
+const eventCustomMessageMocks = vi.hoisted(() => ({
+  sendEventCustomMessage: vi.fn(),
+}));
 
+vi.mock("../../../src/events/event-custom-message.js", () => ({
+  sendEventCustomMessage: eventCustomMessageMocks.sendEventCustomMessage,
+}));
 import {
   startEventScheduler,
   stopEventScheduler,
@@ -34,6 +41,7 @@ describe("scheduler retry and recovery", () => {
     stopEventScheduler();
 
     await resetIntegrationDatabase(pool);
+    eventCustomMessageMocks.sendEventCustomMessage.mockReset();
   });
 
   afterEach(() => {
@@ -420,6 +428,185 @@ describe("scheduler retry and recovery", () => {
      */
     expect(action?.due_at.getTime()).toBeLessThan(Date.now());
   });
+
+  it.each([
+    {
+      initialAttemptCount: 0,
+      claimedAttemptCount: 1,
+    },
+    {
+      initialAttemptCount: 4,
+      claimedAttemptCount: 5,
+    },
+  ])(
+    "preserves cancellation when claimed attempt $claimedAttemptCount fails after another actor cancels it",
+    async ({ initialAttemptCount, claimedAttemptCount }) => {
+      // Arrange
+      const fixture = await createDueFailingReminderAction(
+        pool,
+        initialAttemptCount,
+      );
+
+      const delivery = createBlockedFailingReminderDelivery();
+
+      const client = createSchedulerClient();
+
+      const lockClient = await pool.connect();
+
+      try {
+        // Act
+        startEventScheduler(client);
+
+        /*
+         * By the time the notification boundary is reached, claimAction()
+         * has committed and the action is genuinely "processing".
+         */
+        await delivery.waitUntilStarted();
+
+        const processingResult = await pool.query<{
+          status: string;
+          attempt_count: number;
+        }>(
+          `
+            SELECT
+              "status",
+              "attempt_count"
+            FROM "scheduled_actions"
+            WHERE "id" = $1
+          `,
+          [fixture.actionId],
+        );
+
+        expect(processingResult.rows[0]).toMatchObject({
+          status: "processing",
+          attempt_count: claimedAttemptCount,
+        });
+
+        /*
+         * Take ownership of the scheduler-action row and cancel it while its
+         * executor remains suspended at the external delivery boundary.
+         */
+        await lockClient.query("BEGIN");
+
+        await lockClient.query(
+          `
+          SELECT "id"
+          FROM "scheduled_actions"
+          WHERE "id" = $1
+          FOR UPDATE
+        `,
+          [fixture.actionId],
+        );
+
+        await lockClient.query(
+          `
+          UPDATE "scheduled_actions"
+          SET
+            "status" = 'cancelled',
+            "locked_at" = null,
+            "last_error" = $2,
+            "updated_at" = NOW()
+          WHERE "id" = $1
+        `,
+          [fixture.actionId, "Cancelled while executor was in flight."],
+        );
+
+        /*
+         * Let the external operation fail.
+         *
+         * handleActionFailure() will now try to update the same scheduler row,
+         * but must wait for our transaction first.
+         */
+        delivery.release();
+
+        const failureUpdatePid =
+          await waitForBlockedSchedulerActionUpdate(pool);
+
+        /*
+         * Cancellation commits first.
+         *
+         * PostgreSQL should then re-evaluate handleActionFailure()'s
+         * `status = processing` predicate and update zero rows.
+         */
+        await lockClient.query("COMMIT");
+
+        await waitForDatabaseQueryToFinish(pool, failureUpdatePid);
+      } catch (error) {
+        delivery.release();
+
+        await lockClient.query("ROLLBACK").catch(() => undefined);
+
+        throw error;
+      } finally {
+        lockClient.release();
+        stopEventScheduler();
+      }
+
+      // Assert
+      const actionResult = await pool.query<{
+        status: string;
+        attempt_count: number;
+        due_at: Date;
+        locked_at: Date | null;
+        completed_at: Date | null;
+        last_error: string | null;
+      }>(
+        `
+          SELECT
+            "status",
+            "attempt_count",
+            "due_at",
+            "locked_at",
+            "completed_at",
+            "last_error"
+          FROM "scheduled_actions"
+          WHERE "id" = $1
+        `,
+        [fixture.actionId],
+      );
+
+      expect(actionResult.rows).toHaveLength(1);
+
+      const action = actionResult.rows[0];
+
+      /*
+       * The newer cancellation owns the durable action.
+       *
+       * Attempt 1 must not be rescheduled to pending, and attempt 5 must not
+       * overwrite cancellation with failed.
+       */
+      expect.soft(action?.status).toBe("cancelled");
+
+      expect.soft(action?.attempt_count).toBe(claimedAttemptCount);
+
+      expect.soft(action?.locked_at).toBeNull();
+
+      expect.soft(action?.completed_at).toBeNull();
+
+      expect
+        .soft(action?.last_error)
+        .toBe("Cancelled while executor was in flight.");
+
+      /*
+       * Failure handling must not alter the retry deadline after losing
+       * ownership of the action.
+       */
+      expect(action?.due_at.getTime()).toBe(fixture.originalDueAt.getTime());
+
+      const reminderResult = await pool.query<{
+        sent_at: Date | null;
+      }>(
+        `
+          SELECT "sent_at"
+          FROM "event_reminders"
+          WHERE "id" = $1
+        `,
+        [fixture.reminderId],
+      );
+
+      expect(reminderResult.rows[0]?.sent_at).toBeNull();
+    },
+  );
 });
 
 async function createStaleProcessingAction(
@@ -620,6 +807,75 @@ async function waitForScheduledActionAttempt(
   );
 }
 
+async function waitForBlockedSchedulerActionUpdate(
+  pool: Pool,
+): Promise<number> {
+  const timeoutAt = Date.now() + 3_000;
+
+  while (Date.now() < timeoutAt) {
+    const result = await pool.query<{
+      pid: number;
+    }>(`
+        SELECT "pid"
+        FROM "pg_stat_activity"
+        WHERE
+          "datname" = current_database()
+          AND "state" = 'active'
+          AND "wait_event_type" = 'Lock'
+          AND "query" ILIKE '%update "scheduled_actions"%'
+        LIMIT 1
+      `);
+
+    const pid = result.rows[0]?.pid;
+
+    if (pid) {
+      return pid;
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+
+  throw new Error(
+    "Timed out waiting for scheduler failure handling to block on the scheduled-action row.",
+  );
+}
+
+async function waitForDatabaseQueryToFinish(
+  pool: Pool,
+  pid: number,
+): Promise<void> {
+  const timeoutAt = Date.now() + 3_000;
+
+  while (Date.now() < timeoutAt) {
+    const result = await pool.query<{
+      state: string;
+    }>(
+      `
+          SELECT "state"
+          FROM "pg_stat_activity"
+          WHERE "pid" = $1
+        `,
+      [pid],
+    );
+
+    const state = result.rows[0]?.state;
+
+    if (!state || state !== "active") {
+      return;
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+
+  throw new Error(
+    `Timed out waiting for database query on backend PID ${pid} to finish.`,
+  );
+}
+
 async function createDuePendingFailingAction(
   pool: Pool,
   attemptCount: number,
@@ -745,5 +1001,209 @@ async function createDuePendingFailingAction(
   return {
     eventId,
     actionId,
+  };
+}
+
+function createBlockedFailingReminderDelivery(): {
+  waitUntilStarted: () => Promise<void>;
+  release: () => void;
+} {
+  let resolveStarted: (() => void) | undefined;
+
+  let resolveRelease: (() => void) | undefined;
+
+  const started = new Promise<void>((resolve) => {
+    resolveStarted = resolve;
+  });
+
+  const released = new Promise<void>((resolve) => {
+    resolveRelease = resolve;
+  });
+
+  eventCustomMessageMocks.sendEventCustomMessage.mockImplementation(
+    async () => {
+      resolveStarted?.();
+
+      await released;
+
+      throw new Error("Integration reminder delivery failure.");
+    },
+  );
+
+  return {
+    waitUntilStarted: async () => {
+      await started;
+    },
+
+    release: () => {
+      resolveRelease?.();
+    },
+  };
+}
+
+function createSchedulerClient(): Client<true> {
+  const client = {
+    guilds: {
+      fetch: vi.fn().mockResolvedValue({
+        id: DISCORD_GUILD_ID,
+      }),
+    },
+  };
+
+  return client as unknown as Client<true>;
+}
+
+async function createDueFailingReminderAction(
+  pool: Pool,
+  attemptCount: number,
+): Promise<{
+  eventId: number;
+  reminderId: number;
+  actionId: number;
+  originalDueAt: Date;
+}> {
+  const guildResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "discord_guilds" (
+          "discord_guild_id",
+          "name"
+        )
+        VALUES ($1, $2)
+        RETURNING "id"
+      `,
+    [DISCORD_GUILD_ID, "Scheduler Failure Ownership Test Guild"],
+  );
+
+  const guildId = guildResult.rows[0]?.id;
+
+  if (!guildId) {
+    throw new Error("The integration-test guild was not created.");
+  }
+
+  const eventTypeResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "event_types" (
+          "owner_guild_id",
+          "code",
+          "name"
+        )
+        VALUES ($1, $2, $3)
+        RETURNING "id"
+      `,
+    [guildId, "naval", "Naval Event"],
+  );
+
+  const eventTypeId = eventTypeResult.rows[0]?.id;
+
+  if (!eventTypeId) {
+    throw new Error("The integration-test event type was not created.");
+  }
+
+  const eventResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "events" (
+          "owner_guild_id",
+          "event_type_id",
+          "name",
+          "starts_at",
+          "status",
+          "created_by_user_id"
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          NOW() + INTERVAL '1 hour',
+          'open',
+          $4
+        )
+        RETURNING "id"
+      `,
+    [guildId, eventTypeId, "Scheduler Failure Ownership Event", ADMIN_USER_ID],
+  );
+
+  const eventId = eventResult.rows[0]?.id;
+
+  if (!eventId) {
+    throw new Error("The integration-test event was not created.");
+  }
+
+  const reminderResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "event_reminders" (
+          "event_id",
+          "timing_reference",
+          "minutes_before",
+          "message",
+          "channel_id",
+          "ping_event_roles",
+          "enabled",
+          "created_by_user_id"
+        )
+        VALUES (
+          $1,
+          'event_start',
+          60,
+          $2,
+          $3,
+          false,
+          true,
+          $4
+        )
+        RETURNING "id"
+      `,
+    [eventId, "Integration reminder", "400000000000000003", ADMIN_USER_ID],
+  );
+
+  const reminderId = reminderResult.rows[0]?.id;
+
+  if (!reminderId) {
+    throw new Error("The integration-test reminder was not created.");
+  }
+
+  const originalDueAt = new Date(Date.now() - 60_000);
+
+  const actionResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "scheduled_actions" (
+          "event_id",
+          "action_key",
+          "due_at",
+          "status",
+          "attempt_count"
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          'pending',
+          $4
+        )
+        RETURNING "id"
+      `,
+    [eventId, `event_reminder:${reminderId}`, originalDueAt, attemptCount],
+  );
+
+  const actionId = actionResult.rows[0]?.id;
+
+  if (!actionId) {
+    throw new Error("The integration-test reminder action was not created.");
+  }
+
+  return {
+    eventId,
+    reminderId,
+    actionId,
+    originalDueAt,
   };
 }
