@@ -84,123 +84,112 @@ describe("attendance button interactions", () => {
     await applicationPool.end();
   });
 
-  it("does not record a stale attendance response after the event closes", async () => {
-    // Arrange
-    const fixture = await createOpenAttendanceEvent(pool);
+  it.each(["closed", "cancelled", "completed"] as const)(
+    "does not record a stale attendance response after the event becomes %s",
+    async (terminalStatus) => {
+      // Arrange
+      const fixture = await createOpenAttendanceEvent(pool);
 
-    const interaction = createAttendanceButtonInteraction(
-      fixture.eventId,
-      "attending",
-    );
+      const interaction = createAttendanceButtonInteraction(
+        fixture.eventId,
+        "attending",
+      );
 
-    const lockClient = await pool.connect();
+      const lockClient = await pool.connect();
 
-    let interactionPromise: Promise<boolean> | undefined;
+      let interactionPromise: Promise<boolean> | undefined;
 
-    try {
-      await lockClient.query("BEGIN");
+      try {
+        await lockClient.query("BEGIN");
 
-      /*
-       * Block writes to attendance_responses without blocking the handler's
-       * initial event lookup.
-       *
-       * This lets the real interaction read the event as open, pass its
-       * lifecycle checks, and then stop precisely when it tries to persist
-       * the attendance response.
-       */
-      await lockClient.query(
-        `
+        /*
+         * Let the real handler read the event while it is open, then stop it
+         * at the attendance write.
+         */
+        await lockClient.query(
+          `
           LOCK TABLE "attendance_responses"
           IN ACCESS EXCLUSIVE MODE
         `,
-      );
+        );
 
-      interactionPromise = handleAttendanceButton(interaction);
+        interactionPromise = handleAttendanceButton(interaction);
 
-      await waitForBlockedAttendanceInsert(pool);
+        await waitForBlockedAttendanceInsert(pool);
 
-      /*
-       * Attendance closure wins after the interaction has already read the
-       * old "open" state but before its response is persisted.
-       */
-      await pool.query(
-        `
+        /*
+         * A newer lifecycle transition wins after the interaction's initial
+         * eligibility read but before its attendance response can persist.
+         */
+        await pool.query(
+          `
           UPDATE "events"
           SET
-            "status" = 'closed',
+            "status" = $2,
             "updated_at" = NOW()
+          WHERE "id" = $1
+        `,
+          [fixture.eventId, terminalStatus],
+        );
+
+        await lockClient.query("COMMIT");
+
+        await interactionPromise;
+      } catch (error) {
+        await lockClient.query("ROLLBACK").catch(() => undefined);
+
+        await interactionPromise?.catch(() => undefined);
+
+        throw error;
+      } finally {
+        lockClient.release();
+      }
+
+      // Assert
+      const eventResult = await pool.query<{
+        status: string;
+      }>(
+        `
+          SELECT "status"
+          FROM "events"
           WHERE "id" = $1
         `,
         [fixture.eventId],
       );
 
-      /*
-       * Release the attendance table.
-       *
-       * The stale interaction may now continue, but it must observe that
-       * attendance is no longer open rather than inserting its response.
-       */
-      await lockClient.query("COMMIT");
+      expect(eventResult.rows).toEqual([
+        {
+          status: terminalStatus,
+        },
+      ]);
 
-      await interactionPromise;
-    } catch (error) {
-      await lockClient.query("ROLLBACK").catch(() => undefined);
-
-      await interactionPromise?.catch(() => undefined);
-
-      throw error;
-    } finally {
-      lockClient.release();
-    }
-
-    // Assert
-    const eventResult = await pool.query<{
-      status: string;
-    }>(
-      `
-          SELECT "status"
-          FROM "events"
-          WHERE "id" = $1
-        `,
-      [fixture.eventId],
-    );
-
-    expect(eventResult.rows).toEqual([
-      {
-        status: "closed",
-      },
-    ]);
-
-    const attendanceResult = await pool.query<{
-      discord_user_id: string;
-      status: string;
-    }>(
-      `
+      const attendanceResult = await pool.query<{
+        discord_user_id: string;
+        status: string;
+      }>(
+        `
           SELECT
             "discord_user_id",
             "status"
           FROM "attendance_responses"
           WHERE "event_id" = $1
         `,
-      [fixture.eventId],
-    );
+        [fixture.eventId],
+      );
 
-    /*
-     * Closure committed before the attendance write.
-     *
-     * A response based on the handler's stale "open" snapshot must therefore
-     * not be inserted.
-     */
-    expect.soft(attendanceResult.rows).toEqual([]);
+      /*
+       * The newer lifecycle state owns the event. A response based on the
+       * interaction's stale open-state read must not be persisted.
+       */
+      expect.soft(attendanceResult.rows).toEqual([]);
 
-    /*
-     * The user must also not receive a false success confirmation for an
-     * attendance response which was rejected by the newer lifecycle state.
-     */
-    expect
-      .soft(interaction.editReply)
-      .toHaveBeenLastCalledWith("Attendance is no longer open for this event.");
-  });
+      expect
+        .soft(interaction.editReply)
+        .toHaveBeenLastCalledWith(
+          "Attendance is no longer open for this event.",
+        );
+    },
+  );
 
   it("records an attendance response normally while the event remains open", async () => {
     // Arrange
