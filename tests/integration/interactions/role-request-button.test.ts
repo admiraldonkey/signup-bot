@@ -99,7 +99,7 @@ describe("role-request button interactions", () => {
 
       interactionPromise = handleRoleRequestButton(interaction);
 
-      await waitForBlockedRoleRequestInsert(pool);
+      await waitForBlockedRoleRequestWrite(pool);
 
       /*
        * The group closes after the interaction's eligibility read but
@@ -289,7 +289,7 @@ describe("role-request button interactions", () => {
 
         interactionPromise = handleRoleRequestButton(interaction);
 
-        await waitForBlockedRoleRequestInsert(pool);
+        await waitForBlockedRoleRequestWrite(pool);
 
         /*
          * A newer terminal lifecycle transition wins after the handler's
@@ -431,7 +431,7 @@ describe("role-request button interactions", () => {
 
       interactionPromise = handleRoleRequestButton(interaction);
 
-      await waitForBlockedRoleRequestInsert(pool);
+      await waitForBlockedRoleRequestWrite(pool);
 
       /*
        * The member loses positive-signup eligibility after the handler's
@@ -669,7 +669,7 @@ describe("role-request button interactions", () => {
 
       interactionPromise = handleRoleRequestButton(interaction);
 
-      await waitForBlockedRoleRequestInsert(pool);
+      await waitForBlockedRoleRequestWrite(pool);
 
       /*
        * The member explicitly changes to Not attending after the handler's
@@ -796,7 +796,7 @@ describe("role-request button interactions", () => {
 
       interactionPromise = handleRoleRequestButton(interaction);
 
-      await waitForBlockedRoleRequestInsert(pool);
+      await waitForBlockedRoleRequestWrite(pool);
 
       /*
        * An administrator disables the option after the handler's initial
@@ -913,7 +913,7 @@ describe("role-request button interactions", () => {
 
       interactionPromise = handleRoleRequestButton(interaction);
 
-      await waitForBlockedRoleRequestInsert(pool);
+      await waitForBlockedRoleRequestWrite(pool);
 
       /*
        * An administrator tightens the option from open to qualified_only
@@ -1121,6 +1121,127 @@ describe("role-request button interactions", () => {
     expect(interaction.editReply).toHaveBeenLastCalledWith(
       "You do not currently hold a configured qualification role for **Captain**.",
     );
+  });
+
+  it("does not withdraw a role request after cancellation wins the event lifecycle race", async () => {
+    // Arrange
+    const fixture = await createOpenRoleRequestGroup(pool);
+
+    const requestFixture = await createExistingRoleRequest(pool, fixture);
+
+    const interaction = createRoleRequestWithdrawInteraction(
+      fixture.eventId,
+      fixture.optionId,
+    );
+
+    const lockClient = await pool.connect();
+
+    let interactionPromise: Promise<boolean> | undefined;
+
+    try {
+      await lockClient.query("BEGIN");
+
+      /*
+       * Let the withdrawal handler:
+       *
+       * - read the event as active;
+       * - resolve the role option;
+       *
+       * then stop it at the role_requests DELETE.
+       */
+      await lockClient.query(
+        `
+        LOCK TABLE "role_requests"
+        IN ACCESS EXCLUSIVE MODE
+      `,
+      );
+
+      interactionPromise = handleRoleRequestButton(interaction);
+
+      await waitForBlockedRoleRequestWrite(pool);
+
+      /*
+       * Cancellation wins after the handler's lifecycle read but before the
+       * request deletion can persist.
+       */
+      await pool.query(
+        `
+        UPDATE "events"
+        SET
+          "status" = 'cancelled',
+          "updated_at" = NOW()
+        WHERE "id" = $1
+      `,
+        [fixture.eventId],
+      );
+
+      await lockClient.query("COMMIT");
+
+      await interactionPromise;
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      await interactionPromise?.catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+    }
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+        SELECT "status"
+        FROM "events"
+        WHERE "id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toEqual([
+      {
+        status: "cancelled",
+      },
+    ]);
+
+    const requestResult = await pool.query<{
+      id: number;
+      event_role_option_id: number;
+    }>(
+      `
+        SELECT
+          "id",
+          "event_role_option_id"
+        FROM "role_requests"
+        WHERE "id" = $1
+      `,
+      [requestFixture.requestId],
+    );
+
+    /*
+     * Cancellation became authoritative before the DELETE. The stale
+     * withdrawal must therefore leave the existing event-level request
+     * untouched.
+     */
+    expect.soft(requestResult.rows).toEqual([
+      {
+        id: requestFixture.requestId,
+
+        event_role_option_id: fixture.optionId,
+      },
+    ]);
+
+    expect
+      .soft(roleRequestMessageMocks.refreshRoleRequestMessages)
+      .not.toHaveBeenCalled();
+
+    expect
+      .soft(interaction.editReply)
+      .toHaveBeenLastCalledWith(
+        "Role requests for this event can no longer be changed.",
+      );
   });
 });
 
@@ -1367,7 +1488,76 @@ function createRoleRequestButtonInteraction(
   return interaction as unknown as ButtonInteraction;
 }
 
-async function waitForBlockedRoleRequestInsert(pool: Pool): Promise<void> {
+function createRoleRequestWithdrawInteraction(
+  eventId: number,
+  optionId: number,
+): ButtonInteraction {
+  const interaction = {
+    customId: `role-request:withdraw:${eventId}:${optionId}`,
+
+    deferReply: vi.fn().mockResolvedValue(undefined),
+
+    editReply: vi.fn().mockResolvedValue(undefined),
+
+    inCachedGuild: () => true,
+
+    guildId: DISCORD_GUILD_ID,
+
+    user: {
+      id: MEMBER_USER_ID,
+    },
+
+    guild: {
+      id: DISCORD_GUILD_ID,
+    },
+  };
+
+  return interaction as unknown as ButtonInteraction;
+}
+
+async function createExistingRoleRequest(
+  pool: Pool,
+  fixture: {
+    eventId: number;
+    groupId: number;
+    optionId: number;
+  },
+): Promise<{
+  requestId: number;
+}> {
+  const result = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "role_requests" (
+          "event_id",
+          "discord_user_id",
+          "event_role_option_id",
+          "source_group_id"
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4
+        )
+        RETURNING "id"
+      `,
+    [fixture.eventId, MEMBER_USER_ID, fixture.optionId, fixture.groupId],
+  );
+
+  const requestId = result.rows[0]?.id;
+
+  if (!requestId) {
+    throw new Error("The integration-test role request was not created.");
+  }
+
+  return {
+    requestId,
+  };
+}
+
+async function waitForBlockedRoleRequestWrite(pool: Pool): Promise<void> {
   const timeoutAt = Date.now() + 3_000;
 
   while (Date.now() < timeoutAt) {
