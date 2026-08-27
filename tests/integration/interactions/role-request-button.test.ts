@@ -1,0 +1,420 @@
+import type { ButtonInteraction } from "discord.js";
+import type { Pool } from "pg";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+
+const roleRequestMessageMocks = vi.hoisted(() => ({
+  refreshRoleRequestMessages: vi.fn(),
+}));
+
+vi.mock(
+  "../../../src/role-requests/role-request-message.js",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("../../../src/role-requests/role-request-message.js")
+      >();
+
+    return {
+      ...actual,
+
+      refreshRoleRequestMessages:
+        roleRequestMessageMocks.refreshRoleRequestMessages,
+    };
+  },
+);
+
+import { handleRoleRequestButton } from "../../../src/interactions/role-request-button.js";
+import { pool as applicationPool } from "../../../src/db/client.js";
+import {
+  createIntegrationPool,
+  resetIntegrationDatabase,
+} from "../../support/integration-database.js";
+
+const DISCORD_GUILD_ID = "600000000000000001";
+
+const MEMBER_USER_ID = "600000000000000002";
+
+const ADMIN_USER_ID = "600000000000000003";
+
+const ROLE_REQUEST_CHANNEL_ID = "600000000000000004";
+
+const ROLE_REQUEST_MESSAGE_ID = "600000000000000005";
+
+describe("role-request button interactions", () => {
+  let pool: Pool;
+
+  beforeAll(() => {
+    pool = createIntegrationPool();
+  });
+
+  beforeEach(async () => {
+    await resetIntegrationDatabase(pool);
+
+    roleRequestMessageMocks.refreshRoleRequestMessages
+      .mockReset()
+      .mockResolvedValue(undefined);
+  });
+
+  afterAll(async () => {
+    await pool.end();
+    await applicationPool.end();
+  });
+
+  it("does not create a stale role request after the request group closes", async () => {
+    // Arrange
+    const fixture = await createOpenRoleRequestGroup(pool);
+
+    const interaction = createRoleRequestButtonInteraction(
+      fixture.groupId,
+      fixture.optionId,
+    );
+
+    const lockClient = await pool.connect();
+
+    let interactionPromise: Promise<boolean> | undefined;
+
+    try {
+      await lockClient.query("BEGIN");
+
+      /*
+       * Let the handler read the role-request group as open, then stop it
+       * precisely when it tries to persist the request.
+       */
+      await lockClient.query(
+        `
+          LOCK TABLE "role_requests"
+          IN ACCESS EXCLUSIVE MODE
+        `,
+      );
+
+      interactionPromise = handleRoleRequestButton(interaction);
+
+      await waitForBlockedRoleRequestInsert(pool);
+
+      /*
+       * The group closes after the interaction's eligibility read but
+       * before its request can be persisted.
+       */
+      await pool.query(
+        `
+          UPDATE "role_request_groups"
+          SET
+            "closed_at" = NOW(),
+            "updated_at" = NOW()
+          WHERE "id" = $1
+        `,
+        [fixture.groupId],
+      );
+
+      await lockClient.query("COMMIT");
+
+      await interactionPromise;
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      await interactionPromise?.catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+    }
+
+    // Assert
+    const groupResult = await pool.query<{
+      closed_at: Date | null;
+    }>(
+      `
+          SELECT "closed_at"
+          FROM "role_request_groups"
+          WHERE "id" = $1
+        `,
+      [fixture.groupId],
+    );
+
+    expect(groupResult.rows[0]?.closed_at).toBeInstanceOf(Date);
+
+    const requestResult = await pool.query<{
+      event_id: number;
+      discord_user_id: string;
+      event_role_option_id: number;
+      source_group_id: number | null;
+    }>(
+      `
+          SELECT
+            "event_id",
+            "discord_user_id",
+            "event_role_option_id",
+            "source_group_id"
+          FROM "role_requests"
+          WHERE
+            "event_id" = $1
+            AND "discord_user_id" = $2
+        `,
+      [fixture.eventId, MEMBER_USER_ID],
+    );
+
+    /*
+     * The newer closed-group state owns eligibility. The stale interaction
+     * must not create a request based on its earlier open-state snapshot.
+     */
+    expect.soft(requestResult.rows).toEqual([]);
+
+    expect
+      .soft(roleRequestMessageMocks.refreshRoleRequestMessages)
+      .not.toHaveBeenCalled();
+
+    expect
+      .soft(interaction.editReply)
+      .toHaveBeenLastCalledWith(
+        "New requests through this role-request group are closed.",
+      );
+  });
+});
+
+async function createOpenRoleRequestGroup(pool: Pool): Promise<{
+  eventId: number;
+  groupId: number;
+  optionId: number;
+}> {
+  const guildResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "discord_guilds" (
+          "discord_guild_id",
+          "name"
+        )
+        VALUES ($1, $2)
+        RETURNING "id"
+      `,
+    [DISCORD_GUILD_ID, "Role Request Interaction Test Guild"],
+  );
+
+  const guildId = guildResult.rows[0]?.id;
+
+  if (!guildId) {
+    throw new Error("The integration-test guild was not created.");
+  }
+
+  const eventTypeResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "event_types" (
+          "owner_guild_id",
+          "code",
+          "name"
+        )
+        VALUES ($1, $2, $3)
+        RETURNING "id"
+      `,
+    [guildId, "naval", "Naval Event"],
+  );
+
+  const eventTypeId = eventTypeResult.rows[0]?.id;
+
+  if (!eventTypeId) {
+    throw new Error("The integration-test event type was not created.");
+  }
+
+  const eventResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "events" (
+          "owner_guild_id",
+          "event_type_id",
+          "name",
+          "starts_at",
+          "signups_enabled",
+          "published_at",
+          "status",
+          "created_by_user_id"
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          NOW() + INTERVAL '2 hours',
+          true,
+          NOW(),
+          'open',
+          $4
+        )
+        RETURNING "id"
+      `,
+    [guildId, eventTypeId, "Role Request Race Test Event", ADMIN_USER_ID],
+  );
+
+  const eventId = eventResult.rows[0]?.id;
+
+  if (!eventId) {
+    throw new Error("The integration-test event was not created.");
+  }
+
+  const optionResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "event_role_options" (
+          "event_id",
+          "key",
+          "display_name",
+          "request_restriction",
+          "active"
+        )
+        VALUES (
+          $1,
+          'captain',
+          'Captain',
+          'open',
+          true
+        )
+        RETURNING "id"
+      `,
+    [eventId],
+  );
+
+  const optionId = optionResult.rows[0]?.id;
+
+  if (!optionId) {
+    throw new Error("The integration-test role option was not created.");
+  }
+
+  const groupResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "role_request_groups" (
+          "event_id",
+          "name",
+          "channel_id",
+          "message_id",
+          "requires_positive_signup",
+          "opens_at",
+          "closes_at",
+          "created_by_user_id"
+        )
+        VALUES (
+          $1,
+          'General Role Requests',
+          $2,
+          $3,
+          false,
+          NOW() - INTERVAL '1 hour',
+          NOW() + INTERVAL '1 hour',
+          $4
+        )
+        RETURNING "id"
+      `,
+    [eventId, ROLE_REQUEST_CHANNEL_ID, ROLE_REQUEST_MESSAGE_ID, ADMIN_USER_ID],
+  );
+
+  const groupId = groupResult.rows[0]?.id;
+
+  if (!groupId) {
+    throw new Error("The integration-test role-request group was not created.");
+  }
+
+  await pool.query(
+    `
+      INSERT INTO "role_request_group_options" (
+        "group_id",
+        "event_role_option_id",
+        "sort_order"
+      )
+      VALUES ($1, $2, 0)
+    `,
+    [groupId, optionId],
+  );
+
+  return {
+    eventId,
+    groupId,
+    optionId,
+  };
+}
+
+function createRoleRequestButtonInteraction(
+  groupId: number,
+  optionId: number,
+): ButtonInteraction {
+  const interaction = {
+    customId: `role-request:add:${groupId}:${optionId}`,
+
+    deferReply: vi.fn().mockResolvedValue(undefined),
+
+    editReply: vi.fn().mockResolvedValue(undefined),
+
+    inCachedGuild: () => true,
+
+    guildId: DISCORD_GUILD_ID,
+
+    channelId: ROLE_REQUEST_CHANNEL_ID,
+
+    message: {
+      id: ROLE_REQUEST_MESSAGE_ID,
+    },
+
+    user: {
+      id: MEMBER_USER_ID,
+    },
+
+    guild: {
+      id: DISCORD_GUILD_ID,
+    },
+
+    member: {
+      roles: {
+        cache: {
+          has: vi.fn().mockReturnValue(false),
+        },
+      },
+    },
+  };
+
+  return interaction as unknown as ButtonInteraction;
+}
+
+async function waitForBlockedRoleRequestInsert(pool: Pool): Promise<void> {
+  const timeoutAt = Date.now() + 3_000;
+
+  while (Date.now() < timeoutAt) {
+    const result = await pool.query<{
+      blocked: boolean;
+    }>(`
+        SELECT EXISTS (
+          SELECT 1
+          FROM "pg_stat_activity"
+          WHERE
+            "datname" =
+              current_database()
+            AND "state" = 'active'
+            AND "wait_event_type" =
+              'Lock'
+            AND "query" ILIKE
+              '%insert into "role_requests"%'
+        ) AS "blocked"
+      `);
+
+    if (result.rows[0]?.blocked) {
+      return;
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+
+  throw new Error(
+    "Timed out waiting for the role-request interaction to block while inserting its request.",
+  );
+}
