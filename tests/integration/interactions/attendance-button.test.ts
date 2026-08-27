@@ -522,6 +522,168 @@ describe("attendance button interactions", () => {
         "The attendance deadline for this event has passed.",
       );
   });
+
+  it("does not update an existing attendance response after closure wins the lifecycle race", async () => {
+    // Arrange
+    const fixture = await createOpenAttendanceEvent(pool);
+
+    const originalUpdatedAt = new Date(Date.now() - 10 * 60 * 1000);
+
+    await pool.query(
+      `
+      INSERT INTO "attendance_responses" (
+        "event_id",
+        "discord_user_id",
+        "source_guild_id",
+        "status",
+        "created_at",
+        "updated_at"
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        'attending',
+        $4,
+        $4
+      )
+    `,
+      [
+        fixture.eventId,
+        MEMBER_USER_ID,
+        fixture.guildDatabaseId,
+        originalUpdatedAt,
+      ],
+    );
+
+    const interaction = createAttendanceButtonInteraction(
+      fixture.eventId,
+      "tentative",
+    );
+
+    const lockClient = await pool.connect();
+
+    let interactionPromise: Promise<boolean> | undefined;
+
+    try {
+      await lockClient.query("BEGIN");
+
+      /*
+       * Let the handler perform its initial open-event read, then stop the
+       * guarded attendance statement before it can reach either INSERT or
+       * ON CONFLICT DO UPDATE.
+       */
+      await lockClient.query(
+        `
+        LOCK TABLE "attendance_responses"
+        IN ACCESS EXCLUSIVE MODE
+      `,
+      );
+
+      interactionPromise = handleAttendanceButton(interaction);
+
+      await waitForBlockedAttendanceInsert(pool);
+
+      /*
+       * Closure wins after the handler observed "open" but before its
+       * attempted change from attending -> tentative can persist.
+       */
+      await pool.query(
+        `
+        UPDATE "events"
+        SET
+          "status" = 'closed',
+          "updated_at" = NOW()
+        WHERE "id" = $1
+      `,
+        [fixture.eventId],
+      );
+
+      await lockClient.query("COMMIT");
+
+      await interactionPromise;
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      await interactionPromise?.catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+    }
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+        SELECT "status"
+        FROM "events"
+        WHERE "id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toEqual([
+      {
+        status: "closed",
+      },
+    ]);
+
+    const attendanceResult = await pool.query<{
+      discord_user_id: string;
+      source_guild_id: number | null;
+      status: string;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      `
+        SELECT
+          "discord_user_id",
+          "source_guild_id",
+          "status",
+          "created_at",
+          "updated_at"
+        FROM "attendance_responses"
+        WHERE
+          "event_id" = $1
+          AND "discord_user_id" = $2
+      `,
+      [fixture.eventId, MEMBER_USER_ID],
+    );
+
+    expect(attendanceResult.rows).toHaveLength(1);
+
+    const attendance = attendanceResult.rows[0];
+
+    /*
+     * The newer closed lifecycle state wins. The stale tentative click must
+     * not alter the response which was already persisted beforehand.
+     */
+    expect.soft(attendance).toMatchObject({
+      discord_user_id: MEMBER_USER_ID,
+
+      source_guild_id: fixture.guildDatabaseId,
+
+      status: "attending",
+    });
+
+    expect
+      .soft(attendance?.created_at.getTime())
+      .toBe(originalUpdatedAt.getTime());
+
+    expect
+      .soft(attendance?.updated_at.getTime())
+      .toBe(originalUpdatedAt.getTime());
+
+    /*
+     * Do not tell the member that the requested change to tentative
+     * succeeded when the database rejected it.
+     */
+    expect
+      .soft(interaction.editReply)
+      .toHaveBeenLastCalledWith("Attendance is no longer open for this event.");
+  });
 });
 
 async function createOpenAttendanceEvent(pool: Pool): Promise<{
