@@ -1,5 +1,5 @@
 import { type ButtonInteraction, MessageFlags } from "discord.js";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 import { attendanceResponses, events } from "../db/schema.js";
@@ -88,13 +88,33 @@ export async function handleAttendanceButton(
     (event.attendanceClosesAt && event.attendanceClosesAt <= now) ||
     event.startsAt <= now
   ) {
-    await db
+    const [closedEvent] = await db
       .update(events)
       .set({
         status: "closed",
         updatedAt: now,
       })
-      .where(and(eq(events.id, event.eventId), eq(events.status, "open")));
+      .where(and(eq(events.id, event.eventId), eq(events.status, "open")))
+      .returning({
+        id: events.id,
+      });
+
+    /*
+     * Another lifecycle transition may have won after this interaction's
+     * initial read.
+     *
+     * Only the actor which actually performed open -> closed owns the right
+     * to retire the durable close_attendance action.
+     */
+    if (!closedEvent) {
+      await interaction.editReply(
+        "Attendance is no longer open for this event.",
+      );
+
+      scheduleAttendanceRefresh(interaction.guild, event.eventId);
+
+      return true;
+    }
 
     await markAttendanceCloseCompleted(event.eventId, now);
 
@@ -107,30 +127,78 @@ export async function handleAttendanceButton(
     return true;
   }
 
-  await db
-    .insert(attendanceResponses)
-    .values({
-      eventId: event.eventId,
+  /*
+   * The earlier event lookup is useful for fast user-facing validation, but
+   * it cannot authoritatively protect this write from a concurrent lifecycle
+   * change.
+   *
+   * Couple eligibility and persistence in one PostgreSQL statement instead.
+   *
+   * FOR UPDATE makes the event row the concurrency boundary. If another
+   * transaction closes, cancels, completes or otherwise changes the event
+   * before this statement obtains the row lock, PostgreSQL re-evaluates the
+   * WHERE conditions against that newer row and the INSERT receives no
+   * source row.
+   */
+  const writeNow = new Date();
 
-      discordUserId: interaction.user.id,
+  const attendanceWrite = await db.execute(sql`
+  WITH "eligible_event" AS (
+    SELECT
+      ${events.id} AS "event_id"
+    FROM ${events}
+    WHERE
+      ${events.id} = ${event.eventId}
+      AND ${events.status} = 'open'
+      AND ${events.signupsEnabled} = true
+      AND (
+        ${events.attendanceClosesAt} IS NULL
+        OR ${events.attendanceClosesAt} > ${writeNow}
+      )
+      AND ${events.startsAt} > ${writeNow}
+    FOR UPDATE
+  )
+  INSERT INTO ${attendanceResponses} (
+    "event_id",
+    "discord_user_id",
+    "source_guild_id",
+    "status",
+    "updated_at"
+  )
+  SELECT
+    "eligible_event"."event_id",
+    ${interaction.user.id},
+    ${event.guildDatabaseId},
+    ${parsed.status},
+    ${writeNow}
+  FROM "eligible_event"
+  ON CONFLICT (
+    "event_id",
+    "discord_user_id"
+  )
+  DO UPDATE SET
+    "source_guild_id" =
+      EXCLUDED."source_guild_id",
+    "status" =
+      EXCLUDED."status",
+    "updated_at" =
+      EXCLUDED."updated_at"
+  RETURNING "event_id"
+`);
 
-      sourceGuildId: event.guildDatabaseId,
+  if (attendanceWrite.rowCount !== 1) {
+    /*
+     * Eligibility changed after the interaction's initial read.
+     *
+     * Do not claim success for an attendance response which the authoritative
+     * database write rejected.
+     */
+    await interaction.editReply("Attendance is no longer open for this event.");
 
-      status: parsed.status,
+    scheduleAttendanceRefresh(interaction.guild, event.eventId);
 
-      updatedAt: now,
-    })
-    .onConflictDoUpdate({
-      target: [attendanceResponses.eventId, attendanceResponses.discordUserId],
-
-      set: {
-        sourceGuildId: event.guildDatabaseId,
-
-        status: parsed.status,
-
-        updatedAt: now,
-      },
-    });
+    return true;
+  }
 
   await interaction.editReply(STATUS_CONFIRMATIONS[parsed.status]);
 
