@@ -522,6 +522,111 @@ describe("role-request button interactions", () => {
       .soft(interaction.editReply)
       .toHaveBeenLastCalledWith("This role request is no longer available.");
   });
+
+  it("creates a role request for a tentative member when positive signup is required", async () => {
+    // Arrange
+    const fixture = await createOpenRoleRequestGroup(pool, {
+      requiresPositiveSignup: true,
+    });
+
+    await pool.query(
+      `
+      INSERT INTO "attendance_responses" (
+        "event_id",
+        "discord_user_id",
+        "source_guild_id",
+        "status"
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        'tentative'
+      )
+    `,
+      [fixture.eventId, MEMBER_USER_ID, fixture.guildDatabaseId],
+    );
+
+    const interaction = createRoleRequestButtonInteraction(
+      fixture.groupId,
+      fixture.optionId,
+    );
+
+    // Act
+    const handled = await handleRoleRequestButton(interaction);
+
+    // Assert
+    expect(handled).toBe(true);
+
+    const attendanceResult = await pool.query<{
+      status: string;
+    }>(
+      `
+        SELECT "status"
+        FROM "attendance_responses"
+        WHERE
+          "event_id" = $1
+          AND "discord_user_id" = $2
+      `,
+      [fixture.eventId, MEMBER_USER_ID],
+    );
+
+    expect(attendanceResult.rows).toEqual([
+      {
+        status: "tentative",
+      },
+    ]);
+
+    const requestResult = await pool.query<{
+      event_id: number;
+      discord_user_id: string;
+      event_role_option_id: number;
+      source_group_id: number | null;
+    }>(
+      `
+        SELECT
+          "event_id",
+          "discord_user_id",
+          "event_role_option_id",
+          "source_group_id"
+        FROM "role_requests"
+        WHERE
+          "event_id" = $1
+          AND "discord_user_id" = $2
+          AND "event_role_option_id" = $3
+      `,
+      [fixture.eventId, MEMBER_USER_ID, fixture.optionId],
+    );
+
+    expect(requestResult.rows).toEqual([
+      {
+        event_id: fixture.eventId,
+
+        discord_user_id: MEMBER_USER_ID,
+
+        event_role_option_id: fixture.optionId,
+
+        source_group_id: fixture.groupId,
+      },
+    ]);
+
+    expect(
+      roleRequestMessageMocks.refreshRoleRequestMessages,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      roleRequestMessageMocks.refreshRoleRequestMessages,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+      fixture.eventId,
+    );
+
+    expect(interaction.editReply).toHaveBeenLastCalledWith(
+      "✅ You are now listed as willing to perform **Captain** for **Role Request Race Test Event**.",
+    );
+  });
 });
 
 async function createOpenRoleRequestGroup(
