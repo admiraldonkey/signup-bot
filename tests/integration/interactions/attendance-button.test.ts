@@ -201,10 +201,88 @@ describe("attendance button interactions", () => {
       .soft(interaction.editReply)
       .toHaveBeenLastCalledWith("Attendance is no longer open for this event.");
   });
+
+  it("records an attendance response normally while the event remains open", async () => {
+    // Arrange
+    const fixture = await createOpenAttendanceEvent(pool);
+
+    const interaction = createAttendanceButtonInteraction(
+      fixture.eventId,
+      "attending",
+    );
+
+    // Act
+    const handled = await handleAttendanceButton(interaction);
+
+    // Assert
+    expect(handled).toBe(true);
+
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+        SELECT "status"
+        FROM "events"
+        WHERE "id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toEqual([
+      {
+        status: "open",
+      },
+    ]);
+
+    const attendanceResult = await pool.query<{
+      discord_user_id: string;
+      source_guild_id: number | null;
+      status: string;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      `
+        SELECT
+          "discord_user_id",
+          "source_guild_id",
+          "status",
+          "created_at",
+          "updated_at"
+        FROM "attendance_responses"
+        WHERE
+          "event_id" = $1
+          AND "discord_user_id" = $2
+      `,
+      [fixture.eventId, MEMBER_USER_ID],
+    );
+
+    expect(attendanceResult.rows).toHaveLength(1);
+
+    expect(attendanceResult.rows[0]).toMatchObject({
+      discord_user_id: MEMBER_USER_ID,
+
+      source_guild_id: fixture.guildDatabaseId,
+
+      status: "attending",
+    });
+
+    expect(attendanceResult.rows[0]?.created_at).toBeInstanceOf(Date);
+
+    expect(attendanceResult.rows[0]?.updated_at).toBeInstanceOf(Date);
+
+    /*
+     * The normal path must still give the member the expected success
+     * confirmation once the authoritative database write succeeds.
+     */
+    expect(interaction.editReply).toHaveBeenLastCalledWith(
+      "You are marked as **attending**.",
+    );
+  });
 });
 
 async function createOpenAttendanceEvent(pool: Pool): Promise<{
   eventId: number;
+  guildDatabaseId: number;
 }> {
   const guildResult = await pool.query<{
     id: number;
@@ -321,6 +399,7 @@ async function createOpenAttendanceEvent(pool: Pool): Promise<{
 
   return {
     eventId,
+    guildDatabaseId: guildId,
   };
 }
 
