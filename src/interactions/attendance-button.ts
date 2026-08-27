@@ -88,13 +88,33 @@ export async function handleAttendanceButton(
     (event.attendanceClosesAt && event.attendanceClosesAt <= now) ||
     event.startsAt <= now
   ) {
-    await db
+    const [closedEvent] = await db
       .update(events)
       .set({
         status: "closed",
         updatedAt: now,
       })
-      .where(and(eq(events.id, event.eventId), eq(events.status, "open")));
+      .where(and(eq(events.id, event.eventId), eq(events.status, "open")))
+      .returning({
+        id: events.id,
+      });
+
+    /*
+     * Another lifecycle transition may have won after this interaction's
+     * initial read.
+     *
+     * Only the actor which actually performed open -> closed owns the right
+     * to retire the durable close_attendance action.
+     */
+    if (!closedEvent) {
+      await interaction.editReply(
+        "Attendance is no longer open for this event.",
+      );
+
+      scheduleAttendanceRefresh(interaction.guild, event.eventId);
+
+      return true;
+    }
 
     await markAttendanceCloseCompleted(event.eventId, now);
 
