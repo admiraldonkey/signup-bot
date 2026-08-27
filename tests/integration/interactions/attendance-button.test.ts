@@ -797,6 +797,126 @@ describe("attendance button interactions", () => {
       .soft(interaction.editReply)
       .toHaveBeenLastCalledWith("Attendance is no longer open for this event.");
   });
+
+  it("does not record attendance when the deadline moves into the past after the interaction's initial read", async () => {
+    // Arrange
+    const fixture = await createOpenAttendanceEvent(pool);
+
+    const interaction = createAttendanceButtonInteraction(
+      fixture.eventId,
+      "attending",
+    );
+
+    const lockClient = await pool.connect();
+
+    let interactionPromise: Promise<boolean> | undefined;
+
+    const expiredDeadline = new Date(Date.now() - 60_000);
+
+    try {
+      await lockClient.query("BEGIN");
+
+      /*
+       * The handler initially sees the fixture's future attendance deadline.
+       * Stop it at the authoritative attendance write after those early
+       * eligibility checks have passed.
+       */
+      await lockClient.query(
+        `
+        LOCK TABLE "attendance_responses"
+        IN ACCESS EXCLUSIVE MODE
+      `,
+      );
+
+      interactionPromise = handleAttendanceButton(interaction);
+
+      await waitForBlockedAttendanceInsert(pool);
+
+      /*
+       * An administrator moves the deadline into the past after the handler's
+       * initial read but before its attendance response can be persisted.
+       *
+       * The event deliberately remains open. This isolates the deadline
+       * predicate from the separate lifecycle-status protection.
+       */
+      await pool.query(
+        `
+        UPDATE "events"
+        SET
+          "attendance_closes_at" = $2,
+          "updated_at" = NOW()
+        WHERE "id" = $1
+      `,
+        [fixture.eventId, expiredDeadline],
+      );
+
+      await lockClient.query("COMMIT");
+
+      await interactionPromise;
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      await interactionPromise?.catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+    }
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+      attendance_closes_at: Date | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "attendance_closes_at"
+        FROM "events"
+        WHERE "id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toHaveLength(1);
+
+    expect.soft(eventResult.rows[0]?.status).toBe("open");
+
+    expect
+      .soft(eventResult.rows[0]?.attendance_closes_at?.getTime())
+      .toBe(expiredDeadline.getTime());
+
+    const attendanceResult = await pool.query<{
+      discord_user_id: string;
+      status: string;
+    }>(
+      `
+        SELECT
+          "discord_user_id",
+          "status"
+        FROM "attendance_responses"
+        WHERE "event_id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    /*
+     * The handler's original deadline snapshot was stale. The authoritative
+     * write must honour the newly-expired deadline and persist nothing.
+     */
+    expect.soft(attendanceResult.rows).toEqual([]);
+
+    /*
+     * The interaction must not report its requested attendance state as
+     * successfully recorded.
+     *
+     * Eligibility changed only at the guarded write, so the current fallback
+     * message is intentionally generic.
+     */
+    expect
+      .soft(interaction.editReply)
+      .toHaveBeenLastCalledWith("Attendance is no longer open for this event.");
+  });
 });
 
 async function createOpenAttendanceEvent(pool: Pool): Promise<{
