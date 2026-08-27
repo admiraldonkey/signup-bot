@@ -255,6 +255,122 @@ describe("role-request button interactions", () => {
       "✅ You are now listed as willing to perform **Captain** for **Role Request Race Test Event**.",
     );
   });
+
+  it.each(["cancelled", "completed"] as const)(
+    "does not create a stale role request after the event becomes %s",
+    async (terminalStatus) => {
+      // Arrange
+      const fixture = await createOpenRoleRequestGroup(pool);
+
+      const interaction = createRoleRequestButtonInteraction(
+        fixture.groupId,
+        fixture.optionId,
+      );
+
+      const lockClient = await pool.connect();
+
+      let interactionPromise: Promise<boolean> | undefined;
+
+      try {
+        await lockClient.query("BEGIN");
+
+        /*
+         * Let the handler complete its initial eligibility reads while the
+         * event is active, then stop the authoritative role-request write.
+         */
+        await lockClient.query(
+          `
+          LOCK TABLE "role_requests"
+          IN ACCESS EXCLUSIVE MODE
+        `,
+        );
+
+        interactionPromise = handleRoleRequestButton(interaction);
+
+        await waitForBlockedRoleRequestInsert(pool);
+
+        /*
+         * A newer terminal lifecycle transition wins after the handler's
+         * initial read but before its request can be persisted.
+         */
+        await pool.query(
+          `
+          UPDATE "events"
+          SET
+            "status" = $2,
+            "updated_at" = NOW()
+          WHERE "id" = $1
+        `,
+          [fixture.eventId, terminalStatus],
+        );
+
+        await lockClient.query("COMMIT");
+
+        await interactionPromise;
+      } catch (error) {
+        await lockClient.query("ROLLBACK").catch(() => undefined);
+
+        await interactionPromise?.catch(() => undefined);
+
+        throw error;
+      } finally {
+        lockClient.release();
+      }
+
+      // Assert
+      const eventResult = await pool.query<{
+        status: string;
+      }>(
+        `
+          SELECT "status"
+          FROM "events"
+          WHERE "id" = $1
+        `,
+        [fixture.eventId],
+      );
+
+      expect(eventResult.rows).toEqual([
+        {
+          status: terminalStatus,
+        },
+      ]);
+
+      const requestResult = await pool.query<{
+        event_id: number;
+        discord_user_id: string;
+        event_role_option_id: number;
+      }>(
+        `
+          SELECT
+            "event_id",
+            "discord_user_id",
+            "event_role_option_id"
+          FROM "role_requests"
+          WHERE
+            "event_id" = $1
+            AND "discord_user_id" = $2
+        `,
+        [fixture.eventId, MEMBER_USER_ID],
+      );
+
+      /*
+       * Cancellation/completion committed before the authoritative write.
+       * A role request based on the handler's stale active-event snapshot
+       * must therefore not be persisted.
+       */
+      expect.soft(requestResult.rows).toEqual([]);
+
+      expect
+        .soft(roleRequestMessageMocks.refreshRoleRequestMessages)
+        .not.toHaveBeenCalled();
+
+      expect
+        .soft(interaction.editReply)
+        .toHaveBeenLastCalledWith(
+          "This event is no longer accepting role requests.",
+        );
+    },
+  );
 });
 
 async function createOpenRoleRequestGroup(pool: Pool): Promise<{
