@@ -17,6 +17,25 @@ const attendanceRefreshMocks = vi.hoisted(() => ({
 vi.mock("../../../src/events/attendance-refresh.js", () => ({
   refreshAttendanceMessage: attendanceRefreshMocks.refreshAttendanceMessage,
 }));
+const organiserNotificationMocks = vi.hoisted(() => ({
+  sendOrganiserAssignmentNotification: vi.fn(),
+}));
+vi.mock(
+  "../../../src/events/organiser-notification.js",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("../../../src/events/organiser-notification.js")
+      >();
+
+    return {
+      ...actual,
+
+      sendOrganiserAssignmentNotification:
+        organiserNotificationMocks.sendOrganiserAssignmentNotification,
+    };
+  },
+);
 
 import { handleOrganiserButton } from "../../../src/interactions/organiser-button.js";
 import { pool as applicationPool } from "../../../src/db/client.js";
@@ -30,6 +49,8 @@ const DISCORD_GUILD_ID = "700000000000000001";
 const ORGANISER_USER_ID = "700000000000000002";
 
 const ADMIN_USER_ID = "700000000000000003";
+
+const BACKUP_ORGANISER_USER_ID = "700000000000000004";
 
 describe("organiser button interactions", () => {
   let pool: Pool;
@@ -47,6 +68,9 @@ describe("organiser button interactions", () => {
         ok: true,
         messageUrl: "https://discord.test/messages/attendance",
       });
+    organiserNotificationMocks.sendOrganiserAssignmentNotification
+      .mockReset()
+      .mockResolvedValue("dm");
   });
 
   afterAll(async () => {
@@ -379,11 +403,262 @@ describe("organiser button interactions", () => {
       "✅ You are confirmed as the organiser for **Organiser Interaction Race Test Event**.",
     );
   });
+
+  it("activates the backup organiser normally after the primary declines", async () => {
+    // Arrange
+    const fixture = await createActivePendingOrganiserAssignment(pool, {
+      withBackup: true,
+    });
+
+    if (!fixture.backupAssignmentId) {
+      throw new Error(
+        "Expected the organiser fixture to include a backup assignment.",
+      );
+    }
+
+    const interaction = createOrganiserResponseInteraction(
+      fixture.assignmentId,
+      "decline",
+    );
+
+    // Act
+    const handled = await handleOrganiserButton(interaction);
+
+    // Assert
+    expect(handled).toBe(true);
+
+    /*
+     * The primary has finished its assignment.
+     */
+    const primaryResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      responded_at: Date | null;
+      ended_at: Date | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "is_current",
+          "responded_at",
+          "ended_at"
+        FROM "event_organiser_assignments"
+        WHERE "id" = $1
+      `,
+      [fixture.assignmentId],
+    );
+
+    expect(primaryResult.rows).toHaveLength(1);
+
+    expect(primaryResult.rows[0]).toMatchObject({
+      status: "declined",
+      is_current: false,
+    });
+
+    expect(primaryResult.rows[0]?.responded_at).toBeInstanceOf(Date);
+
+    expect(primaryResult.rows[0]?.ended_at).toBeInstanceOf(Date);
+
+    /*
+     * The dormant backup should now be activated and awaiting its own
+     * response.
+     */
+    const backupResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      activated_at: Date | null;
+      response_deadline_at: Date | null;
+      responded_at: Date | null;
+      ended_at: Date | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "is_current",
+          "activated_at",
+          "response_deadline_at",
+          "responded_at",
+          "ended_at"
+        FROM "event_organiser_assignments"
+        WHERE "id" = $1
+      `,
+      [fixture.backupAssignmentId],
+    );
+
+    expect(backupResult.rows).toHaveLength(1);
+
+    expect(backupResult.rows[0]).toMatchObject({
+      status: "pending",
+      is_current: true,
+      responded_at: null,
+      ended_at: null,
+    });
+
+    const backupActivatedAt = backupResult.rows[0]?.activated_at;
+
+    const backupDeadline = backupResult.rows[0]?.response_deadline_at;
+
+    expect(backupActivatedAt).toBeInstanceOf(Date);
+
+    expect(backupDeadline).toBeInstanceOf(Date);
+
+    if (!backupActivatedAt || !backupDeadline) {
+      throw new Error(
+        "The activated backup assignment is missing its response timing.",
+      );
+    }
+
+    /*
+     * The fixture uses the guild default of 40 minutes for backup response.
+     */
+    expect(backupDeadline.getTime() - backupActivatedAt.getTime()).toBe(
+      40 * 60 * 1000,
+    );
+
+    /*
+     * Primary response work is retired; fresh backup response work is
+     * scheduled.
+     */
+    const actionResult = await pool.query<{
+      action_key: string;
+      status: string;
+    }>(
+      `
+        SELECT
+          "action_key",
+          "status"
+        FROM "scheduled_actions"
+        WHERE "event_id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    expect(actionResult.rows).toHaveLength(4);
+
+    expect(actionResult.rows).toEqual(
+      expect.arrayContaining([
+        {
+          action_key: `organiser_timeout:${fixture.assignmentId}`,
+          status: "cancelled",
+        },
+        {
+          action_key: `organiser_warning:${fixture.assignmentId}`,
+          status: "cancelled",
+        },
+        {
+          action_key: `organiser_timeout:${fixture.backupAssignmentId}`,
+          status: "pending",
+        },
+        {
+          action_key: `organiser_warning:${fixture.backupAssignmentId}`,
+          status: "pending",
+        },
+      ]),
+    );
+
+    /*
+     * The newly activated backup is contacted.
+     */
+    expect(
+      organiserNotificationMocks.sendOrganiserAssignmentNotification,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      organiserNotificationMocks.sendOrganiserAssignmentNotification,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assignmentId: fixture.backupAssignmentId,
+
+        eventId: fixture.eventId,
+
+        eventName: "Organiser Interaction Race Test Event",
+
+        discordUserId: BACKUP_ORGANISER_USER_ID,
+
+        slot: "backup",
+
+        eventAdminChannelId: null,
+      }),
+    );
+
+    expect(
+      attendanceRefreshMocks.refreshAttendanceMessage,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      attendanceRefreshMocks.refreshAttendanceMessage,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+      fixture.eventId,
+    );
+
+    /*
+     * The original response buttons should be removed after the primary's
+     * decline is accepted.
+     */
+    expect(interaction.message.edit).toHaveBeenCalledWith({
+      components: [],
+    });
+
+    /*
+     * Both the primary decline and automatic backup activation should be
+     * auditable.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+        SELECT
+          "action",
+          "outcome"
+        FROM "audit_logs"
+        WHERE
+          "target_id" IN (
+            $1,
+            $2
+          )
+          AND "action" IN (
+            'event.organiser.decline',
+            'event.organiser.backup.activate'
+          )
+        ORDER BY "action"
+      `,
+      [String(fixture.assignmentId), String(fixture.backupAssignmentId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "event.organiser.backup.activate",
+        outcome: "success",
+      },
+      {
+        action: "event.organiser.decline",
+        outcome: "success",
+      },
+    ]);
+
+    expect(interaction.editReply).toHaveBeenLastCalledWith(
+      [
+        "❌ You have declined the organiser assignment for **Organiser Interaction Race Test Event**.",
+        "",
+        "The backup organiser has now been contacted.",
+      ].join("\n"),
+    );
+  });
 });
 
-async function createActivePendingOrganiserAssignment(pool: Pool): Promise<{
+async function createActivePendingOrganiserAssignment(
+  pool: Pool,
+  options: {
+    withBackup?: boolean;
+  } = {},
+): Promise<{
   eventId: number;
   assignmentId: number;
+  backupAssignmentId: number | null;
 }> {
   const guildResult = await pool.query<{
     id: number;
@@ -404,6 +679,16 @@ async function createActivePendingOrganiserAssignment(pool: Pool): Promise<{
   if (!guildId) {
     throw new Error("The integration-test guild was not created.");
   }
+
+  await pool.query(
+    `
+    INSERT INTO "guild_settings" (
+      "guild_id"
+    )
+    VALUES ($1)
+  `,
+    [guildId],
+  );
 
   const eventTypeResult = await pool.query<{
     id: number;
@@ -515,6 +800,49 @@ async function createActivePendingOrganiserAssignment(pool: Pool): Promise<{
     );
   }
 
+  let backupAssignmentId: number | null = null;
+
+  if (options.withBackup) {
+    const backupResult = await pool.query<{
+      id: number;
+    }>(
+      `
+        INSERT INTO "event_organiser_assignments" (
+          "event_id",
+          "slot",
+          "discord_user_id",
+          "display_name_snapshot",
+          "status",
+          "is_current",
+          "assigned_by_user_id",
+          "activated_at",
+          "response_deadline_at"
+        )
+        VALUES (
+          $1,
+          'backup',
+          $2,
+          'Backup Organiser',
+          'pending',
+          true,
+          $3,
+          NULL,
+          NULL
+        )
+        RETURNING "id"
+      `,
+      [eventId, BACKUP_ORGANISER_USER_ID, ADMIN_USER_ID],
+    );
+
+    backupAssignmentId = backupResult.rows[0]?.id ?? null;
+
+    if (!backupAssignmentId) {
+      throw new Error(
+        "The integration-test backup organiser assignment was not created.",
+      );
+    }
+  }
+
   /*
    * These represent the response work which belongs to this still-pending
    * assignment.
@@ -553,6 +881,7 @@ async function createActivePendingOrganiserAssignment(pool: Pool): Promise<{
   return {
     eventId,
     assignmentId,
+    backupAssignmentId,
   };
 }
 
