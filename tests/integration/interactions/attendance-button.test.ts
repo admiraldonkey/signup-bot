@@ -684,6 +684,119 @@ describe("attendance button interactions", () => {
       .soft(interaction.editReply)
       .toHaveBeenLastCalledWith("Attendance is no longer open for this event.");
   });
+
+  it("does not record attendance when signups are disabled after the interaction's initial read", async () => {
+    // Arrange
+    const fixture = await createOpenAttendanceEvent(pool);
+
+    const interaction = createAttendanceButtonInteraction(
+      fixture.eventId,
+      "attending",
+    );
+
+    const lockClient = await pool.connect();
+
+    let interactionPromise: Promise<boolean> | undefined;
+
+    try {
+      await lockClient.query("BEGIN");
+
+      /*
+       * Let the handler read an open event with signups enabled, then stop it
+       * at the authoritative attendance write.
+       */
+      await lockClient.query(
+        `
+        LOCK TABLE "attendance_responses"
+        IN ACCESS EXCLUSIVE MODE
+      `,
+      );
+
+      interactionPromise = handleAttendanceButton(interaction);
+
+      await waitForBlockedAttendanceInsert(pool);
+
+      /*
+       * An administrator disables signups after the interaction's initial
+       * eligibility read but before its response can be persisted.
+       */
+      await pool.query(
+        `
+        UPDATE "events"
+        SET
+          "signups_enabled" = false,
+          "updated_at" = NOW()
+        WHERE "id" = $1
+      `,
+        [fixture.eventId],
+      );
+
+      await lockClient.query("COMMIT");
+
+      await interactionPromise;
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      await interactionPromise?.catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+    }
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+      signups_enabled: boolean;
+    }>(
+      `
+        SELECT
+          "status",
+          "signups_enabled"
+        FROM "events"
+        WHERE "id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toEqual([
+      {
+        status: "open",
+        signups_enabled: false,
+      },
+    ]);
+
+    const attendanceResult = await pool.query<{
+      discord_user_id: string;
+      status: string;
+    }>(
+      `
+        SELECT
+          "discord_user_id",
+          "status"
+        FROM "attendance_responses"
+        WHERE "event_id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    /*
+     * The event is still open, but the member is no longer eligible to submit
+     * attendance because signups were disabled before the write.
+     */
+    expect.soft(attendanceResult.rows).toEqual([]);
+
+    /*
+     * The initial read was stale, so the authoritative guarded write rejects
+     * the response rather than returning the normal success confirmation.
+     *
+     * The current guarded-write fallback uses the generic no-longer-open
+     * message for any eligibility loss detected at persistence time.
+     */
+    expect
+      .soft(interaction.editReply)
+      .toHaveBeenLastCalledWith("Attendance is no longer open for this event.");
+  });
 });
 
 async function createOpenAttendanceEvent(pool: Pool): Promise<{
