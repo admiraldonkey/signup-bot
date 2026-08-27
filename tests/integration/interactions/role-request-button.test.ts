@@ -874,6 +874,133 @@ describe("role-request button interactions", () => {
       .soft(interaction.editReply)
       .toHaveBeenLastCalledWith("This role request is no longer available.");
   });
+
+  it("does not create a role request when the request restriction changes before persistence", async () => {
+    // Arrange
+    const fixture = await createOpenRoleRequestGroup(pool);
+
+    /*
+     * The fixture starts with request_restriction = open.
+     *
+     * The test member deliberately holds no qualification roles, so they
+     * would not satisfy qualified_only if that rule had existed when the
+     * interaction began.
+     */
+    const interaction = createRoleRequestButtonInteraction(
+      fixture.groupId,
+      fixture.optionId,
+    );
+
+    const lockClient = await pool.connect();
+
+    let interactionPromise: Promise<boolean> | undefined;
+
+    try {
+      await lockClient.query("BEGIN");
+
+      /*
+       * Allow the handler to read request_restriction = open and pass the
+       * initial checks, then stop it at the authoritative role-request write.
+       */
+      await lockClient.query(
+        `
+        LOCK TABLE "role_requests"
+        IN ACCESS EXCLUSIVE MODE
+      `,
+      );
+
+      interactionPromise = handleRoleRequestButton(interaction);
+
+      await waitForBlockedRoleRequestInsert(pool);
+
+      /*
+       * An administrator tightens the option from open to qualified_only
+       * after the interaction's original rule evaluation.
+       */
+      await pool.query(
+        `
+        UPDATE "event_role_options"
+        SET
+          "request_restriction" =
+            'qualified_only',
+          "updated_at" =
+            NOW()
+        WHERE "id" = $1
+      `,
+        [fixture.optionId],
+      );
+
+      await lockClient.query("COMMIT");
+
+      await interactionPromise;
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      await interactionPromise?.catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+    }
+
+    // Assert
+    const optionResult = await pool.query<{
+      request_restriction: string;
+      active: boolean;
+    }>(
+      `
+        SELECT
+          "request_restriction",
+          "active"
+        FROM "event_role_options"
+        WHERE "id" = $1
+      `,
+      [fixture.optionId],
+    );
+
+    expect(optionResult.rows).toEqual([
+      {
+        request_restriction: "qualified_only",
+        active: true,
+      },
+    ]);
+
+    const requestResult = await pool.query<{
+      event_id: number;
+      discord_user_id: string;
+      event_role_option_id: number;
+    }>(
+      `
+        SELECT
+          "event_id",
+          "discord_user_id",
+          "event_role_option_id"
+        FROM "role_requests"
+        WHERE
+          "event_id" = $1
+          AND "discord_user_id" = $2
+      `,
+      [fixture.eventId, MEMBER_USER_ID],
+    );
+
+    /*
+     * The handler evaluated the old open rule. Once the persisted rule
+     * changes, that stale evaluation no longer authorises the request.
+     */
+    expect.soft(requestResult.rows).toEqual([]);
+
+    expect
+      .soft(roleRequestMessageMocks.refreshRoleRequestMessages)
+      .not.toHaveBeenCalled();
+
+    /*
+     * The explanatory re-read sees an active option, but the guarded write
+     * rejected it because another eligibility/configuration rule changed.
+     */
+    expect
+      .soft(interaction.editReply)
+      .toHaveBeenLastCalledWith("This role request is no longer available.");
+  });
 });
 
 async function createOpenRoleRequestGroup(
