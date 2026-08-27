@@ -1123,7 +1123,126 @@ describe("role-request button interactions", () => {
     );
   });
 
-  it("does not withdraw a role request after cancellation wins the event lifecycle race", async () => {
+  it.each(["cancelled", "completed"] as const)(
+    "does not withdraw a role request after %s wins the event lifecycle race",
+    async (terminalStatus) => {
+      // Arrange
+      const fixture = await createOpenRoleRequestGroup(pool);
+
+      const requestFixture = await createExistingRoleRequest(pool, fixture);
+
+      const interaction = createRoleRequestWithdrawInteraction(
+        fixture.eventId,
+        fixture.optionId,
+      );
+
+      const lockClient = await pool.connect();
+
+      let interactionPromise: Promise<boolean> | undefined;
+
+      try {
+        await lockClient.query("BEGIN");
+
+        /*
+         * Let the withdrawal handler read the event as mutable and resolve the
+         * role option, then stop it at the guarded role_requests DELETE.
+         */
+        await lockClient.query(
+          `
+          LOCK TABLE "role_requests"
+          IN ACCESS EXCLUSIVE MODE
+        `,
+        );
+
+        interactionPromise = handleRoleRequestButton(interaction);
+
+        await waitForBlockedRoleRequestWrite(pool);
+
+        /*
+         * A newer terminal lifecycle transition wins after the handler's
+         * initial read but before its withdrawal can persist.
+         */
+        await pool.query(
+          `
+          UPDATE "events"
+          SET
+            "status" = $2,
+            "updated_at" = NOW()
+          WHERE "id" = $1
+        `,
+          [fixture.eventId, terminalStatus],
+        );
+
+        await lockClient.query("COMMIT");
+
+        await interactionPromise;
+      } catch (error) {
+        await lockClient.query("ROLLBACK").catch(() => undefined);
+
+        await interactionPromise?.catch(() => undefined);
+
+        throw error;
+      } finally {
+        lockClient.release();
+      }
+
+      // Assert
+      const eventResult = await pool.query<{
+        status: string;
+      }>(
+        `
+          SELECT "status"
+          FROM "events"
+          WHERE "id" = $1
+        `,
+        [fixture.eventId],
+      );
+
+      expect(eventResult.rows).toEqual([
+        {
+          status: terminalStatus,
+        },
+      ]);
+
+      const requestResult = await pool.query<{
+        id: number;
+        event_role_option_id: number;
+      }>(
+        `
+          SELECT
+            "id",
+            "event_role_option_id"
+          FROM "role_requests"
+          WHERE "id" = $1
+        `,
+        [requestFixture.requestId],
+      );
+
+      /*
+       * Cancellation/completion became authoritative before the DELETE.
+       * The stale withdrawal must therefore leave the request intact.
+       */
+      expect.soft(requestResult.rows).toEqual([
+        {
+          id: requestFixture.requestId,
+
+          event_role_option_id: fixture.optionId,
+        },
+      ]);
+
+      expect
+        .soft(roleRequestMessageMocks.refreshRoleRequestMessages)
+        .not.toHaveBeenCalled();
+
+      expect
+        .soft(interaction.editReply)
+        .toHaveBeenLastCalledWith(
+          "Role requests for this event can no longer be changed.",
+        );
+    },
+  );
+
+  it("withdraws an existing role request normally while the event remains mutable", async () => {
     // Arrange
     const fixture = await createOpenRoleRequestGroup(pool);
 
@@ -1134,61 +1253,12 @@ describe("role-request button interactions", () => {
       fixture.optionId,
     );
 
-    const lockClient = await pool.connect();
-
-    let interactionPromise: Promise<boolean> | undefined;
-
-    try {
-      await lockClient.query("BEGIN");
-
-      /*
-       * Let the withdrawal handler:
-       *
-       * - read the event as active;
-       * - resolve the role option;
-       *
-       * then stop it at the role_requests DELETE.
-       */
-      await lockClient.query(
-        `
-        LOCK TABLE "role_requests"
-        IN ACCESS EXCLUSIVE MODE
-      `,
-      );
-
-      interactionPromise = handleRoleRequestButton(interaction);
-
-      await waitForBlockedRoleRequestWrite(pool);
-
-      /*
-       * Cancellation wins after the handler's lifecycle read but before the
-       * request deletion can persist.
-       */
-      await pool.query(
-        `
-        UPDATE "events"
-        SET
-          "status" = 'cancelled',
-          "updated_at" = NOW()
-        WHERE "id" = $1
-      `,
-        [fixture.eventId],
-      );
-
-      await lockClient.query("COMMIT");
-
-      await interactionPromise;
-    } catch (error) {
-      await lockClient.query("ROLLBACK").catch(() => undefined);
-
-      await interactionPromise?.catch(() => undefined);
-
-      throw error;
-    } finally {
-      lockClient.release();
-    }
+    // Act
+    const handled = await handleRoleRequestButton(interaction);
 
     // Assert
+    expect(handled).toBe(true);
+
     const eventResult = await pool.query<{
       status: string;
     }>(
@@ -1200,20 +1270,20 @@ describe("role-request button interactions", () => {
       [fixture.eventId],
     );
 
+    /*
+     * Withdrawal does not alter the event lifecycle.
+     */
     expect(eventResult.rows).toEqual([
       {
-        status: "cancelled",
+        status: "open",
       },
     ]);
 
     const requestResult = await pool.query<{
       id: number;
-      event_role_option_id: number;
     }>(
       `
-        SELECT
-          "id",
-          "event_role_option_id"
+        SELECT "id"
         FROM "role_requests"
         WHERE "id" = $1
       `,
@@ -1221,27 +1291,27 @@ describe("role-request button interactions", () => {
     );
 
     /*
-     * Cancellation became authoritative before the DELETE. The stale
-     * withdrawal must therefore leave the existing event-level request
-     * untouched.
+     * The guarded DELETE should genuinely remove the member's existing
+     * request while the event remains mutable.
      */
-    expect.soft(requestResult.rows).toEqual([
-      {
-        id: requestFixture.requestId,
+    expect(requestResult.rows).toEqual([]);
 
-        event_role_option_id: fixture.optionId,
-      },
-    ]);
+    expect(
+      roleRequestMessageMocks.refreshRoleRequestMessages,
+    ).toHaveBeenCalledTimes(1);
 
-    expect
-      .soft(roleRequestMessageMocks.refreshRoleRequestMessages)
-      .not.toHaveBeenCalled();
+    expect(
+      roleRequestMessageMocks.refreshRoleRequestMessages,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+      fixture.eventId,
+    );
 
-    expect
-      .soft(interaction.editReply)
-      .toHaveBeenLastCalledWith(
-        "Role requests for this event can no longer be changed.",
-      );
+    expect(interaction.editReply).toHaveBeenLastCalledWith(
+      "✅ Your **Captain** request for **Role Request Race Test Event** has been withdrawn.",
+    );
   });
 });
 
