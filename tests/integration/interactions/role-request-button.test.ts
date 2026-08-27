@@ -627,6 +627,142 @@ describe("role-request button interactions", () => {
       "✅ You are now listed as willing to perform **Captain** for **Role Request Race Test Event**.",
     );
   });
+
+  it("does not create a role request when the member becomes not attending before persistence", async () => {
+    // Arrange
+    const fixture = await createOpenRoleRequestGroup(pool);
+
+    /*
+     * This group does not require a positive signup, and the member initially
+     * has no attendance response. They are therefore eligible when the
+     * interaction begins.
+     */
+    const interaction = createRoleRequestButtonInteraction(
+      fixture.groupId,
+      fixture.optionId,
+    );
+
+    const lockClient = await pool.connect();
+
+    let interactionPromise: Promise<boolean> | undefined;
+
+    try {
+      await lockClient.query("BEGIN");
+
+      /*
+       * Allow the handler to:
+       *
+       * - read the group/event as eligible;
+       * - find no attendance response;
+       * - pass the initial role-request checks;
+       *
+       * then stop it at the authoritative persistence statement.
+       */
+      await lockClient.query(
+        `
+        LOCK TABLE "role_requests"
+        IN ACCESS EXCLUSIVE MODE
+      `,
+      );
+
+      interactionPromise = handleRoleRequestButton(interaction);
+
+      await waitForBlockedRoleRequestInsert(pool);
+
+      /*
+       * The member explicitly changes to Not attending after the handler's
+       * initial eligibility read but before the role request is persisted.
+       */
+      await pool.query(
+        `
+        INSERT INTO "attendance_responses" (
+          "event_id",
+          "discord_user_id",
+          "source_guild_id",
+          "status"
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          'not_attending'
+        )
+      `,
+        [fixture.eventId, MEMBER_USER_ID, fixture.guildDatabaseId],
+      );
+
+      await lockClient.query("COMMIT");
+
+      await interactionPromise;
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      await interactionPromise?.catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+    }
+
+    // Assert
+    const attendanceResult = await pool.query<{
+      status: string;
+    }>(
+      `
+        SELECT "status"
+        FROM "attendance_responses"
+        WHERE
+          "event_id" = $1
+          AND "discord_user_id" = $2
+      `,
+      [fixture.eventId, MEMBER_USER_ID],
+    );
+
+    expect(attendanceResult.rows).toEqual([
+      {
+        status: "not_attending",
+      },
+    ]);
+
+    const requestResult = await pool.query<{
+      event_id: number;
+      discord_user_id: string;
+      event_role_option_id: number;
+    }>(
+      `
+        SELECT
+          "event_id",
+          "discord_user_id",
+          "event_role_option_id"
+        FROM "role_requests"
+        WHERE
+          "event_id" = $1
+          AND "discord_user_id" = $2
+      `,
+      [fixture.eventId, MEMBER_USER_ID],
+    );
+
+    /*
+     * A group which does not require positive signup may accept someone with
+     * no response, but an explicit Not attending response is different.
+     *
+     * Once that newer state exists, the stale role-request interaction must
+     * not create a request.
+     */
+    expect.soft(requestResult.rows).toEqual([]);
+
+    expect
+      .soft(roleRequestMessageMocks.refreshRoleRequestMessages)
+      .not.toHaveBeenCalled();
+
+    /*
+     * The attendance state changed after the handler's specific early
+     * checks, so the guarded-write fallback is currently generic.
+     */
+    expect
+      .soft(interaction.editReply)
+      .toHaveBeenLastCalledWith("This role request is no longer available.");
+  });
 });
 
 async function createOpenRoleRequestGroup(
