@@ -667,22 +667,25 @@ describe("organiser button interactions", () => {
       await lockClient.query("BEGIN");
 
       /*
-       * The cover handler can still perform its initial event read while this
-       * transaction owns the organiser-assignment table.
+       * Own the event lifecycle row before the cover handler begins.
        *
-       * It will then block when checking/creating organiser assignments.
+       * Its initial ordinary event read may still observe the committed open
+       * state through MVCC, but its authoritative FOR UPDATE check must wait
+       * here.
        */
       await lockClient.query(
         `
-        LOCK TABLE
-          "event_organiser_assignments"
-        IN ACCESS EXCLUSIVE MODE
-      `,
+    SELECT "id"
+    FROM "events"
+    WHERE "id" = $1
+    FOR UPDATE
+  `,
+        [fixture.eventId],
       );
 
       interactionPromise = handleOrganiserButton(interaction);
 
-      await waitForBlockedOrganiserAssignmentRelation(pool);
+      await waitForBlockedOrganiserEventLock(pool);
 
       /*
        * Cancellation becomes authoritative after the handler has observed
@@ -1197,57 +1200,4 @@ function createOrganiserCoverInteraction(eventId: number): ButtonInteraction {
   };
 
   return interaction as unknown as ButtonInteraction;
-}
-
-async function waitForBlockedOrganiserAssignmentRelation(
-  pool: Pool,
-): Promise<void> {
-  const timeoutAt = Date.now() + 3_000;
-
-  while (Date.now() < timeoutAt) {
-    const result = await pool.query<{
-      blocked: boolean;
-    }>(`
-        SELECT EXISTS (
-          SELECT 1
-          FROM "pg_locks"
-            AS "waiting_lock"
-
-          INNER JOIN
-            "pg_stat_activity"
-              AS "activity"
-            ON
-              "activity"."pid" =
-                "waiting_lock"."pid"
-
-          WHERE
-            "activity"."datname" =
-              current_database()
-
-            AND
-              "waiting_lock"."locktype" =
-                'relation'
-
-            AND
-              "waiting_lock"."relation" =
-                'event_organiser_assignments'::regclass
-
-            AND
-              "waiting_lock"."granted" =
-                false
-        ) AS "blocked"
-      `);
-
-    if (result.rows[0]?.blocked) {
-      return;
-    }
-
-    await new Promise((resolve) => {
-      setTimeout(resolve, 20);
-    });
-  }
-
-  throw new Error(
-    "Timed out waiting for the cover interaction to block on the organiser-assignment table.",
-  );
 }

@@ -413,25 +413,136 @@ async function handleCoverClaim(
     return;
   }
 
-  const [activeAssignment] = await db
-    .select({
-      id: eventOrganiserAssignments.id,
-    })
-    .from(eventOrganiserAssignments)
-    .where(
-      and(
-        eq(eventOrganiserAssignments.eventId, event.id),
+  /*
+   * The earlier event checks provide useful fast feedback, but they may become
+   * stale before organiser state is persisted.
+   *
+   * Lock the event lifecycle row before checking or creating organiser state.
+   * This gives terminal lifecycle changes and cover claims a single ordering
+   * boundary.
+   */
+  const claimResult = await db.transaction(async (tx) => {
+    const [lockedEvent] = await tx
+      .select({
+        status: events.status,
 
-        eq(eventOrganiserAssignments.isCurrent, true),
+        startsAt: events.startsAt,
+      })
+      .from(events)
+      .where(eq(events.id, event.id))
+      .limit(1)
+      .for("update");
 
-        isNotNull(eventOrganiserAssignments.activatedAt),
+    if (
+      !lockedEvent ||
+      lockedEvent.status === "cancelled" ||
+      lockedEvent.status === "completed"
+    ) {
+      return {
+        kind: "event_inactive",
+      } as const;
+    }
 
-        inArray(eventOrganiserAssignments.status, ["pending", "confirmed"]),
-      ),
-    )
-    .limit(1);
+    /*
+     * Re-check the time after obtaining the lifecycle lock as well. The
+     * interaction may have spent time waiting for another transaction.
+     */
+    if (lockedEvent.startsAt <= new Date()) {
+      return {
+        kind: "event_started",
+      } as const;
+    }
 
-  if (activeAssignment) {
+    const [activeAssignment] = await tx
+      .select({
+        id: eventOrganiserAssignments.id,
+      })
+      .from(eventOrganiserAssignments)
+      .where(
+        and(
+          eq(eventOrganiserAssignments.eventId, event.id),
+
+          eq(eventOrganiserAssignments.isCurrent, true),
+
+          isNotNull(eventOrganiserAssignments.activatedAt),
+
+          inArray(eventOrganiserAssignments.status, ["pending", "confirmed"]),
+        ),
+      )
+      .limit(1);
+
+    if (activeAssignment) {
+      return {
+        kind: "active_assignment",
+      } as const;
+    }
+
+    const now = new Date();
+
+    const [coverAssignment] = await tx
+      .insert(eventOrganiserAssignments)
+      .values({
+        eventId: event.id,
+
+        slot: "cover",
+
+        discordUserId: interaction.user.id,
+
+        displayNameSnapshot: interaction.member.displayName,
+
+        status: "confirmed",
+
+        isCurrent: true,
+
+        assignedByUserId: interaction.user.id,
+
+        activatedAt: now,
+
+        responseDeadlineAt: null,
+
+        respondedAt: now,
+
+        updatedAt: now,
+      })
+      /*
+       * The partial unique current-cover constraint still protects two
+       * simultaneous Claim Event presses.
+       */
+      .onConflictDoNothing()
+      .returning({
+        id: eventOrganiserAssignments.id,
+      });
+
+    if (!coverAssignment) {
+      return {
+        kind: "cover_taken",
+      } as const;
+    }
+
+    return {
+      kind: "created",
+      coverAssignment,
+      now,
+    } as const;
+  });
+
+  if (claimResult.kind === "event_inactive") {
+    await interaction.editReply(
+      "This event no longer requires organiser cover.",
+    );
+
+    return;
+  }
+
+  if (claimResult.kind === "event_started") {
+    await interaction.editReply(
+      "This event has already started and can no longer be claimed through organiser cover.",
+    );
+
+    return;
+  }
+
+  if (claimResult.kind === "active_assignment") {
     await interaction.editReply(
       "This event already has an active organiser assignment.",
     );
@@ -439,49 +550,15 @@ async function handleCoverClaim(
     return;
   }
 
-  const now = new Date();
-
-  const [coverAssignment] = await db
-    .insert(eventOrganiserAssignments)
-    .values({
-      eventId: event.id,
-
-      slot: "cover",
-
-      discordUserId: interaction.user.id,
-
-      displayNameSnapshot: interaction.member.displayName,
-
-      status: "confirmed",
-
-      isCurrent: true,
-
-      assignedByUserId: interaction.user.id,
-
-      activatedAt: now,
-
-      responseDeadlineAt: null,
-
-      respondedAt: now,
-
-      updatedAt: now,
-    })
-    /*
-     * The partial unique current-cover constraint makes concurrent
-     * Claim Event presses race safely.
-     */
-    .onConflictDoNothing()
-    .returning({
-      id: eventOrganiserAssignments.id,
-    });
-
-  if (!coverAssignment) {
+  if (claimResult.kind === "cover_taken") {
     await interaction.editReply(
       "Another organiser claimed this event before your response was saved.",
     );
 
     return;
   }
+
+  const { coverAssignment, now } = claimResult;
 
   /*
    * Defensive second check for a simultaneously-created primary or
