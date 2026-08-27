@@ -393,15 +393,35 @@ async function waitForBlockedRoleRequestInsert(pool: Pool): Promise<void> {
     }>(`
         SELECT EXISTS (
           SELECT 1
-          FROM "pg_stat_activity"
+          FROM "pg_locks" AS "waiting_lock"
+
+          INNER JOIN "pg_stat_activity"
+            AS "activity"
+            ON
+              "activity"."pid" =
+                "waiting_lock"."pid"
+
           WHERE
-            "datname" =
+            "activity"."datname" =
               current_database()
-            AND "state" = 'active'
-            AND "wait_event_type" =
-              'Lock'
-            AND "query" ILIKE
-              '%insert into "role_requests"%'
+
+            /*
+             * The interaction is attempting to acquire a relation lock on
+             * role_requests, but our test's ACCESS EXCLUSIVE lock currently
+             * prevents it.
+             *
+             * Detect the actual PostgreSQL locking condition rather than
+             * depending on how the driver's SQL happens to appear in
+             * pg_stat_activity.query.
+             */
+            AND "waiting_lock"."locktype" =
+              'relation'
+
+            AND "waiting_lock"."relation" =
+              'role_requests'::regclass
+
+            AND "waiting_lock"."granted" =
+              false
         ) AS "blocked"
       `);
 
@@ -415,6 +435,6 @@ async function waitForBlockedRoleRequestInsert(pool: Pool): Promise<void> {
   }
 
   throw new Error(
-    "Timed out waiting for the role-request interaction to block while inserting its request.",
+    "Timed out waiting for the role-request interaction to block on the role_requests table.",
   );
 }
