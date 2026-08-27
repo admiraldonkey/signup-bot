@@ -158,25 +158,74 @@ async function handleAssignmentResponse(
           updatedAt: now,
         };
 
-  const [updatedAssignment] = await db
-    .update(eventOrganiserAssignments)
-    .set(updateValues)
-    .where(
-      and(
-        eq(eventOrganiserAssignments.id, assignment.id),
+  /*
+   * The initial event-state read provides useful fast feedback, but it may
+   * become stale before the organiser response is persisted.
+   *
+   * Lock the event row before changing the assignment so organiser responses
+   * and terminal event lifecycle changes have a single ordering boundary.
+   *
+   * If cancellation/completion already owns or has changed the event row,
+   * this transaction waits and then observes that newer terminal state.
+   */
+  const saveResult = await db.transaction(async (tx) => {
+    const [lockedEvent] = await tx
+      .select({
+        status: events.status,
+      })
+      .from(events)
+      .where(eq(events.id, assignment.eventId))
+      .limit(1)
+      .for("update");
 
-        eq(eventOrganiserAssignments.isCurrent, true),
+    if (
+      !lockedEvent ||
+      lockedEvent.status === "cancelled" ||
+      lockedEvent.status === "completed"
+    ) {
+      return {
+        kind: "event_inactive",
+      } as const;
+    }
 
-        eq(eventOrganiserAssignments.status, "pending"),
+    const [updatedAssignment] = await tx
+      .update(eventOrganiserAssignments)
+      .set(updateValues)
+      .where(
+        and(
+          eq(eventOrganiserAssignments.id, assignment.id),
 
-        isNotNull(eventOrganiserAssignments.activatedAt),
-      ),
-    )
-    .returning({
-      id: eventOrganiserAssignments.id,
-    });
+          eq(eventOrganiserAssignments.isCurrent, true),
 
-  if (!updatedAssignment) {
+          eq(eventOrganiserAssignments.status, "pending"),
+
+          isNotNull(eventOrganiserAssignments.activatedAt),
+        ),
+      )
+      .returning({
+        id: eventOrganiserAssignments.id,
+      });
+
+    if (!updatedAssignment) {
+      return {
+        kind: "assignment_changed",
+      } as const;
+    }
+
+    return {
+      kind: "saved",
+    } as const;
+  });
+
+  if (saveResult.kind === "event_inactive") {
+    await interaction.editReply(
+      "This event is no longer accepting organiser responses.",
+    );
+
+    return;
+  }
+
+  if (saveResult.kind === "assignment_changed") {
     await interaction.editReply(
       "This organiser assignment changed before your response could be saved. Please check the current event status.",
     );

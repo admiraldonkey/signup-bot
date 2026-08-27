@@ -71,25 +71,25 @@ describe("organiser button interactions", () => {
       await lockClient.query("BEGIN");
 
       /*
-       * The handler's initial SELECT can still observe the currently
-       * committed pending assignment while this transaction owns its row
-       * lock.
+       * Own the event lifecycle row before the organiser handler begins.
        *
-       * Its later pending -> confirmed UPDATE must wait here.
+       * The handler's initial ordinary SELECT may still read the currently
+       * committed open event through MVCC, but its authoritative FOR UPDATE
+       * lifecycle check must wait here.
        */
       await lockClient.query(
         `
-          SELECT "id"
-          FROM "event_organiser_assignments"
-          WHERE "id" = $1
-          FOR UPDATE
+        SELECT "id"
+        FROM "events"
+        WHERE "id" = $1
+        FOR UPDATE
         `,
-        [fixture.assignmentId],
+        [fixture.eventId],
       );
 
       interactionPromise = handleOrganiserButton(interaction);
 
-      await waitForBlockedOrganiserAssignmentUpdate(pool);
+      await waitForBlockedOrganiserEventLock(pool);
 
       /*
        * Cancellation becomes authoritative after the organiser handler
@@ -448,9 +448,7 @@ function createOrganiserResponseInteraction(
   return interaction as unknown as ButtonInteraction;
 }
 
-async function waitForBlockedOrganiserAssignmentUpdate(
-  pool: Pool,
-): Promise<void> {
+async function waitForBlockedOrganiserEventLock(pool: Pool): Promise<void> {
   const timeoutAt = Date.now() + 3_000;
 
   while (Date.now() < timeoutAt) {
@@ -467,7 +465,9 @@ async function waitForBlockedOrganiserAssignmentUpdate(
             AND "wait_event_type" =
               'Lock'
             AND "query" ILIKE
-              '%update "event_organiser_assignments"%'
+              '%"events"%'
+            AND "query" ILIKE
+              '%for update%'
         ) AS "blocked"
       `);
 
@@ -481,6 +481,6 @@ async function waitForBlockedOrganiserAssignmentUpdate(
   }
 
   throw new Error(
-    "Timed out waiting for the organiser response to block while updating its assignment.",
+    "Timed out waiting for the organiser response to block on the event lifecycle row.",
   );
 }
