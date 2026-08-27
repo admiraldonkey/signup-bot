@@ -426,6 +426,102 @@ describe("attendance button interactions", () => {
       .soft(interaction.editReply)
       .toHaveBeenLastCalledWith("Attendance is no longer open for this event.");
   });
+
+  it("closes overdue attendance normally when no competing lifecycle transition occurs", async () => {
+    // Arrange
+    const fixture = await createOpenAttendanceEvent(pool);
+
+    const overdueFixture = await makeAttendanceOverdueWithPendingCloseAction(
+      pool,
+      fixture.eventId,
+    );
+
+    const interaction = createAttendanceButtonInteraction(
+      fixture.eventId,
+      "attending",
+    );
+
+    // Act
+    const handled = await handleAttendanceButton(interaction);
+
+    // Assert
+    expect(handled).toBe(true);
+
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+        SELECT "status"
+        FROM "events"
+        WHERE "id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    /*
+     * With no competing lifecycle transition, this interaction legitimately
+     * owns the overdue open -> closed transition.
+     */
+    expect(eventResult.rows).toEqual([
+      {
+        status: "closed",
+      },
+    ]);
+
+    const actionResult = await pool.query<{
+      status: string;
+      completed_at: Date | null;
+      attempt_count: number;
+      locked_at: Date | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "completed_at",
+          "attempt_count",
+          "locked_at"
+        FROM "scheduled_actions"
+        WHERE "id" = $1
+      `,
+      [overdueFixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect.soft(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+      attempt_count: 0,
+      locked_at: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    /*
+     * An overdue button click closes attendance rather than recording the
+     * response which happened to trigger the deadline check.
+     */
+    const attendanceResult = await pool.query<{
+      discord_user_id: string;
+      status: string;
+    }>(
+      `
+        SELECT
+          "discord_user_id",
+          "status"
+        FROM "attendance_responses"
+        WHERE "event_id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    expect.soft(attendanceResult.rows).toEqual([]);
+
+    expect
+      .soft(interaction.editReply)
+      .toHaveBeenLastCalledWith(
+        "The attendance deadline for this event has passed.",
+      );
+  });
 });
 
 async function createOpenAttendanceEvent(pool: Pool): Promise<{
