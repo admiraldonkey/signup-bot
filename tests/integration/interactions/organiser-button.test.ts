@@ -52,6 +52,10 @@ const ADMIN_USER_ID = "700000000000000003";
 
 const BACKUP_ORGANISER_USER_ID = "700000000000000004";
 
+const COVER_ORGANISER_USER_ID = "700000000000000005";
+
+const EVENT_ORGANISER_ROLE_ID = "700000000000000006";
+
 describe("organiser button interactions", () => {
   let pool: Pool;
 
@@ -648,6 +652,146 @@ describe("organiser button interactions", () => {
       ].join("\n"),
     );
   });
+
+  it("does not create organiser cover after cancellation wins the event lifecycle race", async () => {
+    // Arrange
+    const fixture = await createCoverEligibleEvent(pool);
+
+    const interaction = createOrganiserCoverInteraction(fixture.eventId);
+
+    const lockClient = await pool.connect();
+
+    let interactionPromise: Promise<boolean> | undefined;
+
+    try {
+      await lockClient.query("BEGIN");
+
+      /*
+       * The cover handler can still perform its initial event read while this
+       * transaction owns the organiser-assignment table.
+       *
+       * It will then block when checking/creating organiser assignments.
+       */
+      await lockClient.query(
+        `
+        LOCK TABLE
+          "event_organiser_assignments"
+        IN ACCESS EXCLUSIVE MODE
+      `,
+      );
+
+      interactionPromise = handleOrganiserButton(interaction);
+
+      await waitForBlockedOrganiserAssignmentRelation(pool);
+
+      /*
+       * Cancellation becomes authoritative after the handler has observed
+       * the event as active, but before any cover assignment can be created.
+       */
+      await lockClient.query(
+        `
+        UPDATE "events"
+        SET
+          "status" = 'cancelled',
+          "updated_at" = NOW()
+        WHERE "id" = $1
+      `,
+        [fixture.eventId],
+      );
+
+      await lockClient.query("COMMIT");
+
+      await interactionPromise;
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      await interactionPromise?.catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+    }
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+        SELECT "status"
+        FROM "events"
+        WHERE "id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toEqual([
+      {
+        status: "cancelled",
+      },
+    ]);
+
+    const assignmentResult = await pool.query<{
+      slot: string;
+      discord_user_id: string;
+      status: string;
+      is_current: boolean;
+    }>(
+      `
+        SELECT
+          "slot",
+          "discord_user_id",
+          "status",
+          "is_current"
+        FROM
+          "event_organiser_assignments"
+        WHERE
+          "event_id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    /*
+     * Cancellation won before organiser state could be persisted. A stale
+     * cover interaction therefore owns nothing.
+     */
+    expect.soft(assignmentResult.rows).toEqual([]);
+
+    expect.soft(interaction.message.edit).not.toHaveBeenCalled();
+
+    expect
+      .soft(attendanceRefreshMocks.refreshAttendanceMessage)
+      .not.toHaveBeenCalled();
+
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+        SELECT
+          "action",
+          "outcome"
+        FROM "audit_logs"
+        WHERE
+          "action" =
+            'event.organiser.cover.claim'
+          AND
+          "outcome" =
+            'success'
+          AND
+          "details" ->> 'eventId' =
+            $1
+      `,
+      [String(fixture.eventId)],
+    );
+
+    expect.soft(auditResult.rows).toEqual([]);
+
+    expect
+      .soft(interaction.editReply)
+      .toHaveBeenLastCalledWith(
+        "This event no longer requires organiser cover.",
+      );
+  });
 });
 
 async function createActivePendingOrganiserAssignment(
@@ -953,5 +1097,157 @@ async function waitForBlockedOrganiserEventLock(pool: Pool): Promise<void> {
 
   throw new Error(
     "Timed out waiting for the organiser response to block on the event lifecycle row.",
+  );
+}
+
+async function createCoverEligibleEvent(pool: Pool): Promise<{
+  eventId: number;
+}> {
+  const fixture = await createActivePendingOrganiserAssignment(pool);
+
+  /*
+   * Cover is only claimable when there is no active primary/backup.
+   *
+   * Reuse the normal event fixture, then remove its organiser-response work
+   * and assignment so this event represents the cover-required state.
+   */
+  await pool.query(
+    `
+      DELETE FROM "scheduled_actions"
+      WHERE "event_id" = $1
+    `,
+    [fixture.eventId],
+  );
+
+  await pool.query(
+    `
+      DELETE FROM "event_organiser_assignments"
+      WHERE "event_id" = $1
+    `,
+    [fixture.eventId],
+  );
+
+  /*
+   * The claimant must hold the server's configured Event Organiser role.
+   */
+  await pool.query(
+    `
+      UPDATE "guild_settings"
+      SET
+        "event_organiser_role_id" = $2,
+        "updated_at" = NOW()
+      WHERE
+        "guild_id" = (
+          SELECT "owner_guild_id"
+          FROM "events"
+          WHERE "id" = $1
+        )
+    `,
+    [fixture.eventId, EVENT_ORGANISER_ROLE_ID],
+  );
+
+  return {
+    eventId: fixture.eventId,
+  };
+}
+
+function createOrganiserCoverInteraction(eventId: number): ButtonInteraction {
+  const guild = {
+    id: DISCORD_GUILD_ID,
+  } as unknown as Guild;
+
+  const interaction = {
+    customId: `organiser-cover:${eventId}`,
+
+    deferReply: vi.fn().mockResolvedValue(undefined),
+
+    editReply: vi.fn().mockResolvedValue(undefined),
+
+    inCachedGuild: () => true,
+
+    guildId: DISCORD_GUILD_ID,
+
+    guild,
+
+    user: {
+      id: COVER_ORGANISER_USER_ID,
+
+      username: "CoverOrganiser",
+    },
+
+    member: {
+      displayName: "Cover Organiser",
+
+      roles: {
+        cache: {
+          has: vi.fn((roleId: string) => roleId === EVENT_ORGANISER_ROLE_ID),
+        },
+      },
+    },
+
+    message: {
+      content: [
+        "🚨 **Event organiser cover required**",
+        "",
+        "**Organiser Interaction Race Test Event** needs cover.",
+      ].join("\n"),
+
+      edit: vi.fn().mockResolvedValue(undefined),
+    },
+  };
+
+  return interaction as unknown as ButtonInteraction;
+}
+
+async function waitForBlockedOrganiserAssignmentRelation(
+  pool: Pool,
+): Promise<void> {
+  const timeoutAt = Date.now() + 3_000;
+
+  while (Date.now() < timeoutAt) {
+    const result = await pool.query<{
+      blocked: boolean;
+    }>(`
+        SELECT EXISTS (
+          SELECT 1
+          FROM "pg_locks"
+            AS "waiting_lock"
+
+          INNER JOIN
+            "pg_stat_activity"
+              AS "activity"
+            ON
+              "activity"."pid" =
+                "waiting_lock"."pid"
+
+          WHERE
+            "activity"."datname" =
+              current_database()
+
+            AND
+              "waiting_lock"."locktype" =
+                'relation'
+
+            AND
+              "waiting_lock"."relation" =
+                'event_organiser_assignments'::regclass
+
+            AND
+              "waiting_lock"."granted" =
+                false
+        ) AS "blocked"
+      `);
+
+    if (result.rows[0]?.blocked) {
+      return;
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+
+  throw new Error(
+    "Timed out waiting for the cover interaction to block on the organiser-assignment table.",
   );
 }
