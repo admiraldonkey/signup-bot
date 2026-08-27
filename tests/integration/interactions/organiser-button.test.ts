@@ -54,99 +54,115 @@ describe("organiser button interactions", () => {
     await applicationPool.end();
   });
 
-  it("does not confirm an organiser assignment after cancellation wins the event lifecycle race", async () => {
-    // Arrange
-    const fixture = await createActivePendingOrganiserAssignment(pool);
+  it.each([
+    {
+      responseAction: "confirm",
+      terminalStatus: "cancelled",
+    },
+    {
+      responseAction: "confirm",
+      terminalStatus: "completed",
+    },
+    {
+      responseAction: "decline",
+      terminalStatus: "cancelled",
+    },
+    {
+      responseAction: "decline",
+      terminalStatus: "completed",
+    },
+  ] as const)(
+    "does not save an organiser $responseAction response after $terminalStatus wins the event lifecycle race",
+    async ({ responseAction, terminalStatus }) => {
+      // Arrange
+      const fixture = await createActivePendingOrganiserAssignment(pool);
 
-    const interaction = createOrganiserResponseInteraction(
-      fixture.assignmentId,
-      "confirm",
-    );
-
-    const lockClient = await pool.connect();
-
-    let interactionPromise: Promise<boolean> | undefined;
-
-    try {
-      await lockClient.query("BEGIN");
-
-      /*
-       * Own the event lifecycle row before the organiser handler begins.
-       *
-       * The handler's initial ordinary SELECT may still read the currently
-       * committed open event through MVCC, but its authoritative FOR UPDATE
-       * lifecycle check must wait here.
-       */
-      await lockClient.query(
-        `
-        SELECT "id"
-        FROM "events"
-        WHERE "id" = $1
-        FOR UPDATE
-        `,
-        [fixture.eventId],
+      const interaction = createOrganiserResponseInteraction(
+        fixture.assignmentId,
+        responseAction,
       );
 
-      interactionPromise = handleOrganiserButton(interaction);
+      const lockClient = await pool.connect();
 
-      await waitForBlockedOrganiserEventLock(pool);
+      let interactionPromise: Promise<boolean> | undefined;
 
-      /*
-       * Cancellation becomes authoritative after the organiser handler
-       * read the event as active but before its response is persisted.
-       *
-       * This isolates the lifecycle race itself. Other cancellation cleanup
-       * deliberately has not run yet.
-       */
-      await lockClient.query(
-        `
+      try {
+        await lockClient.query("BEGIN");
+
+        /*
+         * Own the event lifecycle row before the organiser handler begins.
+         *
+         * The handler's initial ordinary read may still observe the committed
+         * open event, but its authoritative FOR UPDATE lifecycle check must
+         * wait here.
+         */
+        await lockClient.query(
+          `
+          SELECT "id"
+          FROM "events"
+          WHERE "id" = $1
+          FOR UPDATE
+        `,
+          [fixture.eventId],
+        );
+
+        interactionPromise = handleOrganiserButton(interaction);
+
+        await waitForBlockedOrganiserEventLock(pool);
+
+        /*
+         * A terminal lifecycle transition wins after the organiser handler's
+         * initial read but before its response can be persisted.
+         */
+        await lockClient.query(
+          `
           UPDATE "events"
           SET
-            "status" = 'cancelled',
+            "status" = $2,
             "updated_at" = NOW()
           WHERE "id" = $1
         `,
-        [fixture.eventId],
-      );
+          [fixture.eventId, terminalStatus],
+        );
 
-      await lockClient.query("COMMIT");
+        await lockClient.query("COMMIT");
 
-      await interactionPromise;
-    } catch (error) {
-      await lockClient.query("ROLLBACK").catch(() => undefined);
+        await interactionPromise;
+      } catch (error) {
+        await lockClient.query("ROLLBACK").catch(() => undefined);
 
-      await interactionPromise?.catch(() => undefined);
+        await interactionPromise?.catch(() => undefined);
 
-      throw error;
-    } finally {
-      lockClient.release();
-    }
+        throw error;
+      } finally {
+        lockClient.release();
+      }
 
-    // Assert
-    const eventResult = await pool.query<{
-      status: string;
-    }>(
-      `
+      // Assert
+      const eventResult = await pool.query<{
+        status: string;
+      }>(
+        `
           SELECT "status"
           FROM "events"
           WHERE "id" = $1
         `,
-      [fixture.eventId],
-    );
+        [fixture.eventId],
+      );
 
-    expect(eventResult.rows).toEqual([
-      {
-        status: "cancelled",
-      },
-    ]);
+      expect(eventResult.rows).toEqual([
+        {
+          status: terminalStatus,
+        },
+      ]);
 
-    const assignmentResult = await pool.query<{
-      status: string;
-      is_current: boolean;
-      responded_at: Date | null;
-      ended_at: Date | null;
-    }>(
-      `
+      const assignmentResult = await pool.query<{
+        status: string;
+        is_current: boolean;
+        responded_at: Date | null;
+        ended_at: Date | null;
+      }>(
+        `
           SELECT
             "status",
             "is_current",
@@ -155,34 +171,33 @@ describe("organiser button interactions", () => {
           FROM "event_organiser_assignments"
           WHERE "id" = $1
         `,
-      [fixture.assignmentId],
-    );
+        [fixture.assignmentId],
+      );
 
-    expect(assignmentResult.rows).toHaveLength(1);
+      expect(assignmentResult.rows).toHaveLength(1);
 
-    /*
-     * Cancellation won before the organiser response was persisted.
-     *
-     * A stale confirmation must therefore leave this assignment awaiting
-     * whatever cleanup/replacement the terminal event lifecycle owns.
-     */
-    expect.soft(assignmentResult.rows[0]).toMatchObject({
-      status: "pending",
-      is_current: true,
-      responded_at: null,
-      ended_at: null,
-    });
+      /*
+       * The event lifecycle transition became authoritative first. Neither a
+       * stale confirmation nor a stale decline may mutate the assignment.
+       */
+      expect.soft(assignmentResult.rows[0]).toMatchObject({
+        status: "pending",
+        is_current: true,
+        responded_at: null,
+        ended_at: null,
+      });
 
-    /*
-     * The stale response must not retire its organiser scheduler actions.
-     * Event cancellation may subsequently cancel them itself, but this
-     * interaction no longer owns that side-effect.
-     */
-    const actionResult = await pool.query<{
-      action_key: string;
-      status: string;
-    }>(
-      `
+      /*
+       * The organiser response no longer owns these actions.
+       *
+       * Event cancellation/completion may subsequently perform its own
+       * lifecycle cleanup, but this stale interaction must not do so.
+       */
+      const actionResult = await pool.query<{
+        action_key: string;
+        status: string;
+      }>(
+        `
           SELECT
             "action_key",
             "status"
@@ -190,31 +205,38 @@ describe("organiser button interactions", () => {
           WHERE "event_id" = $1
           ORDER BY "action_key"
         `,
-      [fixture.eventId],
-    );
+        [fixture.eventId],
+      );
 
-    expect.soft(actionResult.rows).toEqual([
-      {
-        action_key: `organiser_timeout:${fixture.assignmentId}`,
-        status: "pending",
-      },
-      {
-        action_key: `organiser_warning:${fixture.assignmentId}`,
-        status: "pending",
-      },
-    ]);
+      expect.soft(actionResult.rows).toEqual([
+        {
+          action_key: `organiser_timeout:${fixture.assignmentId}`,
+          status: "pending",
+        },
+        {
+          action_key: `organiser_warning:${fixture.assignmentId}`,
+          status: "pending",
+        },
+      ]);
 
-    expect.soft(interaction.message.edit).not.toHaveBeenCalled();
+      /*
+       * No organiser-response Discord side effects should occur.
+       */
+      expect.soft(interaction.message.edit).not.toHaveBeenCalled();
 
-    expect
-      .soft(attendanceRefreshMocks.refreshAttendanceMessage)
-      .not.toHaveBeenCalled();
+      expect
+        .soft(attendanceRefreshMocks.refreshAttendanceMessage)
+        .not.toHaveBeenCalled();
 
-    const auditResult = await pool.query<{
-      action: string;
-      outcome: string;
-    }>(
-      `
+      /*
+       * Neither confirmation nor decline should be recorded as successful
+       * after the event lifecycle transition has won.
+       */
+      const auditResult = await pool.query<{
+        action: string;
+        outcome: string;
+      }>(
+        `
           SELECT
             "action",
             "outcome"
@@ -223,19 +245,139 @@ describe("organiser button interactions", () => {
             "target_type" =
               'organiser_assignment'
             AND "target_id" = $1
-            AND "action" =
-              'event.organiser.confirm'
+            AND "action" IN (
+              'event.organiser.confirm',
+              'event.organiser.decline'
+            )
         `,
+        [String(fixture.assignmentId)],
+      );
+
+      expect.soft(auditResult.rows).toEqual([]);
+
+      expect
+        .soft(interaction.editReply)
+        .toHaveBeenLastCalledWith(
+          "This event is no longer accepting organiser responses.",
+        );
+    },
+  );
+
+  it("confirms an active pending organiser assignment normally", async () => {
+    // Arrange
+    const fixture = await createActivePendingOrganiserAssignment(pool);
+
+    const interaction = createOrganiserResponseInteraction(
+      fixture.assignmentId,
+      "confirm",
+    );
+
+    // Act
+    const handled = await handleOrganiserButton(interaction);
+
+    // Assert
+    expect(handled).toBe(true);
+
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      responded_at: Date | null;
+      ended_at: Date | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "is_current",
+          "responded_at",
+          "ended_at"
+        FROM "event_organiser_assignments"
+        WHERE "id" = $1
+      `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toHaveLength(1);
+
+    expect(assignmentResult.rows[0]).toMatchObject({
+      status: "confirmed",
+      is_current: true,
+      ended_at: null,
+    });
+
+    expect(assignmentResult.rows[0]?.responded_at).toBeInstanceOf(Date);
+
+    const actionResult = await pool.query<{
+      action_key: string;
+      status: string;
+    }>(
+      `
+        SELECT
+          "action_key",
+          "status"
+        FROM "scheduled_actions"
+        WHERE "event_id" = $1
+        ORDER BY "action_key"
+      `,
+      [fixture.eventId],
+    );
+
+    expect(actionResult.rows).toEqual([
+      {
+        action_key: `organiser_timeout:${fixture.assignmentId}`,
+        status: "cancelled",
+      },
+      {
+        action_key: `organiser_warning:${fixture.assignmentId}`,
+        status: "cancelled",
+      },
+    ]);
+
+    expect(interaction.message.edit).toHaveBeenCalledWith({
+      components: [],
+    });
+
+    expect(
+      attendanceRefreshMocks.refreshAttendanceMessage,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      attendanceRefreshMocks.refreshAttendanceMessage,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+      fixture.eventId,
+    );
+
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+        SELECT
+          "action",
+          "outcome"
+        FROM "audit_logs"
+        WHERE
+          "target_type" =
+            'organiser_assignment'
+          AND "target_id" = $1
+          AND "action" =
+            'event.organiser.confirm'
+      `,
       [String(fixture.assignmentId)],
     );
 
-    expect.soft(auditResult.rows).toEqual([]);
+    expect(auditResult.rows).toEqual([
+      {
+        action: "event.organiser.confirm",
+        outcome: "success",
+      },
+    ]);
 
-    expect
-      .soft(interaction.editReply)
-      .toHaveBeenLastCalledWith(
-        "This event is no longer accepting organiser responses.",
-      );
+    expect(interaction.editReply).toHaveBeenLastCalledWith(
+      "✅ You are confirmed as the organiser for **Organiser Interaction Race Test Event**.",
+    );
   });
 });
 
