@@ -48,6 +48,8 @@ const ROLE_REQUEST_CHANNEL_ID = "600000000000000004";
 
 const ROLE_REQUEST_MESSAGE_ID = "600000000000000005";
 
+const QUALIFICATION_ROLE_ID = "600000000000000006";
+
 describe("role-request button interactions", () => {
   let pool: Pool;
 
@@ -1001,12 +1003,135 @@ describe("role-request button interactions", () => {
       .soft(interaction.editReply)
       .toHaveBeenLastCalledWith("This role request is no longer available.");
   });
+
+  it("creates a qualified-only role request when the member holds a configured qualification role", async () => {
+    // Arrange
+    const fixture = await createOpenRoleRequestGroup(pool, {
+      requestRestriction: "qualified_only",
+
+      qualificationRoleId: QUALIFICATION_ROLE_ID,
+    });
+
+    const interaction = createRoleRequestButtonInteraction(
+      fixture.groupId,
+      fixture.optionId,
+      [QUALIFICATION_ROLE_ID],
+    );
+
+    // Act
+    const handled = await handleRoleRequestButton(interaction);
+
+    // Assert
+    expect(handled).toBe(true);
+
+    const requestResult = await pool.query<{
+      event_id: number;
+      discord_user_id: string;
+      event_role_option_id: number;
+      source_group_id: number | null;
+    }>(
+      `
+        SELECT
+          "event_id",
+          "discord_user_id",
+          "event_role_option_id",
+          "source_group_id"
+        FROM "role_requests"
+        WHERE
+          "event_id" = $1
+          AND "discord_user_id" = $2
+          AND "event_role_option_id" = $3
+      `,
+      [fixture.eventId, MEMBER_USER_ID, fixture.optionId],
+    );
+
+    expect(requestResult.rows).toEqual([
+      {
+        event_id: fixture.eventId,
+
+        discord_user_id: MEMBER_USER_ID,
+
+        event_role_option_id: fixture.optionId,
+
+        source_group_id: fixture.groupId,
+      },
+    ]);
+
+    expect(
+      roleRequestMessageMocks.refreshRoleRequestMessages,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      roleRequestMessageMocks.refreshRoleRequestMessages,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+      fixture.eventId,
+    );
+
+    expect(interaction.editReply).toHaveBeenLastCalledWith(
+      "✅ You are now listed as willing to perform **Captain** for **Role Request Race Test Event**.",
+    );
+  });
+
+  it("rejects a qualified-only role request when the member lacks the configured qualification role", async () => {
+    // Arrange
+    const fixture = await createOpenRoleRequestGroup(pool, {
+      requestRestriction: "qualified_only",
+
+      qualificationRoleId: QUALIFICATION_ROLE_ID,
+    });
+
+    /*
+     * No heldRoleIds are supplied, so the member does not hold the configured
+     * Captain qualification role.
+     */
+    const interaction = createRoleRequestButtonInteraction(
+      fixture.groupId,
+      fixture.optionId,
+    );
+
+    // Act
+    const handled = await handleRoleRequestButton(interaction);
+
+    // Assert
+    expect(handled).toBe(true);
+
+    const requestResult = await pool.query<{
+      id: number;
+    }>(
+      `
+        SELECT "id"
+        FROM "role_requests"
+        WHERE
+          "event_id" = $1
+          AND "discord_user_id" = $2
+          AND "event_role_option_id" = $3
+      `,
+      [fixture.eventId, MEMBER_USER_ID, fixture.optionId],
+    );
+
+    expect(requestResult.rows).toEqual([]);
+
+    expect(
+      roleRequestMessageMocks.refreshRoleRequestMessages,
+    ).not.toHaveBeenCalled();
+
+    expect(interaction.editReply).toHaveBeenLastCalledWith(
+      "You do not currently hold a configured qualification role for **Captain**.",
+    );
+  });
 });
 
 async function createOpenRoleRequestGroup(
   pool: Pool,
   options: {
     requiresPositiveSignup?: boolean;
+
+    requestRestriction?: "open" | "qualified_only";
+
+    qualificationRoleId?: string;
   } = {},
 ): Promise<{
   eventId: number;
@@ -1105,18 +1230,38 @@ async function createOpenRoleRequestGroup(
           $1,
           'captain',
           'Captain',
-          'open',
+          $2,
           true
         )
         RETURNING "id"
       `,
-    [eventId],
+    [eventId, options.requestRestriction ?? "open"],
   );
 
   const optionId = optionResult.rows[0]?.id;
 
   if (!optionId) {
     throw new Error("The integration-test role option was not created.");
+  }
+
+  if (options.qualificationRoleId) {
+    await pool.query(
+      `
+      INSERT INTO "event_role_option_qualification_roles" (
+        "event_role_option_id",
+        "discord_role_id",
+        "role_name_snapshot",
+        "qualification_level"
+      )
+      VALUES (
+        $1,
+        $2,
+        'Captain Qualified',
+        'qualified'
+      )
+    `,
+      [optionId, options.qualificationRoleId],
+    );
   }
 
   const groupResult = await pool.query<{
@@ -1183,6 +1328,7 @@ VALUES (
 function createRoleRequestButtonInteraction(
   groupId: number,
   optionId: number,
+  heldRoleIds: string[] = [],
 ): ButtonInteraction {
   const interaction = {
     customId: `role-request:add:${groupId}:${optionId}`,
@@ -1212,7 +1358,7 @@ function createRoleRequestButtonInteraction(
     member: {
       roles: {
         cache: {
-          has: vi.fn().mockReturnValue(false),
+          has: vi.fn((roleId: string) => heldRoleIds.includes(roleId)),
         },
       },
     },
