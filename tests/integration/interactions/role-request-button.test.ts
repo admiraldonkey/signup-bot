@@ -763,6 +763,117 @@ describe("role-request button interactions", () => {
       .soft(interaction.editReply)
       .toHaveBeenLastCalledWith("This role request is no longer available.");
   });
+
+  it("does not create a role request when the role option becomes inactive before persistence", async () => {
+    // Arrange
+    const fixture = await createOpenRoleRequestGroup(pool);
+
+    const interaction = createRoleRequestButtonInteraction(
+      fixture.groupId,
+      fixture.optionId,
+    );
+
+    const lockClient = await pool.connect();
+
+    let interactionPromise: Promise<boolean> | undefined;
+
+    try {
+      await lockClient.query("BEGIN");
+
+      /*
+       * The handler initially sees an active role option and passes its
+       * ordinary eligibility checks. Stop it at the authoritative database
+       * write before the request can be persisted.
+       */
+      await lockClient.query(
+        `
+        LOCK TABLE "role_requests"
+        IN ACCESS EXCLUSIVE MODE
+      `,
+      );
+
+      interactionPromise = handleRoleRequestButton(interaction);
+
+      await waitForBlockedRoleRequestInsert(pool);
+
+      /*
+       * An administrator disables the option after the handler's initial
+       * read but before persistence.
+       */
+      await pool.query(
+        `
+        UPDATE "event_role_options"
+        SET
+          "active" = false,
+          "updated_at" = NOW()
+        WHERE "id" = $1
+      `,
+        [fixture.optionId],
+      );
+
+      await lockClient.query("COMMIT");
+
+      await interactionPromise;
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      await interactionPromise?.catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+    }
+
+    // Assert
+    const optionResult = await pool.query<{
+      active: boolean;
+    }>(
+      `
+        SELECT "active"
+        FROM "event_role_options"
+        WHERE "id" = $1
+      `,
+      [fixture.optionId],
+    );
+
+    expect(optionResult.rows).toEqual([
+      {
+        active: false,
+      },
+    ]);
+
+    const requestResult = await pool.query<{
+      event_id: number;
+      discord_user_id: string;
+      event_role_option_id: number;
+    }>(
+      `
+        SELECT
+          "event_id",
+          "discord_user_id",
+          "event_role_option_id"
+        FROM "role_requests"
+        WHERE
+          "event_id" = $1
+          AND "discord_user_id" = $2
+      `,
+      [fixture.eventId, MEMBER_USER_ID],
+    );
+
+    /*
+     * The active option observed during the initial read is stale. The
+     * authoritative guarded write must honour the newer inactive state.
+     */
+    expect.soft(requestResult.rows).toEqual([]);
+
+    expect
+      .soft(roleRequestMessageMocks.refreshRoleRequestMessages)
+      .not.toHaveBeenCalled();
+
+    expect
+      .soft(interaction.editReply)
+      .toHaveBeenLastCalledWith("This role request is no longer available.");
+  });
 });
 
 async function createOpenRoleRequestGroup(
