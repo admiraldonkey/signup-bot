@@ -704,22 +704,79 @@ async function handleWithdrawRequest(
     return;
   }
 
-  const deleted = await db
-    .delete(roleRequests)
-    .where(
-      and(
-        eq(roleRequests.eventId, event.id),
+  /*
+   * The earlier event-state check gives useful fast feedback, but it may
+   * become stale before the request is deleted.
+   *
+   * Couple event mutability and withdrawal in one PostgreSQL statement.
+   *
+   * FOR UPDATE makes the event row the ownership boundary. If cancellation
+   * or completion commits first, PostgreSQL re-evaluates the event after
+   * obtaining the lock and the DELETE receives no mutable event row.
+   */
+  const withdrawal = await db.execute(sql`
+  WITH "mutable_event" AS (
+    SELECT
+      ${events.id} AS "event_id"
 
-        eq(roleRequests.discordUserId, interaction.user.id),
+    FROM ${events}
 
-        eq(roleRequests.eventRoleOptionId, optionId),
-      ),
-    )
-    .returning({
-      id: roleRequests.id,
-    });
+    WHERE
+      ${events.id} = ${event.id}
 
-  if (deleted.length === 0) {
+      AND ${events.status}
+        NOT IN ('cancelled', 'completed')
+
+    FOR UPDATE
+  )
+
+  DELETE FROM ${roleRequests}
+
+  USING "mutable_event"
+
+  WHERE
+    ${roleRequests.eventId} =
+      "mutable_event"."event_id"
+
+    AND ${roleRequests.discordUserId} =
+      ${interaction.user.id}
+
+    AND ${roleRequests.eventRoleOptionId} =
+      ${optionId}
+
+  RETURNING ${roleRequests.id}
+`);
+
+  if (withdrawal.rowCount !== 1) {
+    /*
+     * Zero deleted rows can mean either:
+     *
+     * - the request no longer existed; or
+     * - the event became terminal after the handler's initial read.
+     *
+     * Re-read the lifecycle state only to choose the correct explanation.
+     * The guarded DELETE above remains authoritative.
+     */
+    const [freshEvent] = await db
+      .select({
+        status: events.status,
+      })
+      .from(events)
+      .where(eq(events.id, event.id))
+      .limit(1);
+
+    if (
+      !freshEvent ||
+      freshEvent.status === "cancelled" ||
+      freshEvent.status === "completed"
+    ) {
+      await interaction.editReply(
+        "Role requests for this event can no longer be changed.",
+      );
+
+      return;
+    }
+
     await interaction.editReply(
       `You were not currently requesting **${option.name}**.`,
     );
