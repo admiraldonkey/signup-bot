@@ -371,12 +371,169 @@ describe("role-request button interactions", () => {
         );
     },
   );
+
+  it("does not create a role request when positive-signup eligibility is lost before persistence", async () => {
+    // Arrange
+    const fixture = await createOpenRoleRequestGroup(pool, {
+      requiresPositiveSignup: true,
+    });
+
+    /*
+     * The member is eligible when the interaction begins.
+     */
+    await pool.query(
+      `
+      INSERT INTO "attendance_responses" (
+        "event_id",
+        "discord_user_id",
+        "source_guild_id",
+        "status"
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        'attending'
+      )
+    `,
+      [fixture.eventId, MEMBER_USER_ID, fixture.guildDatabaseId],
+    );
+
+    const interaction = createRoleRequestButtonInteraction(
+      fixture.groupId,
+      fixture.optionId,
+    );
+
+    const lockClient = await pool.connect();
+
+    let interactionPromise: Promise<boolean> | undefined;
+
+    try {
+      await lockClient.query("BEGIN");
+
+      /*
+       * Let the handler:
+       *
+       * - read the group as open;
+       * - read the member as Attending;
+       * - pass the positive-signup check;
+       *
+       * then stop it at the authoritative role-request write.
+       */
+      await lockClient.query(
+        `
+        LOCK TABLE "role_requests"
+        IN ACCESS EXCLUSIVE MODE
+      `,
+      );
+
+      interactionPromise = handleRoleRequestButton(interaction);
+
+      await waitForBlockedRoleRequestInsert(pool);
+
+      /*
+       * The member loses positive-signup eligibility after the handler's
+       * initial read but before its role request is persisted.
+       */
+      await pool.query(
+        `
+        UPDATE "attendance_responses"
+        SET
+          "status" =
+            'not_attending',
+          "updated_at" =
+            NOW()
+        WHERE
+          "event_id" = $1
+          AND "discord_user_id" = $2
+      `,
+        [fixture.eventId, MEMBER_USER_ID],
+      );
+
+      await lockClient.query("COMMIT");
+
+      await interactionPromise;
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      await interactionPromise?.catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+    }
+
+    // Assert
+    const attendanceResult = await pool.query<{
+      status: string;
+    }>(
+      `
+        SELECT "status"
+        FROM "attendance_responses"
+        WHERE
+          "event_id" = $1
+          AND "discord_user_id" = $2
+      `,
+      [fixture.eventId, MEMBER_USER_ID],
+    );
+
+    expect(attendanceResult.rows).toEqual([
+      {
+        status: "not_attending",
+      },
+    ]);
+
+    const requestResult = await pool.query<{
+      event_id: number;
+      discord_user_id: string;
+      event_role_option_id: number;
+    }>(
+      `
+        SELECT
+          "event_id",
+          "discord_user_id",
+          "event_role_option_id"
+        FROM "role_requests"
+        WHERE
+          "event_id" = $1
+          AND "discord_user_id" = $2
+      `,
+      [fixture.eventId, MEMBER_USER_ID],
+    );
+
+    /*
+     * Positive signup was lost before persistence. The stale request must
+     * therefore not survive merely because the earlier eligibility read
+     * observed Attending.
+     */
+    expect.soft(requestResult.rows).toEqual([]);
+
+    expect
+      .soft(roleRequestMessageMocks.refreshRoleRequestMessages)
+      .not.toHaveBeenCalled();
+
+    /*
+     * The guarded write currently uses a generic fallback when an
+     * attendance-based eligibility rule changes after the initial read.
+     *
+     * Most importantly, it must not return the normal success confirmation.
+     */
+    expect
+      .soft(interaction.editReply)
+      .toHaveBeenLastCalledWith("This role request is no longer available.");
+  });
 });
 
-async function createOpenRoleRequestGroup(pool: Pool): Promise<{
+async function createOpenRoleRequestGroup(
+  pool: Pool,
+  options: {
+    requiresPositiveSignup?: boolean;
+  } = {},
+): Promise<{
   eventId: number;
   groupId: number;
   optionId: number;
+  guildDatabaseId: number;
 }> {
   const guildResult = await pool.query<{
     id: number;
@@ -497,19 +654,25 @@ async function createOpenRoleRequestGroup(pool: Pool): Promise<{
           "closes_at",
           "created_by_user_id"
         )
-        VALUES (
-          $1,
-          'General Role Requests',
-          $2,
-          $3,
-          false,
-          NOW() - INTERVAL '1 hour',
-          NOW() + INTERVAL '1 hour',
-          $4
-        )
+VALUES (
+  $1,
+  'General Role Requests',
+  $2,
+  $3,
+  $4,
+  NOW() - INTERVAL '1 hour',
+  NOW() + INTERVAL '1 hour',
+  $5
+)
         RETURNING "id"
       `,
-    [eventId, ROLE_REQUEST_CHANNEL_ID, ROLE_REQUEST_MESSAGE_ID, ADMIN_USER_ID],
+    [
+      eventId,
+      ROLE_REQUEST_CHANNEL_ID,
+      ROLE_REQUEST_MESSAGE_ID,
+      options.requiresPositiveSignup ?? false,
+      ADMIN_USER_ID,
+    ],
   );
 
   const groupId = groupResult.rows[0]?.id;
@@ -534,6 +697,7 @@ async function createOpenRoleRequestGroup(pool: Pool): Promise<{
     eventId,
     groupId,
     optionId,
+    guildDatabaseId: guildId,
   };
 }
 
