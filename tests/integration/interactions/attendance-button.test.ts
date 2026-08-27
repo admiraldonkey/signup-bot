@@ -267,6 +267,165 @@ describe("attendance button interactions", () => {
       "You are marked as **attending**.",
     );
   });
+
+  it("does not complete attendance-close work when cancellation wins an overdue attendance-click race", async () => {
+    // Arrange
+    const fixture = await createOpenAttendanceEvent(pool);
+
+    const overdueFixture = await makeAttendanceOverdueWithPendingCloseAction(
+      pool,
+      fixture.eventId,
+    );
+
+    const interaction = createAttendanceButtonInteraction(
+      fixture.eventId,
+      "attending",
+    );
+
+    const lockClient = await pool.connect();
+
+    let interactionPromise: Promise<boolean> | undefined;
+
+    try {
+      await lockClient.query("BEGIN");
+
+      /*
+       * Hold the event row.
+       *
+       * The attendance handler's initial ordinary SELECT can still read the
+       * currently-committed "open" event, but its later open -> closed UPDATE
+       * will have to wait for this transaction.
+       */
+      await lockClient.query(
+        `
+        SELECT "id"
+        FROM "events"
+        WHERE "id" = $1
+        FOR UPDATE
+      `,
+        [fixture.eventId],
+      );
+
+      interactionPromise = handleAttendanceButton(interaction);
+
+      /*
+       * At this point the handler has:
+       *
+       * - read the event as open;
+       * - observed that the attendance deadline has passed; and
+       * - reached its conditional attempt to close attendance.
+       */
+      await waitForBlockedAttendanceCloseUpdate(pool);
+
+      /*
+       * Cancellation wins the lifecycle race.
+       *
+       * This deliberately represents the point after /event cancel has
+       * committed the terminal event state but before its separate scheduled-
+       * action cleanup has run.
+       */
+      await lockClient.query(
+        `
+        UPDATE "events"
+        SET
+          "status" = 'cancelled',
+          "updated_at" = NOW()
+        WHERE "id" = $1
+      `,
+        [fixture.eventId],
+      );
+
+      await lockClient.query("COMMIT");
+
+      /*
+       * The stale attendance handler may now resume. Its conditional
+       * open -> closed UPDATE should affect zero rows.
+       */
+      await interactionPromise;
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      await interactionPromise?.catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+    }
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+        SELECT "status"
+        FROM "events"
+        WHERE "id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toEqual([
+      {
+        status: "cancelled",
+      },
+    ]);
+
+    const actionResult = await pool.query<{
+      status: string;
+      completed_at: Date | null;
+      attempt_count: number;
+      locked_at: Date | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "completed_at",
+          "attempt_count",
+          "locked_at"
+        FROM "scheduled_actions"
+        WHERE "id" = $1
+      `,
+      [overdueFixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    /*
+     * The attendance interaction lost the lifecycle transition, so it no
+     * longer owns the right to retire the corresponding scheduler action.
+     *
+     * Cancellation's own cleanup may subsequently cancel this row, but the
+     * stale attendance handler must not mark it completed.
+     */
+    expect.soft(actionResult.rows[0]?.status).toBe("pending");
+
+    expect.soft(actionResult.rows[0]?.completed_at).toBeNull();
+
+    expect.soft(actionResult.rows[0]?.attempt_count).toBe(0);
+
+    expect.soft(actionResult.rows[0]?.locked_at).toBeNull();
+
+    const attendanceResult = await pool.query<{
+      discord_user_id: string;
+    }>(
+      `
+        SELECT "discord_user_id"
+        FROM "attendance_responses"
+        WHERE "event_id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    expect.soft(attendanceResult.rows).toEqual([]);
+
+    /*
+     * Cancellation is now the authoritative state. Do not report that this
+     * stale interaction successfully performed the overdue-close transition.
+     */
+    expect
+      .soft(interaction.editReply)
+      .toHaveBeenLastCalledWith("Attendance is no longer open for this event.");
+  });
 });
 
 async function createOpenAttendanceEvent(pool: Pool): Promise<{
@@ -455,5 +614,101 @@ async function waitForBlockedAttendanceInsert(pool: Pool): Promise<void> {
 
   throw new Error(
     "Timed out waiting for the attendance interaction to block while inserting its response.",
+  );
+}
+
+async function makeAttendanceOverdueWithPendingCloseAction(
+  pool: Pool,
+  eventId: number,
+): Promise<{
+  actionId: number;
+  overdueAt: Date;
+}> {
+  const overdueAt = new Date(Date.now() - 60_000);
+
+  await pool.query(
+    `
+      UPDATE "events"
+      SET
+        "attendance_closes_at" = $2,
+        "updated_at" = NOW()
+      WHERE "id" = $1
+    `,
+    [eventId, overdueAt],
+  );
+
+  const actionResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "scheduled_actions" (
+          "event_id",
+          "action_key",
+          "due_at",
+          "status",
+          "attempt_count",
+          "locked_at",
+          "completed_at"
+        )
+        VALUES (
+          $1,
+          'close_attendance',
+          $2,
+          'pending',
+          0,
+          null,
+          null
+        )
+        RETURNING "id"
+      `,
+    [eventId, overdueAt],
+  );
+
+  const actionId = actionResult.rows[0]?.id;
+
+  if (!actionId) {
+    throw new Error(
+      "The integration-test attendance-close action was not created.",
+    );
+  }
+
+  return {
+    actionId,
+    overdueAt,
+  };
+}
+
+async function waitForBlockedAttendanceCloseUpdate(pool: Pool): Promise<void> {
+  const timeoutAt = Date.now() + 3_000;
+
+  while (Date.now() < timeoutAt) {
+    const result = await pool.query<{
+      blocked: boolean;
+    }>(`
+        SELECT EXISTS (
+          SELECT 1
+          FROM "pg_stat_activity"
+          WHERE
+            "datname" =
+              current_database()
+            AND "state" = 'active'
+            AND "wait_event_type" =
+              'Lock'
+            AND "query" ILIKE
+              '%update "events"%'
+        ) AS "blocked"
+      `);
+
+    if (result.rows[0]?.blocked) {
+      return;
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+
+  throw new Error(
+    "Timed out waiting for the overdue attendance interaction to block while updating the event.",
   );
 }
