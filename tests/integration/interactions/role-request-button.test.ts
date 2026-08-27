@@ -177,6 +177,84 @@ describe("role-request button interactions", () => {
         "New requests through this role-request group are closed.",
       );
   });
+
+  it("creates a role request normally while the group and event remain eligible", async () => {
+    // Arrange
+    const fixture = await createOpenRoleRequestGroup(pool);
+
+    const interaction = createRoleRequestButtonInteraction(
+      fixture.groupId,
+      fixture.optionId,
+    );
+
+    // Act
+    const handled = await handleRoleRequestButton(interaction);
+
+    // Assert
+    expect(handled).toBe(true);
+
+    const requestResult = await pool.query<{
+      event_id: number;
+      discord_user_id: string;
+      event_role_option_id: number;
+      source_group_id: number | null;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      `
+        SELECT
+          "event_id",
+          "discord_user_id",
+          "event_role_option_id",
+          "source_group_id",
+          "created_at",
+          "updated_at"
+        FROM "role_requests"
+        WHERE
+          "event_id" = $1
+          AND "discord_user_id" = $2
+          AND "event_role_option_id" = $3
+      `,
+      [fixture.eventId, MEMBER_USER_ID, fixture.optionId],
+    );
+
+    expect(requestResult.rows).toHaveLength(1);
+
+    expect(requestResult.rows[0]).toMatchObject({
+      event_id: fixture.eventId,
+
+      discord_user_id: MEMBER_USER_ID,
+
+      event_role_option_id: fixture.optionId,
+
+      source_group_id: fixture.groupId,
+    });
+
+    expect(requestResult.rows[0]?.created_at).toBeInstanceOf(Date);
+
+    expect(requestResult.rows[0]?.updated_at).toBeInstanceOf(Date);
+
+    /*
+     * A successful write should refresh the role-request presentation and
+     * confirm the request to the member.
+     */
+    expect(
+      roleRequestMessageMocks.refreshRoleRequestMessages,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      roleRequestMessageMocks.refreshRoleRequestMessages,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+      fixture.eventId,
+    );
+
+    expect(interaction.editReply).toHaveBeenLastCalledWith(
+      "✅ You are now listed as willing to perform **Captain** for **Role Request Race Test Event**.",
+    );
+  });
 });
 
 async function createOpenRoleRequestGroup(pool: Pool): Promise<{
