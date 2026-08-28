@@ -55,9 +55,12 @@ describe("attendance message refresh and recovery", () => {
       delete: vi.fn().mockResolvedValue(undefined),
     };
 
-    const fetchMessage = vi
-      .fn()
-      .mockRejectedValue(new Error("Unknown Message"));
+    const fetchMessage = vi.fn().mockRejectedValue(
+      Object.assign(new Error("Unknown Message"), {
+        code: 10008,
+        status: 404,
+      }),
+    );
 
     const sendMessage = vi.fn().mockResolvedValue(replacementMessage);
 
