@@ -38,6 +38,7 @@ vi.mock(
 );
 
 import { handleOrganiserButton } from "../../../src/interactions/organiser-button.js";
+import { escalateAfterFailedOrganiserAssignment } from "../../../src/organisers/organiser-escalation.js";
 import { pool as applicationPool } from "../../../src/db/client.js";
 import {
   createIntegrationPool,
@@ -795,6 +796,262 @@ describe("organiser button interactions", () => {
         "This event no longer requires organiser cover.",
       );
   });
+
+  it("does not activate a stale backup after organiser cover is claimed", async () => {
+    // Arrange
+    const fixture = await createCoverEventWithDormantBackup(pool);
+
+    const interaction = createOrganiserCoverInteraction(fixture.eventId);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+    } as unknown as Guild;
+
+    const lockClient = await pool.connect();
+
+    let escalationPromise:
+      | ReturnType<typeof escalateAfterFailedOrganiserAssignment>
+      | undefined;
+
+    let escalationResult:
+      | Awaited<ReturnType<typeof escalateAfterFailedOrganiserAssignment>>
+      | undefined;
+
+    try {
+      await lockClient.query("BEGIN");
+
+      /*
+       * Hold the dormant backup row.
+       *
+       * Escalation can still:
+       *
+       * - read the event as active;
+       * - observe no active organiser;
+       * - select this dormant backup;
+       *
+       * but its activation UPDATE must wait here.
+       */
+      await lockClient.query(
+        `
+        SELECT "id"
+        FROM "event_organiser_assignments"
+        WHERE "id" = $1
+        FOR UPDATE
+      `,
+        [fixture.backupAssignmentId],
+      );
+
+      escalationPromise = escalateAfterFailedOrganiserAssignment({
+        guild,
+
+        eventId: fixture.eventId,
+
+        failedAssignmentId: fixture.failedAssignmentId,
+
+        trigger: "declined",
+      });
+
+      await waitForBlockedBackupActivation(pool);
+
+      /*
+       * Escalation has already made its now-stale "no active organiser"
+       * decision.
+       *
+       * While its backup UPDATE remains blocked, cover claims the event
+       * completely. The cover therefore wins organiser ownership before the
+       * backup activation can persist.
+       */
+      const handled = await handleOrganiserButton(interaction);
+
+      expect(handled).toBe(true);
+
+      /*
+       * Let the stale escalation continue only after cover claiming has fully
+       * completed, including its defensive conflict check.
+       */
+      await lockClient.query("COMMIT");
+
+      escalationResult = await escalationPromise;
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      await escalationPromise?.catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+    }
+
+    // Assert
+
+    /*
+     * Once cover has won, the stale backup escalation should recognise that
+     * the event has already been resolved rather than activating the backup.
+     */
+    expect.soft(escalationResult).toEqual({
+      kind: "already_resolved",
+    });
+
+    const activeAssignmentResult = await pool.query<{
+      id: number;
+      slot: string;
+      discord_user_id: string;
+      status: string;
+    }>(
+      `
+        SELECT
+          "id",
+          "slot",
+          "discord_user_id",
+          "status"
+        FROM
+          "event_organiser_assignments"
+        WHERE
+          "event_id" = $1
+
+          AND
+          "is_current" = true
+
+          AND
+          "activated_at" IS NOT NULL
+
+          AND
+          "status" IN (
+            'pending',
+            'confirmed'
+          )
+        ORDER BY "id"
+      `,
+      [fixture.eventId],
+    );
+
+    /*
+     * There must be exactly one active organiser after the race: the cover
+     * claimant which completed successfully first.
+     */
+    expect.soft(activeAssignmentResult.rows).toHaveLength(1);
+
+    expect.soft(activeAssignmentResult.rows[0]).toMatchObject({
+      slot: "cover",
+
+      discord_user_id: COVER_ORGANISER_USER_ID,
+
+      status: "confirmed",
+    });
+
+    /*
+     * The backup remains dormant.
+     */
+    const backupResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      activated_at: Date | null;
+      response_deadline_at: Date | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "is_current",
+          "activated_at",
+          "response_deadline_at"
+        FROM
+          "event_organiser_assignments"
+        WHERE "id" = $1
+      `,
+      [fixture.backupAssignmentId],
+    );
+
+    expect(backupResult.rows).toHaveLength(1);
+
+    expect.soft(backupResult.rows[0]).toEqual({
+      status: "pending",
+
+      is_current: true,
+
+      activated_at: null,
+
+      response_deadline_at: null,
+    });
+
+    /*
+     * No backup response work should have been scheduled.
+     */
+    const backupActionResult = await pool.query<{
+      action_key: string;
+      status: string;
+    }>(
+      `
+        SELECT
+          "action_key",
+          "status"
+        FROM "scheduled_actions"
+        WHERE
+          "event_id" = $1
+          AND (
+            "action_key" = $2
+            OR
+            "action_key" = $3
+          )
+        ORDER BY "action_key"
+      `,
+      [
+        fixture.eventId,
+
+        `organiser_warning:${fixture.backupAssignmentId}`,
+
+        `organiser_timeout:${fixture.backupAssignmentId}`,
+      ],
+    );
+
+    expect.soft(backupActionResult.rows).toEqual([]);
+
+    /*
+     * Cover won, so its ordinary success behaviour is still expected.
+     */
+    expect.soft(interaction.message.edit).toHaveBeenCalledTimes(1);
+
+    expect
+      .soft(interaction.editReply)
+      .toHaveBeenLastCalledWith(
+        "✅ You are now the confirmed organiser for **Organiser Interaction Race Test Event**.",
+      );
+
+    /*
+     * The stale backup path must not contact the backup organiser.
+     */
+    expect
+      .soft(organiserNotificationMocks.sendOrganiserAssignmentNotification)
+      .not.toHaveBeenCalled();
+
+    /*
+     * Only the cover claim should refresh attendance. A stale backup
+     * activation would cause an additional refresh.
+     */
+    expect
+      .soft(attendanceRefreshMocks.refreshAttendanceMessage)
+      .toHaveBeenCalledTimes(1);
+
+    const backupAuditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+        SELECT
+          "action",
+          "outcome"
+        FROM "audit_logs"
+        WHERE
+          "action" =
+            'event.organiser.backup.activate'
+
+          AND
+          "target_id" = $1
+      `,
+      [String(fixture.backupAssignmentId)],
+    );
+
+    expect.soft(backupAuditResult.rows).toEqual([]);
+  });
 });
 
 async function createActivePendingOrganiserAssignment(
@@ -1200,4 +1457,119 @@ function createOrganiserCoverInteraction(eventId: number): ButtonInteraction {
   };
 
   return interaction as unknown as ButtonInteraction;
+}
+
+async function createCoverEventWithDormantBackup(pool: Pool): Promise<{
+  eventId: number;
+  failedAssignmentId: number;
+  backupAssignmentId: number;
+}> {
+  const fixture = await createActivePendingOrganiserAssignment(pool, {
+    withBackup: true,
+  });
+
+  if (!fixture.backupAssignmentId) {
+    throw new Error(
+      "Expected the organiser fixture to include a backup assignment.",
+    );
+  }
+
+  /*
+   * Represent the point immediately after the primary has failed but before
+   * escalation activates the dormant backup.
+   */
+  await pool.query(
+    `
+      UPDATE "event_organiser_assignments"
+      SET
+        "status" = 'declined',
+        "is_current" = false,
+        "responded_at" = NOW(),
+        "ended_at" = NOW(),
+        "updated_at" = NOW()
+      WHERE "id" = $1
+    `,
+    [fixture.assignmentId],
+  );
+
+  /*
+   * Primary response actions no longer matter to this fixture. Keeping the
+   * table clear also makes any new backup actions unambiguous.
+   */
+  await pool.query(
+    `
+      DELETE FROM "scheduled_actions"
+      WHERE "event_id" = $1
+    `,
+    [fixture.eventId],
+  );
+
+  /*
+   * Make the event claimable by the cover-test member.
+   */
+  await pool.query(
+    `
+      UPDATE "guild_settings"
+      SET
+        "event_organiser_role_id" = $2,
+        "updated_at" = NOW()
+      WHERE
+        "guild_id" = (
+          SELECT "owner_guild_id"
+          FROM "events"
+          WHERE "id" = $1
+        )
+    `,
+    [fixture.eventId, EVENT_ORGANISER_ROLE_ID],
+  );
+
+  return {
+    eventId: fixture.eventId,
+
+    failedAssignmentId: fixture.assignmentId,
+
+    backupAssignmentId: fixture.backupAssignmentId,
+  };
+}
+
+async function waitForBlockedBackupActivation(pool: Pool): Promise<void> {
+  const timeoutAt = Date.now() + 3_000;
+
+  while (Date.now() < timeoutAt) {
+    const result = await pool.query<{
+      blocked: boolean;
+    }>(`
+        SELECT EXISTS (
+          SELECT 1
+          FROM "pg_stat_activity"
+          WHERE
+            "datname" =
+              current_database()
+
+            AND
+              "state" =
+                'active'
+
+            AND
+              "wait_event_type" =
+                'Lock'
+
+            AND
+              "query" ILIKE
+                '%update "event_organiser_assignments"%'
+        ) AS "blocked"
+      `);
+
+    if (result.rows[0]?.blocked) {
+      return;
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+
+  throw new Error(
+    "Timed out waiting for the backup organiser activation to block.",
+  );
 }
