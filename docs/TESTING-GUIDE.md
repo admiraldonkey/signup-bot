@@ -1,18 +1,23 @@
-# Manual Testing Guide
+# Testing Guide
 
-This document describes the recommended manual testing workflow for the Holdfast Event Bot.
+**Last updated:** 28 August 2026
+
+This document describes the recommended automated and manual testing workflow for the Holdfast Event Bot.
 
 It is intended for:
 
 - Development testing
+- Automated regression testing
 - Regression testing after substantial changes
 - Community/public-test deployments
 - Reproducing reported bugs
 - Collaborators reviewing the event lifecycle
 
-This is currently a **manual testing guide**.
+Automated tests provide repeatable coverage of domain, database, lifecycle and concurrency behaviour.
 
-An automated test suite is planned separately and should eventually complement, rather than replace, these Discord-level workflow checks.
+Manual Discord-level testing remains important for end-to-end workflows, presentation, permissions and behaviour which depends on the real Discord API.
+
+Neither approach replaces the other.
 
 For normal administrator command documentation, see [`ADMIN-GUIDE.md`](./ADMIN-GUIDE.md).
 
@@ -21,6 +26,7 @@ For implementation and design context, see:
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md)
 - [`DECISIONS.md`](./DECISIONS.md)
 - [`ROADMAP.md`](./ROADMAP.md)
+- [`CURRENT-WORK.md`](./CURRENT-WORK.md)
 
 ---
 
@@ -37,13 +43,423 @@ Where relevant, also record:
 
 These identifiers make database and audit-log investigation substantially easier.
 
-Whenever possible, test using:
+Whenever possible, manual testing should use:
 
 - A dedicated development Discord server
 - A development Discord bot/application
 - A development PostgreSQL database
 
 Avoid using production/community data for destructive development testing.
+
+Automated integration tests must use the dedicated integration-test database environment and must never be pointed at a production or community database.
+
+---
+
+# Automated Testing
+
+The repository includes automated unit and PostgreSQL integration tests.
+
+The current automated-testing stack uses:
+
+- Vitest
+- TypeScript
+- PostgreSQL
+- Testcontainers
+- Docker for the disposable PostgreSQL integration environment
+- V8 coverage through `@vitest/coverage-v8`
+
+Automated testing is intended to cover behaviour which can be reproduced deterministically without relying on the live Discord service.
+
+This is particularly valuable for:
+
+- Domain rules
+- Database persistence
+- Event lifecycle transitions
+- Scheduler behaviour
+- Idempotency
+- Retry behaviour
+- Attendance eligibility
+- Role-request eligibility
+- Organiser assignment/escalation
+- Concurrency and stale-state races
+
+Real Discord/network side effects may be mocked where appropriate while PostgreSQL state remains real.
+
+---
+
+# Automated Test Commands
+
+The main test commands are:
+
+```text
+npm run test:unit
+npm run test:integration
+npm run test:coverage
+npm run typecheck
+npm run typecheck:test
+```
+
+Use:
+
+```text
+npm run test:unit
+```
+
+for fast unit tests which do not require PostgreSQL.
+
+Use:
+
+```text
+npm run test:integration
+```
+
+for PostgreSQL-backed integration tests.
+
+Use:
+
+```text
+npm run typecheck
+```
+
+for production TypeScript checking.
+
+Use:
+
+```text
+npm run typecheck:test
+```
+
+for test TypeScript checking.
+
+These checks are deliberately separate so test-specific TypeScript configuration does not weaken or obscure production checking.
+
+---
+
+# Unit Tests
+
+Unit tests should be preferred for behaviour which:
+
+- Is deterministic
+- Does not require PostgreSQL
+- Does not depend on Discord state
+- Can be tested through a small input/output boundary
+
+Examples include:
+
+- Timezone utilities
+- Pure date/time calculations
+- Formatting helpers
+- Small domain transformations
+
+Do not involve PostgreSQL merely to make a test look more realistic when the behaviour is genuinely isolated.
+
+---
+
+# PostgreSQL Integration Tests
+
+Integration tests should be preferred where behaviour depends on:
+
+- Real PostgreSQL constraints
+- Transactions
+- Conditional updates
+- `ON CONFLICT`
+- Row locking
+- Scheduler persistence
+- Multiple related database tables
+- Lifecycle ownership
+- Concurrency behaviour
+
+The integration suite uses a disposable PostgreSQL instance through Testcontainers.
+
+The integration database is reset between tests so individual tests should not depend on data created by earlier tests.
+
+Tests should create only the domain state they actually require.
+
+---
+
+# Integration Database Safety
+
+The integration test harness includes safeguards intended to prevent accidental execution against a real application database.
+
+Do not bypass these guards merely to make a local test run.
+
+Integration tests should operate only against the disposable Testcontainers PostgreSQL environment.
+
+If the integration suite refuses to run because it considers the database unsafe, investigate the environment/configuration instead of weakening the protection.
+
+The database is authoritative during integration tests.
+
+Mocks should not replace PostgreSQL behaviour when the behaviour under test is specifically about persistence, transactions, constraints or concurrency.
+
+---
+
+# Regression-First Bug Fixing
+
+When a concrete production bug or reliability problem can be reproduced automatically, prefer this workflow:
+
+```text
+Reproduce bug
+    |
+    v
+Write regression test
+    |
+    v
+Confirm test fails for the expected reason
+    |
+    v
+Commit failing regression
+    |
+    v
+Implement production fix
+    |
+    v
+Confirm regression becomes green
+    |
+    v
+Run related tests
+    |
+    v
+Run full test/typecheck suite
+```
+
+The failing regression should normally be committed separately from the production fix.
+
+This preserves evidence that:
+
+- The test genuinely reproduced the bug
+- The production change genuinely fixed it
+- The test was not written only after the implementation already behaved correctly
+
+Do not weaken a regression test merely because production currently fails it.
+
+First confirm that the failure represents the intended bug.
+
+---
+
+# Concurrency Regression Tests
+
+Lifecycle-sensitive code frequently involves stale reads or competing database operations.
+
+Do not test concurrency by relying primarily on arbitrary delays such as:
+
+```text
+sleep 100ms
+```
+
+Timing-dependent tests are fragile and may pass or fail depending on machine load.
+
+Prefer deterministic PostgreSQL barriers.
+
+Useful techniques include:
+
+- `SELECT ... FOR UPDATE`
+- Explicit transactions
+- Relation locks
+- Inspecting PostgreSQL lock state
+- Blocking a specific authoritative write
+- Releasing that write only after the competing operation has completed
+
+A useful race test usually establishes an ordering such as:
+
+```text
+Handler reads old state
+        |
+        v
+Handler reaches authoritative write
+        |
+        v
+BLOCKED
+        |
+        v
+Competing operation commits newer state
+        |
+        v
+Release blocked handler
+        |
+        v
+Handler must respect newer state
+```
+
+The test should assert both:
+
+1. The correct final database state
+2. The absence of stale success side effects
+
+Where appropriate, also verify:
+
+- No stale audit record
+- No stale scheduler mutation
+- No Discord refresh
+- No success response
+- No duplicate assignment/message/request
+
+---
+
+# Database Ownership Boundaries
+
+For lifecycle-sensitive operations, an early read is useful for fast validation but should not automatically be treated as authoritative for a later write.
+
+Where the implementation uses a database row as an ownership/concurrency boundary, tests should verify that competing operations respect that ordering.
+
+A common pattern is:
+
+```text
+Initial read
+    |
+    v
+Acquire authoritative row lock
+    |
+    v
+Re-check current state
+    |
+    +---- valid
+    |       |
+    |       v
+    |    persist
+    |
+    +---- stale
+            |
+            v
+         reject
+```
+
+Current organiser ownership flows, for example, use the event row as a shared ordering boundary where appropriate.
+
+Tests should validate the domain guarantee rather than merely the SQL syntax used to implement it.
+
+---
+
+# Positive Companion Tests
+
+After fixing a regression, add or retain a positive companion test where useful.
+
+A race fix should not accidentally make the legitimate workflow impossible.
+
+Examples:
+
+```text
+Cancellation wins race
+    -> stale write rejected
+
+Normal active event
+    -> legitimate write succeeds
+```
+
+or:
+
+```text
+Attendance eligibility changes
+    -> stale role request rejected
+
+Eligible member remains Tentative
+    -> role request succeeds
+```
+
+Positive controls are especially important after adding:
+
+- Conditional writes
+- Transactions
+- Locks
+- Additional eligibility predicates
+- Scheduler fences
+
+---
+
+# Mocking Guidelines
+
+Mocks are appropriate for boundaries which are not the subject of the test.
+
+Typical examples include:
+
+- Discord message edits
+- Discord message sends
+- Organiser DMs
+- Attendance-message refresh calls
+- Other external Discord interactions
+
+Prefer real PostgreSQL state for:
+
+- Events
+- Attendance responses
+- Role requests
+- Organiser assignments
+- Scheduled actions
+- Audit logs
+- Transaction/concurrency behaviour
+
+A test for database correctness should not succeed merely because a mocked repository or service was instructed to return the desired answer.
+
+---
+
+# Targeted Test Workflow
+
+During development, run the smallest relevant test first.
+
+Example:
+
+```text
+npm run typecheck:test
+npm run test:integration -- tests/integration/interactions/organiser-button.test.ts
+```
+
+This provides faster feedback while developing a focused fix.
+
+Once the relevant tests pass, run the full verification set:
+
+```text
+npm run test:unit
+npm run test:integration
+npm run typecheck
+npm run typecheck:test
+```
+
+Before opening a pull request, the full relevant suite should be green.
+
+---
+
+# Test Commits and Pull Requests
+
+For a known regression, the preferred commit sequence is:
+
+```text
+test: capture <bug>
+fix: <production correction>
+test: <positive/additional coverage>
+```
+
+Exact commit wording is not important, but the history should make the reasoning understandable.
+
+A pull request should normally group one coherent reliability/domain area rather than creating a separate PR for every individual test.
+
+Examples of coherent scopes include:
+
+- Scheduler retry reliability
+- Attendance interaction races
+- Role-request interaction races
+- Organiser interaction/escalation races
+- Discord message recovery
+
+Avoid combining unrelated feature work merely because all changes involve tests.
+
+---
+
+# Manual Discord Testing
+
+Automated tests do not replace end-to-end Discord testing.
+
+Manual testing remains particularly useful for:
+
+- Slash-command registration
+- Discord permissions
+- Message presentation
+- Button behaviour
+- Channel visibility
+- Role mentions
+- DM delivery/fallback
+- Real Discord API failures
+- Overall administrator/member workflow
+
+The following sections describe the recommended manual workflow.
 
 ---
 
@@ -215,6 +631,7 @@ For a normal signup-enabled event:
    - Attending
    - Tentative
    - Not Attending
+
 3. Run:
 
 ```text
@@ -1011,7 +1428,10 @@ Examples:
 Confirm:
 
 - Database state remains intact
-- `/event refresh` reports the missing linked message rather than corrupting event state
+- Current refresh/recovery behaviour matches the documented implementation
+- The event lifecycle itself is not corrupted merely because its Discord presentation message is missing
+
+Automatic recovery/replacement is an active reliability area and should be covered by automated regression tests as it is implemented.
 
 ## Delete a role-request message
 
@@ -1058,7 +1478,7 @@ The purpose is to verify that important scheduling is genuinely database-backed 
 
 Lifecycle actions should be safe if another path reaches the desired state first.
 
-Useful tests include:
+Useful manual scenarios include:
 
 ```text
 Manual publish just before automatic publish
@@ -1070,11 +1490,83 @@ Organiser confirms near timeout
 Cover claim races another claim
 ```
 
+Many scheduler and interaction races are now also covered through deterministic PostgreSQL integration tests.
+
+When a race can be reproduced reliably in the automated integration suite, prefer retaining it there as permanent regression coverage rather than depending only on manual timing.
+
 The desired result is one coherent final state, not duplicate actions or conflicting records.
 
 ---
 
-# Recommended Regression Checklist
+# Automated Reliability Coverage
+
+The automated suite currently includes substantial regression coverage around:
+
+- Event lifecycle stale writes
+- Cancellation ownership
+- Attendance close/reopen races
+- Event edit/cancel races
+- Automatic completion races
+- Scheduler action claiming
+- Stale scheduler locks
+- Retry backoff
+- Attempt exhaustion
+- Stale success/failure attempts
+- Attendance interaction lifecycle races
+- Attendance eligibility changes
+- Role-request group closure
+- Role-request event lifecycle races
+- Role-request attendance eligibility
+- Role-option configuration changes
+- Role-request withdrawal lifecycle races
+- Organiser confirmation/decline lifecycle races
+- Normal organiser confirmation
+- Primary decline and backup activation
+- Cover claim lifecycle races
+- Cover vs backup ownership races
+- Stale general-cover escalation
+
+This list should remain representative rather than becoming an exhaustive chronological changelog.
+
+When a new reliability-sensitive domain is added, include enough automated coverage to establish both:
+
+- Legitimate success behaviour
+- Stale/conflicting behaviour
+
+---
+
+# Recommended Automated Verification Before a PR
+
+For normal TypeScript/database work, run:
+
+```text
+npm run test:unit
+npm run test:integration
+npm run typecheck
+npm run typecheck:test
+```
+
+Where the change is focused, run the relevant test file first for faster development feedback.
+
+For example:
+
+```text
+npm run test:integration -- tests/integration/interactions/organiser-button.test.ts
+```
+
+Use:
+
+```text
+npm run test:coverage
+```
+
+when reviewing coverage or when a change specifically warrants coverage inspection.
+
+A documentation-only change does not normally require the full PostgreSQL integration suite unless project/CI policy requires it.
+
+---
+
+# Recommended Manual Regression Checklist
 
 After a substantial deployment, at minimum verify:
 
@@ -1117,6 +1609,8 @@ After a substantial deployment, at minimum verify:
 
 Not every deployment requires every test, but lifecycle-sensitive changes should be tested against the relevant sections above.
 
+Automated tests should be green before deployment unless a known failing regression has deliberately been committed on a development branch as part of the regression-first workflow.
+
 ---
 
 # Reporting Problems
@@ -1157,11 +1651,23 @@ channel unless the testing procedure has been changed.
 
 Where practical, reproduce the original problem before applying the fix.
 
-After the fix:
+If the bug can be reproduced automatically, prefer:
 
-1. Repeat the exact original reproduction steps.
-2. Confirm the bug no longer occurs.
-3. Test the nearest related workflows for regressions.
-4. Add the scenario to automated regression coverage once an automated test suite exists.
+1. Write a regression test reproducing the problem.
+2. Confirm the regression fails for the expected reason.
+3. Commit the failing regression separately.
+4. Apply the production fix.
+5. Confirm the regression becomes green.
+6. Test the nearest related workflows.
+7. Add or retain a positive companion test where useful.
+8. Run the full relevant unit/integration/typecheck suite.
 
-A bug which required meaningful investigation is usually a good candidate for a permanent regression test.
+If the problem depends on Discord behaviour which cannot reasonably be reproduced in the automated harness:
+
+1. Record the original manual reproduction steps.
+2. Apply the fix.
+3. Repeat those exact steps.
+4. Test the nearest related workflows for regressions.
+5. Add automated coverage for any domain/database portion which can still be isolated.
+
+A bug which required meaningful investigation is usually a good candidate for permanent regression coverage.

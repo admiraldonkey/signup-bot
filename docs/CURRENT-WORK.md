@@ -1,6 +1,6 @@
 # Current Development State
 
-**Last updated:** 22 August 2026
+**Last updated:** 28 August 2026
 
 This document is intended as a temporary handoff/checkpoint for the current state of development.
 
@@ -17,19 +17,23 @@ For long-term context, also read:
 
 # Current Repository Checkpoint
 
-The recent organiser and role-request/publication work has reached a stable checkpoint.
+The recent reliability, concurrency and automated-testing work has reached a stable checkpoint.
 
-Two substantial development branches/phases have recently covered:
+Several substantial development phases have now covered:
 
-1. Event organiser assignment and escalation
-2. Role requests, unpublished events and scheduled event publication
+1. Event lifecycle and command race protection
+2. Durable scheduler reliability, retry and stale-action behaviour
+3. Attendance interaction lifecycle and eligibility races
+4. Role-request interaction lifecycle and eligibility races
+5. Organiser response, cover-claim and escalation concurrency
 
 At the point this checkpoint was created:
 
 - TypeScript checks were passing
-- Automated tests were passing
-- Local/manual testing of the recent event-publication work had passed
-- The work had been committed and merged/pushed before beginning this documentation pass
+- Automated unit and PostgreSQL integration tests were passing
+- Recent regression tests had been verified against the intended race conditions before production fixes were applied
+- The completed reliability work had been committed, reviewed and merged to `main`
+- Local `main` had been updated to the latest merged state before beginning this documentation pass
 
 The expected starting branch for new feature/refactor work should therefore normally be:
 
@@ -532,6 +536,58 @@ Scheduler functionality includes:
 
 ---
 
+# Recently Implemented: Reliability and Concurrency Hardening
+
+A substantial reliability pass has now been completed across lifecycle-sensitive database operations.
+
+Automated testing now includes:
+
+- Vitest unit tests
+- PostgreSQL integration tests through Testcontainers
+- Separate TypeScript checking for production and test code
+- Deterministic concurrency regression tests using PostgreSQL locks rather than timing-dependent sleeps
+
+Recent hardening includes:
+
+- Preventing stale event lifecycle operations from overwriting cancellation or other newer states
+- Protecting automatic scheduler actions from lifecycle races
+- Fencing stale scheduler attempts from newer retries
+- Preventing exhausted or stale scheduled actions from being reclaimed incorrectly
+- Verifying scheduler retry backoff and terminal failure behaviour
+- Protecting attendance responses against event closure, cancellation, completion and changed signup eligibility
+- Protecting role-request creation against group closure, terminal event state, attendance eligibility changes and role-option configuration changes
+- Protecting role-request withdrawal against terminal event lifecycle changes
+- Protecting organiser confirmation and decline against cancellation and completion races
+- Protecting cover claims against terminal lifecycle changes
+- Preventing stale backup activation after another organiser has already claimed cover
+- Preventing stale general-cover escalation after organiser ownership has already been resolved
+
+A common concurrency principle is now used where appropriate:
+
+```text
+Initial read/check
+        |
+        v
+Acquire authoritative database ownership
+        |
+        v
+Re-check current lifecycle/eligibility state
+        |
+        +---- still valid -> persist change
+        |
+        +---- stale/invalid -> perform no stale success mutation
+```
+
+For organiser ownership changes, the event row is used as the shared ordering boundary where appropriate.
+
+Database state remains authoritative.
+
+External Discord side effects should occur only after the corresponding authoritative database operation succeeds.
+
+Known bugs discovered during this pass were first captured as failing regression tests before production fixes were applied.
+
+---
+
 # Recently Implemented: Cancellation and Publication
 
 Cancelling an unpublished event cancels its outstanding scheduled actions.
@@ -599,9 +655,46 @@ rather than spending substantial development time polishing temporary event-mess
 
 # Immediate Next Development Task
 
-Before implementing another major feature, perform a **repository-wide architecture and code-quality review**.
+Continue the repository-wide reliability review with a focused pass on **Discord message failure and recovery behaviour**.
 
-Primary goals:
+The immediate priority is to verify what happens when Discord-facing state disappears while valid authoritative database state remains.
+
+Primary targets:
+
+1. Public event message is manually deleted
+2. Role-request group message is manually deleted
+3. Publication or attendance channel is removed
+4. Role-request channel is removed
+5. Ping/notification role is removed
+6. Event Administration channel is removed
+
+The preferred reliability model is:
+
+```text
+PostgreSQL state
+    -> authoritative
+
+Discord message/channel/role
+    -> recover where the correct replacement is unambiguous
+    -> otherwise fail safely and provide an administrative recovery path
+```
+
+For deleted messages where the original destination channel still exists, investigate automatic replacement without republishing or otherwise replaying unrelated event lifecycle behaviour.
+
+Recovery must avoid:
+
+- Duplicate event publication
+- Duplicate role-request pools
+- Duplicate scheduled actions
+- Re-triggering organiser activation
+- Re-triggering reminders or other lifecycle effects
+- Losing valid database state merely because Discord presentation state was removed
+
+Continue using regression tests before production fixes where a concrete failure can be reproduced.
+
+The broader repository-wide architecture and code-quality review remains ongoing.
+
+Primary goals remain:
 
 1. Identify potential bugs
 2. Identify lifecycle/race issues
@@ -625,7 +718,9 @@ Prefer incremental refactoring backed by tests.
 
 ## Event lifecycle
 
-Verify:
+Substantial automated coverage now exists around stale/racing event lifecycle operations, including cancellation ownership and scheduler interaction.
+
+Continue verifying:
 
 - Immediate publication
 - Manual publication
@@ -644,7 +739,17 @@ Verify:
 
 ## Scheduler
 
-Review interactions between:
+Scheduler reliability and idempotency now have substantial automated coverage, including:
+
+- Concurrent action claiming
+- Stale processing recovery
+- Retry attempt fencing
+- Retry backoff
+- Exhausted-action handling
+- Cancellation ownership
+- Lifecycle races across automatic actions
+
+Continue reviewing interactions between:
 
 ```text
 publish_event
@@ -655,7 +760,7 @@ organiser actions
 role-request closure
 ```
 
-Particular attention should be paid to stale or racing actions.
+Particular attention should still be paid to stale or racing actions when new scheduler behaviour is added.
 
 ---
 
