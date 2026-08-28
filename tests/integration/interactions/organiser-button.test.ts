@@ -851,7 +851,7 @@ describe("organiser button interactions", () => {
         trigger: "declined",
       });
 
-      await waitForBlockedBackupActivation(pool);
+      await waitForBlockedBackupLock(pool);
 
       /*
        * Escalation has already made its now-stale "no active organiser"
@@ -1532,7 +1532,7 @@ async function createCoverEventWithDormantBackup(pool: Pool): Promise<{
   };
 }
 
-async function waitForBlockedBackupActivation(pool: Pool): Promise<void> {
+async function waitForBlockedBackupLock(pool: Pool): Promise<void> {
   const timeoutAt = Date.now() + 3_000;
 
   while (Date.now() < timeoutAt) {
@@ -1556,7 +1556,11 @@ async function waitForBlockedBackupActivation(pool: Pool): Promise<void> {
 
             AND
               "query" ILIKE
-                '%update "event_organiser_assignments"%'
+                '%event_organiser_assignments%'
+
+            AND
+              "query" ILIKE
+                '%for update%'
         ) AS "blocked"
       `);
 
@@ -1570,6 +1574,6 @@ async function waitForBlockedBackupActivation(pool: Pool): Promise<void> {
   }
 
   throw new Error(
-    "Timed out waiting for the backup organiser activation to block.",
+    "Timed out waiting for escalation to block while locking the dormant backup assignment.",
   );
 }
