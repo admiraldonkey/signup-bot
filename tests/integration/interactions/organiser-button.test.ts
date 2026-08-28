@@ -1081,11 +1081,21 @@ describe("organiser button interactions", () => {
        * active organiser or standby backup exists, then stop it at the actual
        * cover-request scheduled-action insert.
        */
+      /*
+       * Own the failed assignment row before escalation begins.
+       *
+       * Escalation may still perform its initial ordinary reads and conclude that
+       * cover is required, but its authoritative escalation transaction must stop
+       * before obtaining organiser ownership.
+       */
       await lockClient.query(
         `
-        LOCK TABLE "scheduled_actions"
-        IN ACCESS EXCLUSIVE MODE
-      `,
+    SELECT "id"
+    FROM "event_organiser_assignments"
+    WHERE "id" = $1
+    FOR UPDATE
+  `,
+        [fixture.failedAssignmentId],
       );
 
       escalationPromise = escalateAfterFailedOrganiserAssignment({
@@ -1098,7 +1108,7 @@ describe("organiser button interactions", () => {
         trigger: "declined",
       });
 
-      await waitForBlockedCoverRequestQueue(pool);
+      await waitForBlockedFailedAssignmentLock(pool);
 
       /*
        * Escalation's earlier "cover is needed" decision is now stale.
@@ -1849,7 +1859,7 @@ async function createCoverEventAfterFailedPrimary(pool: Pool): Promise<{
   };
 }
 
-async function waitForBlockedCoverRequestQueue(pool: Pool): Promise<void> {
+async function waitForBlockedFailedAssignmentLock(pool: Pool): Promise<void> {
   const timeoutAt = Date.now() + 3_000;
 
   while (Date.now() < timeoutAt) {
@@ -1858,33 +1868,26 @@ async function waitForBlockedCoverRequestQueue(pool: Pool): Promise<void> {
     }>(`
         SELECT EXISTS (
           SELECT 1
-
-          FROM
-            "pg_locks"
-              AS "waiting_lock"
-
-          INNER JOIN
-            "pg_stat_activity"
-              AS "activity"
-            ON
-              "activity"."pid" =
-                "waiting_lock"."pid"
-
+          FROM "pg_stat_activity"
           WHERE
-            "activity"."datname" =
+            "datname" =
               current_database()
 
             AND
-              "waiting_lock"."locktype" =
-                'relation'
+              "state" =
+                'active'
 
             AND
-              "waiting_lock"."relation" =
-                'scheduled_actions'::regclass
+              "wait_event_type" =
+                'Lock'
 
             AND
-              "waiting_lock"."granted" =
-                false
+              "query" ILIKE
+                '%event_organiser_assignments%'
+
+            AND
+              "query" ILIKE
+                '%for update%'
         ) AS "blocked"
       `);
 
@@ -1898,6 +1901,6 @@ async function waitForBlockedCoverRequestQueue(pool: Pool): Promise<void> {
   }
 
   throw new Error(
-    "Timed out waiting for escalation to block while queueing organiser cover.",
+    "Timed out waiting for escalation to block while locking the failed organiser assignment.",
   );
 }

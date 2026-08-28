@@ -15,9 +15,9 @@ import {
   sendOrganiserAssignmentNotification,
 } from "../events/organiser-notification.js";
 import {
+  buildOrganiserCoverRequestActionKey,
   buildOrganiserResponseActionValues,
   calculateOrganiserResponseDeadline,
-  queueOrganiserCoverRequest,
 } from "./organiser-scheduling.js";
 
 export type OrganiserEscalationResult =
@@ -368,7 +368,144 @@ export async function escalateAfterFailedOrganiserAssignment(input: {
     };
   }
 
-  await queueOrganiserCoverRequest(event.id, input.failedAssignmentId);
+  /*
+   * The earlier event/assignment reads may become stale before general cover
+   * is queued.
+   *
+   * Lock the failed assignment first so duplicate escalation work for the same
+   * failure has a stable ordering point. Then acquire the shared event
+   * organiser-ownership lock and re-check whether somebody else resolved the
+   * event while this escalation was waiting.
+   */
+  const expectedFailedStatus =
+    input.trigger === "declined" ? "declined" : "timed_out";
+
+  const queueResult = await db.transaction(async (transaction) => {
+    const [lockedFailedAssignment] = await transaction
+      .select({
+        id: eventOrganiserAssignments.id,
+      })
+      .from(eventOrganiserAssignments)
+      .where(
+        and(
+          eq(eventOrganiserAssignments.id, input.failedAssignmentId),
+
+          eq(eventOrganiserAssignments.eventId, event.id),
+
+          eq(eventOrganiserAssignments.status, expectedFailedStatus),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    /*
+     * The source failure itself changed or disappeared before this
+     * escalation obtained ownership.
+     */
+    if (!lockedFailedAssignment) {
+      return {
+        kind: "already_resolved",
+      } as const;
+    }
+
+    /*
+     * All organiser-ownership changes use the event row as their shared
+     * lifecycle/concurrency boundary.
+     */
+    const [lockedEvent] = await transaction
+      .select({
+        status: events.status,
+      })
+      .from(events)
+      .where(eq(events.id, event.id))
+      .limit(1)
+      .for("update");
+
+    if (
+      !lockedEvent ||
+      lockedEvent.status === "cancelled" ||
+      lockedEvent.status === "completed"
+    ) {
+      return {
+        kind: "event_inactive",
+      } as const;
+    }
+
+    /*
+     * Cover, an administrator, or another organiser flow may have resolved
+     * ownership after our initial read.
+     */
+    const [currentActiveAssignment] = await transaction
+      .select({
+        id: eventOrganiserAssignments.id,
+      })
+      .from(eventOrganiserAssignments)
+      .where(
+        and(
+          eq(eventOrganiserAssignments.eventId, event.id),
+
+          eq(eventOrganiserAssignments.isCurrent, true),
+
+          isNotNull(eventOrganiserAssignments.activatedAt),
+
+          inArray(eventOrganiserAssignments.status, ["pending", "confirmed"]),
+        ),
+      )
+      .limit(1);
+
+    if (currentActiveAssignment) {
+      return {
+        kind: "already_resolved",
+      } as const;
+    }
+
+    const now = new Date();
+
+    await transaction
+      .insert(scheduledActions)
+      .values({
+        eventId: event.id,
+
+        actionKey: buildOrganiserCoverRequestActionKey(
+          input.failedAssignmentId,
+        ),
+
+        dueAt: now,
+
+        status: "pending",
+
+        attemptCount: 0,
+
+        lockedAt: null,
+
+        completedAt: null,
+
+        lastError: null,
+
+        updatedAt: now,
+      })
+      /*
+       * Preserve the existing idempotency guarantee: one failed assignment
+       * can create at most one cover-request action.
+       */
+      .onConflictDoNothing();
+
+    return {
+      kind: "queued",
+    } as const;
+  });
+
+  if (queueResult.kind === "event_inactive") {
+    return {
+      kind: "event_inactive",
+    };
+  }
+
+  if (queueResult.kind === "already_resolved") {
+    return {
+      kind: "already_resolved",
+    };
+  }
 
   await refreshAttendanceMessage(input.guild, event.id).catch(
     (error: unknown) => {
