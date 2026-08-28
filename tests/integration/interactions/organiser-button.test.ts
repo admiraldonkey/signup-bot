@@ -1273,6 +1273,220 @@ describe("organiser button interactions", () => {
 
     expect.soft(queueAuditResult.rows).toEqual([]);
   });
+
+  it.each(["declined", "timed_out"] as const)(
+    "queues organiser cover normally after a %s primary failure when no backup exists",
+    async (failureStatus) => {
+      // Arrange
+      const fixture = await createCoverEventAfterFailedPrimary(
+        pool,
+        failureStatus,
+      );
+
+      const guild = {
+        id: DISCORD_GUILD_ID,
+      } as unknown as Guild;
+
+      // Act
+      const result = await escalateAfterFailedOrganiserAssignment({
+        guild,
+
+        eventId: fixture.eventId,
+
+        failedAssignmentId: fixture.failedAssignmentId,
+
+        trigger: failureStatus,
+      });
+
+      // Assert
+      expect(result).toEqual({
+        kind: "cover_queued",
+      });
+
+      /*
+       * The failed assignment remains the completed source of this
+       * escalation rather than being mutated again.
+       */
+      const failedAssignmentResult = await pool.query<{
+        status: string;
+        is_current: boolean;
+        responded_at: Date | null;
+        ended_at: Date | null;
+      }>(
+        `
+          SELECT
+            "status",
+            "is_current",
+            "responded_at",
+            "ended_at"
+          FROM
+            "event_organiser_assignments"
+          WHERE "id" = $1
+        `,
+        [fixture.failedAssignmentId],
+      );
+
+      expect(failedAssignmentResult.rows).toHaveLength(1);
+
+      expect(failedAssignmentResult.rows[0]).toMatchObject({
+        status: failureStatus,
+
+        is_current: false,
+      });
+
+      expect(failedAssignmentResult.rows[0]?.ended_at).toBeInstanceOf(Date);
+
+      if (failureStatus === "declined") {
+        expect(failedAssignmentResult.rows[0]?.responded_at).toBeInstanceOf(
+          Date,
+        );
+      } else {
+        expect(failedAssignmentResult.rows[0]?.responded_at).toBeNull();
+      }
+
+      /*
+       * There is still no active organiser. The purpose of this path is to
+       * request one from the wider organiser group.
+       */
+      const activeAssignmentResult = await pool.query<{
+        id: number;
+      }>(
+        `
+          SELECT "id"
+          FROM
+            "event_organiser_assignments"
+          WHERE
+            "event_id" = $1
+
+            AND
+            "is_current" = true
+
+            AND
+            "activated_at" IS NOT NULL
+
+            AND
+            "status" IN (
+              'pending',
+              'confirmed'
+            )
+        `,
+        [fixture.eventId],
+      );
+
+      expect(activeAssignmentResult.rows).toEqual([]);
+
+      /*
+       * Exactly one pending cover-request action should now exist for this
+       * failed assignment.
+       */
+      const actionResult = await pool.query<{
+        action_key: string;
+        status: string;
+        attempt_count: number;
+        locked_at: Date | null;
+        completed_at: Date | null;
+      }>(
+        `
+          SELECT
+            "action_key",
+            "status",
+            "attempt_count",
+            "locked_at",
+            "completed_at"
+          FROM "scheduled_actions"
+          WHERE
+            "event_id" = $1
+            AND
+            "action_key" = $2
+        `,
+        [
+          fixture.eventId,
+
+          `organiser_cover_request:${fixture.failedAssignmentId}`,
+        ],
+      );
+
+      expect(actionResult.rows).toEqual([
+        {
+          action_key: `organiser_cover_request:${fixture.failedAssignmentId}`,
+
+          status: "pending",
+
+          attempt_count: 0,
+
+          locked_at: null,
+
+          completed_at: null,
+        },
+      ]);
+
+      /*
+       * General cover does not directly contact a particular backup
+       * organiser.
+       */
+      expect(
+        organiserNotificationMocks.sendOrganiserAssignmentNotification,
+      ).not.toHaveBeenCalled();
+
+      expect(
+        attendanceRefreshMocks.refreshAttendanceMessage,
+      ).toHaveBeenCalledTimes(1);
+
+      expect(
+        attendanceRefreshMocks.refreshAttendanceMessage,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: DISCORD_GUILD_ID,
+        }),
+        fixture.eventId,
+      );
+
+      /*
+       * Successful queueing should be auditable with the failure trigger
+       * which led here.
+       */
+      const auditResult = await pool.query<{
+        action: string;
+        outcome: string;
+        trigger: string | null;
+        failed_assignment_id: string | null;
+      }>(
+        `
+          SELECT
+            "action",
+            "outcome",
+            "details" ->> 'trigger'
+              AS "trigger",
+            "details" ->> 'failedAssignmentId'
+              AS "failed_assignment_id"
+          FROM "audit_logs"
+          WHERE
+            "action" =
+              'event.organiser.cover.queue'
+
+            AND
+            "target_type" =
+              'event'
+
+            AND
+            "target_id" = $1
+        `,
+        [String(fixture.eventId)],
+      );
+
+      expect(auditResult.rows).toEqual([
+        {
+          action: "event.organiser.cover.queue",
+
+          outcome: "success",
+
+          trigger: failureStatus,
+
+          failed_assignment_id: String(fixture.failedAssignmentId),
+        },
+      ]);
+    },
+  );
 });
 
 async function createActivePendingOrganiserAssignment(
@@ -1799,11 +2013,16 @@ async function waitForBlockedBackupLock(pool: Pool): Promise<void> {
   );
 }
 
-async function createCoverEventAfterFailedPrimary(pool: Pool): Promise<{
+async function createCoverEventAfterFailedPrimary(
+  pool: Pool,
+  failureStatus: "declined" | "timed_out" = "declined",
+): Promise<{
   eventId: number;
   failedAssignmentId: number;
 }> {
   const fixture = await createActivePendingOrganiserAssignment(pool);
+
+  const respondedAt = failureStatus === "declined" ? new Date() : null;
 
   /*
    * Represent the point after the primary has failed and before escalation
@@ -1815,14 +2034,14 @@ async function createCoverEventAfterFailedPrimary(pool: Pool): Promise<{
     `
       UPDATE "event_organiser_assignments"
       SET
-        "status" = 'declined',
+        "status" = $2,
         "is_current" = false,
-        "responded_at" = NOW(),
+        "responded_at" = $3,
         "ended_at" = NOW(),
         "updated_at" = NOW()
       WHERE "id" = $1
     `,
-    [fixture.assignmentId],
+    [fixture.assignmentId, failureStatus, respondedAt],
   );
 
   await pool.query(
