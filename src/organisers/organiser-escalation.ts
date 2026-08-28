@@ -1,5 +1,5 @@
 import { type Guild } from "discord.js";
-import { and, eq, inArray, isNotNull, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, ne } from "drizzle-orm";
 
 import { writeAuditLog } from "../audit/audit-log.js";
 import { db } from "../db/client.js";
@@ -15,9 +15,9 @@ import {
   sendOrganiserAssignmentNotification,
 } from "../events/organiser-notification.js";
 import {
+  buildOrganiserCoverRequestActionKey,
   buildOrganiserResponseActionValues,
   calculateOrganiserResponseDeadline,
-  queueOrganiserCoverRequest,
 } from "./organiser-scheduling.js";
 
 export type OrganiserEscalationResult =
@@ -131,26 +131,126 @@ export async function escalateAfterFailedOrganiserAssignment(input: {
     .limit(1);
 
   if (backup) {
-    const activatedAt = new Date();
+    /*
+     * The earlier active-assignment and dormant-backup reads are useful fast
+     * checks, but either may become stale before activation.
+     *
+     * First lock the exact dormant backup row we intend to activate. Then
+     * acquire the event lifecycle row before changing organiser ownership.
+     *
+     * Once the event lock is held, re-check whether another active organiser
+     * appeared while this escalation was waiting.
+     */
+    const activationResult = await db.transaction(async (transaction) => {
+      const [lockedBackup] = await transaction
+        .select({
+          id: eventOrganiserAssignments.id,
 
-    const responseDeadlineAt = calculateOrganiserResponseDeadline(
-      activatedAt,
-      event.backupResponseMinutes,
-    );
+          discordUserId: eventOrganiserAssignments.discordUserId,
+        })
+        .from(eventOrganiserAssignments)
+        .where(
+          and(
+            eq(eventOrganiserAssignments.id, backup.id),
 
-    const actionValues = buildOrganiserResponseActionValues({
-      eventId: event.id,
+            eq(eventOrganiserAssignments.eventId, event.id),
 
-      assignmentId: backup.id,
+            eq(eventOrganiserAssignments.slot, "backup"),
 
-      activatedAt,
+            eq(eventOrganiserAssignments.isCurrent, true),
 
-      responseDeadlineAt,
+            eq(eventOrganiserAssignments.status, "pending"),
 
-      warningMinutesBefore: event.warningMinutesBefore,
-    });
+            isNull(eventOrganiserAssignments.activatedAt),
+          ),
+        )
+        .limit(1)
+        .for("update");
 
-    const activated = await db.transaction(async (transaction) => {
+      if (!lockedBackup) {
+        return {
+          kind: "already_resolved",
+        } as const;
+      }
+
+      /*
+       * Organiser ownership changes use the event row as their shared
+       * ordering boundary.
+       */
+      const [lockedEvent] = await transaction
+        .select({
+          status: events.status,
+        })
+        .from(events)
+        .where(eq(events.id, event.id))
+        .limit(1)
+        .for("update");
+
+      if (
+        !lockedEvent ||
+        lockedEvent.status === "cancelled" ||
+        lockedEvent.status === "completed"
+      ) {
+        return {
+          kind: "event_inactive",
+        } as const;
+      }
+
+      /*
+       * A cover claim, manual assignment or another escalation may have
+       * resolved organiser ownership after our initial read.
+       *
+       * Ignore this dormant backup itself when checking for the winner.
+       */
+      const [conflictingAssignment] = await transaction
+        .select({
+          id: eventOrganiserAssignments.id,
+        })
+        .from(eventOrganiserAssignments)
+        .where(
+          and(
+            eq(eventOrganiserAssignments.eventId, event.id),
+
+            ne(eventOrganiserAssignments.id, lockedBackup.id),
+
+            eq(eventOrganiserAssignments.isCurrent, true),
+
+            isNotNull(eventOrganiserAssignments.activatedAt),
+
+            inArray(eventOrganiserAssignments.status, ["pending", "confirmed"]),
+          ),
+        )
+        .limit(1);
+
+      if (conflictingAssignment) {
+        return {
+          kind: "already_resolved",
+        } as const;
+      }
+
+      /*
+       * Start the response clock only after this escalation has actually
+       * won organiser ownership.
+       */
+      const activatedAt = new Date();
+
+      const responseDeadlineAt = calculateOrganiserResponseDeadline(
+        activatedAt,
+        event.backupResponseMinutes,
+      );
+
+      const actionValues = buildOrganiserResponseActionValues({
+        eventId: event.id,
+
+        assignmentId: lockedBackup.id,
+
+        activatedAt,
+
+        responseDeadlineAt,
+
+        warningMinutesBefore: event.warningMinutesBefore,
+      });
+
       const [updated] = await transaction
         .update(eventOrganiserAssignments)
         .set({
@@ -162,7 +262,7 @@ export async function escalateAfterFailedOrganiserAssignment(input: {
         })
         .where(
           and(
-            eq(eventOrganiserAssignments.id, backup.id),
+            eq(eventOrganiserAssignments.id, lockedBackup.id),
 
             eq(eventOrganiserAssignments.isCurrent, true),
 
@@ -176,15 +276,31 @@ export async function escalateAfterFailedOrganiserAssignment(input: {
         });
 
       if (!updated) {
-        return null;
+        return {
+          kind: "already_resolved",
+        } as const;
       }
 
       await transaction.insert(scheduledActions).values(actionValues);
 
-      return updated;
+      return {
+        kind: "activated",
+
+        assignmentId: updated.id,
+
+        discordUserId: lockedBackup.discordUserId,
+
+        responseDeadlineAt,
+      } as const;
     });
 
-    if (!activated) {
+    if (activationResult.kind === "event_inactive") {
+      return {
+        kind: "event_inactive",
+      };
+    }
+
+    if (activationResult.kind === "already_resolved") {
       return {
         kind: "already_resolved",
       };
@@ -193,13 +309,13 @@ export async function escalateAfterFailedOrganiserAssignment(input: {
     const notification = await sendOrganiserAssignmentNotification({
       guild: input.guild,
 
-      assignmentId: backup.id,
+      assignmentId: activationResult.assignmentId,
 
       eventId: event.id,
 
       eventName: event.name,
 
-      discordUserId: backup.discordUserId,
+      discordUserId: activationResult.discordUserId,
 
       slot: "backup",
 
@@ -226,18 +342,18 @@ export async function escalateAfterFailedOrganiserAssignment(input: {
 
       outcome: "success",
 
-      summary: `Activated backup organiser assignment #${backup.id} for "${event.name}" (#${event.id}).`,
+      summary: `Activated backup organiser assignment #${activationResult.assignmentId} for "${event.name}" (#${event.id}).`,
 
       targetType: "organiser_assignment",
 
-      targetId: String(backup.id),
+      targetId: String(activationResult.assignmentId),
 
       details: {
         trigger: input.trigger,
 
         failedAssignmentId: input.failedAssignmentId,
 
-        responseDeadlineAt: responseDeadlineAt.toISOString(),
+        responseDeadlineAt: activationResult.responseDeadlineAt.toISOString(),
 
         notification,
       },
@@ -246,13 +362,150 @@ export async function escalateAfterFailedOrganiserAssignment(input: {
     return {
       kind: "backup_activated",
 
-      assignmentId: backup.id,
+      assignmentId: activationResult.assignmentId,
 
       notification,
     };
   }
 
-  await queueOrganiserCoverRequest(event.id, input.failedAssignmentId);
+  /*
+   * The earlier event/assignment reads may become stale before general cover
+   * is queued.
+   *
+   * Lock the failed assignment first so duplicate escalation work for the same
+   * failure has a stable ordering point. Then acquire the shared event
+   * organiser-ownership lock and re-check whether somebody else resolved the
+   * event while this escalation was waiting.
+   */
+  const expectedFailedStatus =
+    input.trigger === "declined" ? "declined" : "timed_out";
+
+  const queueResult = await db.transaction(async (transaction) => {
+    const [lockedFailedAssignment] = await transaction
+      .select({
+        id: eventOrganiserAssignments.id,
+      })
+      .from(eventOrganiserAssignments)
+      .where(
+        and(
+          eq(eventOrganiserAssignments.id, input.failedAssignmentId),
+
+          eq(eventOrganiserAssignments.eventId, event.id),
+
+          eq(eventOrganiserAssignments.status, expectedFailedStatus),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    /*
+     * The source failure itself changed or disappeared before this
+     * escalation obtained ownership.
+     */
+    if (!lockedFailedAssignment) {
+      return {
+        kind: "already_resolved",
+      } as const;
+    }
+
+    /*
+     * All organiser-ownership changes use the event row as their shared
+     * lifecycle/concurrency boundary.
+     */
+    const [lockedEvent] = await transaction
+      .select({
+        status: events.status,
+      })
+      .from(events)
+      .where(eq(events.id, event.id))
+      .limit(1)
+      .for("update");
+
+    if (
+      !lockedEvent ||
+      lockedEvent.status === "cancelled" ||
+      lockedEvent.status === "completed"
+    ) {
+      return {
+        kind: "event_inactive",
+      } as const;
+    }
+
+    /*
+     * Cover, an administrator, or another organiser flow may have resolved
+     * ownership after our initial read.
+     */
+    const [currentActiveAssignment] = await transaction
+      .select({
+        id: eventOrganiserAssignments.id,
+      })
+      .from(eventOrganiserAssignments)
+      .where(
+        and(
+          eq(eventOrganiserAssignments.eventId, event.id),
+
+          eq(eventOrganiserAssignments.isCurrent, true),
+
+          isNotNull(eventOrganiserAssignments.activatedAt),
+
+          inArray(eventOrganiserAssignments.status, ["pending", "confirmed"]),
+        ),
+      )
+      .limit(1);
+
+    if (currentActiveAssignment) {
+      return {
+        kind: "already_resolved",
+      } as const;
+    }
+
+    const now = new Date();
+
+    await transaction
+      .insert(scheduledActions)
+      .values({
+        eventId: event.id,
+
+        actionKey: buildOrganiserCoverRequestActionKey(
+          input.failedAssignmentId,
+        ),
+
+        dueAt: now,
+
+        status: "pending",
+
+        attemptCount: 0,
+
+        lockedAt: null,
+
+        completedAt: null,
+
+        lastError: null,
+
+        updatedAt: now,
+      })
+      /*
+       * Preserve the existing idempotency guarantee: one failed assignment
+       * can create at most one cover-request action.
+       */
+      .onConflictDoNothing();
+
+    return {
+      kind: "queued",
+    } as const;
+  });
+
+  if (queueResult.kind === "event_inactive") {
+    return {
+      kind: "event_inactive",
+    };
+  }
+
+  if (queueResult.kind === "already_resolved") {
+    return {
+      kind: "already_resolved",
+    };
+  }
 
   await refreshAttendanceMessage(input.guild, event.id).catch(
     (error: unknown) => {
