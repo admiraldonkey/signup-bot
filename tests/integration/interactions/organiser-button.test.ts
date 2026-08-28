@@ -1052,6 +1052,217 @@ describe("organiser button interactions", () => {
 
     expect.soft(backupAuditResult.rows).toEqual([]);
   });
+
+  it("does not queue stale organiser cover after another organiser claims the event", async () => {
+    // Arrange
+    const fixture = await createCoverEventAfterFailedPrimary(pool);
+
+    const interaction = createOrganiserCoverInteraction(fixture.eventId);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+    } as unknown as Guild;
+
+    const lockClient = await pool.connect();
+
+    let escalationPromise:
+      | ReturnType<typeof escalateAfterFailedOrganiserAssignment>
+      | undefined;
+
+    let escalationResult:
+      | Awaited<ReturnType<typeof escalateAfterFailedOrganiserAssignment>>
+      | undefined;
+
+    try {
+      await lockClient.query("BEGIN");
+
+      /*
+       * Let escalation perform all of its initial reads and conclude that no
+       * active organiser or standby backup exists, then stop it at the actual
+       * cover-request scheduled-action insert.
+       */
+      await lockClient.query(
+        `
+        LOCK TABLE "scheduled_actions"
+        IN ACCESS EXCLUSIVE MODE
+      `,
+      );
+
+      escalationPromise = escalateAfterFailedOrganiserAssignment({
+        guild,
+
+        eventId: fixture.eventId,
+
+        failedAssignmentId: fixture.failedAssignmentId,
+
+        trigger: "declined",
+      });
+
+      await waitForBlockedCoverRequestQueue(pool);
+
+      /*
+       * Escalation's earlier "cover is needed" decision is now stale.
+       *
+       * Allow the real cover handler to resolve organiser ownership completely
+       * before the pending escalation is allowed to continue.
+       */
+      const handled = await handleOrganiserButton(interaction);
+
+      expect(handled).toBe(true);
+
+      /*
+       * Only after cover has fully succeeded do we permit escalation's stale
+       * queue attempt to resume.
+       */
+      await lockClient.query("COMMIT");
+
+      escalationResult = await escalationPromise;
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      await escalationPromise?.catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+    }
+
+    // Assert
+
+    /*
+     * Cover resolved the event before escalation persisted anything, so the
+     * stale escalation no longer owns the right to request cover.
+     */
+    expect.soft(escalationResult).toEqual({
+      kind: "already_resolved",
+    });
+
+    const activeAssignmentResult = await pool.query<{
+      slot: string;
+      discord_user_id: string;
+      status: string;
+      is_current: boolean;
+    }>(
+      `
+        SELECT
+          "slot",
+          "discord_user_id",
+          "status",
+          "is_current"
+
+        FROM
+          "event_organiser_assignments"
+
+        WHERE
+          "event_id" = $1
+
+          AND
+          "is_current" = true
+
+          AND
+          "activated_at" IS NOT NULL
+
+          AND
+          "status" IN (
+            'pending',
+            'confirmed'
+          )
+      `,
+      [fixture.eventId],
+    );
+
+    expect.soft(activeAssignmentResult.rows).toEqual([
+      {
+        slot: "cover",
+
+        discord_user_id: COVER_ORGANISER_USER_ID,
+
+        status: "confirmed",
+
+        is_current: true,
+      },
+    ]);
+
+    /*
+     * The stale escalation must not leave behind another cover-request job.
+     */
+    const coverActionResult = await pool.query<{
+      action_key: string;
+      status: string;
+    }>(
+      `
+        SELECT
+          "action_key",
+          "status"
+
+        FROM "scheduled_actions"
+
+        WHERE
+          "event_id" = $1
+          AND
+          "action_key" = $2
+      `,
+      [
+        fixture.eventId,
+
+        `organiser_cover_request:${fixture.failedAssignmentId}`,
+      ],
+    );
+
+    expect.soft(coverActionResult.rows).toEqual([]);
+
+    /*
+     * Only the successful cover claim should refresh the attendance message.
+     */
+    expect
+      .soft(attendanceRefreshMocks.refreshAttendanceMessage)
+      .toHaveBeenCalledTimes(1);
+
+    expect.soft(interaction.message.edit).toHaveBeenCalledTimes(1);
+
+    expect
+      .soft(interaction.editReply)
+      .toHaveBeenLastCalledWith(
+        "✅ You are now the confirmed organiser for **Organiser Interaction Race Test Event**.",
+      );
+
+    /*
+     * No backup was involved in this scenario.
+     */
+    expect
+      .soft(organiserNotificationMocks.sendOrganiserAssignmentNotification)
+      .not.toHaveBeenCalled();
+
+    /*
+     * The stale escalation must not claim that it successfully queued cover.
+     */
+    const queueAuditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+        SELECT
+          "action",
+          "outcome"
+
+        FROM "audit_logs"
+
+        WHERE
+          "action" =
+            'event.organiser.cover.queue'
+
+          AND
+          "target_type" =
+            'event'
+
+          AND
+          "target_id" = $1
+      `,
+      [String(fixture.eventId)],
+    );
+
+    expect.soft(queueAuditResult.rows).toEqual([]);
+  });
 });
 
 async function createActivePendingOrganiserAssignment(
@@ -1575,5 +1786,118 @@ async function waitForBlockedBackupLock(pool: Pool): Promise<void> {
 
   throw new Error(
     "Timed out waiting for escalation to block while locking the dormant backup assignment.",
+  );
+}
+
+async function createCoverEventAfterFailedPrimary(pool: Pool): Promise<{
+  eventId: number;
+  failedAssignmentId: number;
+}> {
+  const fixture = await createActivePendingOrganiserAssignment(pool);
+
+  /*
+   * Represent the point after the primary has failed and before escalation
+   * decides whether backup activation or general cover is required.
+   *
+   * This fixture deliberately has no backup assignment.
+   */
+  await pool.query(
+    `
+      UPDATE "event_organiser_assignments"
+      SET
+        "status" = 'declined',
+        "is_current" = false,
+        "responded_at" = NOW(),
+        "ended_at" = NOW(),
+        "updated_at" = NOW()
+      WHERE "id" = $1
+    `,
+    [fixture.assignmentId],
+  );
+
+  await pool.query(
+    `
+      DELETE FROM "scheduled_actions"
+      WHERE "event_id" = $1
+    `,
+    [fixture.eventId],
+  );
+
+  /*
+   * Permit the test's real cover claimant to resolve organiser ownership.
+   */
+  await pool.query(
+    `
+      UPDATE "guild_settings"
+      SET
+        "event_organiser_role_id" = $2,
+        "updated_at" = NOW()
+      WHERE
+        "guild_id" = (
+          SELECT "owner_guild_id"
+          FROM "events"
+          WHERE "id" = $1
+        )
+    `,
+    [fixture.eventId, EVENT_ORGANISER_ROLE_ID],
+  );
+
+  return {
+    eventId: fixture.eventId,
+
+    failedAssignmentId: fixture.assignmentId,
+  };
+}
+
+async function waitForBlockedCoverRequestQueue(pool: Pool): Promise<void> {
+  const timeoutAt = Date.now() + 3_000;
+
+  while (Date.now() < timeoutAt) {
+    const result = await pool.query<{
+      blocked: boolean;
+    }>(`
+        SELECT EXISTS (
+          SELECT 1
+
+          FROM
+            "pg_locks"
+              AS "waiting_lock"
+
+          INNER JOIN
+            "pg_stat_activity"
+              AS "activity"
+            ON
+              "activity"."pid" =
+                "waiting_lock"."pid"
+
+          WHERE
+            "activity"."datname" =
+              current_database()
+
+            AND
+              "waiting_lock"."locktype" =
+                'relation'
+
+            AND
+              "waiting_lock"."relation" =
+                'scheduled_actions'::regclass
+
+            AND
+              "waiting_lock"."granted" =
+                false
+        ) AS "blocked"
+      `);
+
+    if (result.rows[0]?.blocked) {
+      return;
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+
+  throw new Error(
+    "Timed out waiting for escalation to block while queueing organiser cover.",
   );
 }
