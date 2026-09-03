@@ -1,0 +1,396 @@
+import { ChannelType, type Guild } from "discord.js";
+import type { Pool } from "pg";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+
+import { pool as applicationPool } from "../../../src/db/client.js";
+import { refreshRoleRequestGroupMessage } from "../../../src/role-requests/role-request-message.js";
+import {
+  createIntegrationPool,
+  resetIntegrationDatabase,
+} from "../../support/integration-database.js";
+
+const DISCORD_GUILD_ID = "810000000000000001";
+
+const ROLE_REQUEST_CHANNEL_ID = "810000000000000002";
+
+const OLD_MESSAGE_ID = "810000000000000003";
+
+const REPLACEMENT_MESSAGE_ID = "810000000000000004";
+
+const ADMIN_USER_ID = "810000000000000005";
+
+describe("role-request group message refresh and recovery", () => {
+  let pool: Pool;
+
+  beforeAll(() => {
+    pool = createIntegrationPool();
+  });
+
+  beforeEach(async () => {
+    await resetIntegrationDatabase(pool);
+  });
+
+  afterAll(async () => {
+    await pool.end();
+    await applicationPool.end();
+  });
+
+  it("replaces a deleted role-request group message without recreating domain state", async () => {
+    // Arrange
+    const fixture = await createRoleRequestGroup(pool);
+
+    const replacementMessage = {
+      id: REPLACEMENT_MESSAGE_ID,
+
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const fetchMessage = vi.fn().mockRejectedValue(
+      Object.assign(new Error("Unknown Message"), {
+        code: 10008,
+        status: 404,
+      }),
+    );
+
+    const sendMessage = vi.fn().mockResolvedValue(replacementMessage);
+
+    const channel = {
+      id: ROLE_REQUEST_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      messages: {
+        fetch: fetchMessage,
+      },
+
+      send: sendMessage,
+    };
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: vi.fn().mockResolvedValue(channel),
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await refreshRoleRequestGroupMessage(guild, fixture.groupId);
+
+    // Assert
+    expect(fetchMessage).toHaveBeenCalledTimes(1);
+
+    expect(fetchMessage).toHaveBeenCalledWith(OLD_MESSAGE_ID);
+
+    /*
+     * The existing role-request group still exists. Only its missing
+     * Discord presentation should need replacing.
+     */
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        allowedMentions: {
+          parse: [],
+        },
+
+        embeds: expect.any(Array),
+
+        components: expect.any(Array),
+      }),
+    );
+
+    expect(result).toBe(true);
+
+    /*
+     * Recovery updates the existing group's Discord linkage rather than
+     * creating another logical role-request group.
+     */
+    const groupResult = await pool.query<{
+      id: number;
+      event_id: number;
+      channel_id: string;
+      message_id: string | null;
+      closed_at: Date | null;
+    }>(
+      `
+              SELECT
+                "id",
+                "event_id",
+                "channel_id",
+                "message_id",
+                "closed_at"
+              FROM "role_request_groups"
+              WHERE "event_id" = $1
+              ORDER BY "id"
+            `,
+      [fixture.eventId],
+    );
+
+    expect(groupResult.rows).toEqual([
+      {
+        id: fixture.groupId,
+
+        event_id: fixture.eventId,
+
+        channel_id: ROLE_REQUEST_CHANNEL_ID,
+
+        message_id: REPLACEMENT_MESSAGE_ID,
+
+        closed_at: null,
+      },
+    ]);
+
+    /*
+     * Presentation recovery must not alter the event lifecycle.
+     */
+    const eventResult = await pool.query<{
+      status: string;
+      published_at: Date;
+    }>(
+      `
+              SELECT
+                "status",
+                "published_at"
+              FROM "events"
+              WHERE "id" = $1
+            `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toHaveLength(1);
+
+    expect(eventResult.rows[0]?.status).toBe("open");
+
+    expect(eventResult.rows[0]?.published_at.getTime()).toBe(
+      fixture.publishedAt.getTime(),
+    );
+
+    /*
+     * The existing scheduled close remains exactly one piece of
+     * lifecycle work. Message recovery must not schedule the group again.
+     */
+    const actionResult = await pool.query<{
+      action_key: string;
+      status: string;
+      attempt_count: number;
+    }>(
+      `
+              SELECT
+                "action_key",
+                "status",
+                "attempt_count"
+              FROM "scheduled_actions"
+              WHERE "event_id" = $1
+              ORDER BY "action_key"
+            `,
+      [fixture.eventId],
+    );
+
+    expect(actionResult.rows).toEqual([
+      {
+        action_key: `role_request_group_close:${fixture.groupId}`,
+
+        status: "pending",
+
+        attempt_count: 0,
+      },
+    ]);
+  });
+});
+
+async function createRoleRequestGroup(pool: Pool): Promise<{
+  eventId: number;
+  groupId: number;
+  publishedAt: Date;
+}> {
+  const guildResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "discord_guilds" (
+          "discord_guild_id",
+          "name"
+        )
+        VALUES ($1, $2)
+        RETURNING "id"
+      `,
+    [DISCORD_GUILD_ID, "Role Request Message Recovery Test Guild"],
+  );
+
+  const guildDatabaseId = guildResult.rows[0]?.id;
+
+  if (!guildDatabaseId) {
+    throw new Error("The integration-test guild was not created.");
+  }
+
+  const eventTypeResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "event_types" (
+          "owner_guild_id",
+          "code",
+          "name"
+        )
+        VALUES ($1, $2, $3)
+        RETURNING "id"
+      `,
+    [guildDatabaseId, "naval", "Naval Event"],
+  );
+
+  const eventTypeId = eventTypeResult.rows[0]?.id;
+
+  if (!eventTypeId) {
+    throw new Error("The integration-test event type was not created.");
+  }
+
+  const publishedAt = new Date("2026-09-03T16:00:00.000Z");
+
+  const eventResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "events" (
+          "owner_guild_id",
+          "event_type_id",
+          "name",
+          "starts_at",
+          "signups_enabled",
+          "published_at",
+          "status",
+          "created_by_user_id"
+        )
+        VALUES (
+          $1,
+          $2,
+          'Role Request Message Recovery Test',
+          NOW() + INTERVAL '2 hours',
+          true,
+          $3,
+          'open',
+          $4
+        )
+        RETURNING "id"
+      `,
+    [guildDatabaseId, eventTypeId, publishedAt, ADMIN_USER_ID],
+  );
+
+  const eventId = eventResult.rows[0]?.id;
+
+  if (!eventId) {
+    throw new Error("The integration-test event was not created.");
+  }
+
+  const optionResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "event_role_options" (
+          "event_id",
+          "key",
+          "display_name",
+          "request_restriction",
+          "active"
+        )
+        VALUES (
+          $1,
+          'captain',
+          'Captain',
+          'open',
+          true
+        )
+        RETURNING "id"
+      `,
+    [eventId],
+  );
+
+  const optionId = optionResult.rows[0]?.id;
+
+  if (!optionId) {
+    throw new Error("The integration-test role option was not created.");
+  }
+
+  const groupResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO "role_request_groups" (
+          "event_id",
+          "name",
+          "channel_id",
+          "message_id",
+          "requires_positive_signup",
+          "opens_at",
+          "closes_at",
+          "created_by_user_id"
+        )
+        VALUES (
+          $1,
+          'General Role Requests',
+          $2,
+          $3,
+          false,
+          NOW() - INTERVAL '1 hour',
+          NOW() + INTERVAL '1 hour',
+          $4
+        )
+        RETURNING "id"
+      `,
+    [eventId, ROLE_REQUEST_CHANNEL_ID, OLD_MESSAGE_ID, ADMIN_USER_ID],
+  );
+
+  const groupId = groupResult.rows[0]?.id;
+
+  if (!groupId) {
+    throw new Error("The integration-test role-request group was not created.");
+  }
+
+  await pool.query(
+    `
+      INSERT INTO "role_request_group_options" (
+        "group_id",
+        "event_role_option_id",
+        "sort_order"
+      )
+      VALUES ($1, $2, 0)
+    `,
+    [groupId, optionId],
+  );
+
+  /*
+   * Represents legitimate lifecycle work created when the group was
+   * originally posted.
+   */
+  await pool.query(
+    `
+      INSERT INTO "scheduled_actions" (
+        "event_id",
+        "action_key",
+        "due_at",
+        "status"
+      )
+      VALUES (
+        $1,
+        $2,
+        NOW() + INTERVAL '1 hour',
+        'pending'
+      )
+    `,
+    [eventId, `role_request_group_close:${groupId}`],
+  );
+
+  return {
+    eventId,
+    groupId,
+    publishedAt,
+  };
+}
