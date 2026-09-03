@@ -27,6 +27,8 @@ const REPLACEMENT_MESSAGE_ID = "800000000000000004";
 
 const ADMIN_USER_ID = "800000000000000005";
 
+const SECOND_REPLACEMENT_MESSAGE_ID = "800000000000000006";
+
 describe("attendance message refresh and recovery", () => {
   let pool: Pool;
 
@@ -194,6 +196,241 @@ describe("attendance message refresh and recovery", () => {
               WHERE "event_id" = $1
               ORDER BY "action_key"
             `,
+      [fixture.eventId],
+    );
+
+    expect(actionResult.rows).toEqual([
+      {
+        action_key: "close_attendance",
+
+        status: "pending",
+
+        attempt_count: 0,
+      },
+    ]);
+  });
+
+  it("keeps only one authoritative replacement when deleted attendance-message recovery races", async () => {
+    // Arrange
+    const fixture = await createPublishedEvent(pool);
+
+    const firstReplacement = {
+      id: REPLACEMENT_MESSAGE_ID,
+
+      url: `https://discord.test/channels/${DISCORD_GUILD_ID}/${ATTENDANCE_CHANNEL_ID}/${REPLACEMENT_MESSAGE_ID}`,
+
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const secondReplacement = {
+      id: SECOND_REPLACEMENT_MESSAGE_ID,
+
+      url: `https://discord.test/channels/${DISCORD_GUILD_ID}/${ATTENDANCE_CHANNEL_ID}/${SECOND_REPLACEMENT_MESSAGE_ID}`,
+
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const replacementMessages = new Map([
+      [firstReplacement.id, firstReplacement],
+      [secondReplacement.id, secondReplacement],
+    ]);
+
+    const unknownMessageError = () =>
+      Object.assign(new Error("Unknown Message"), {
+        code: 10008,
+        status: 404,
+      });
+
+    /*
+     * Both refreshes initially observe the same deleted Discord message.
+     *
+     * The losing recovery later fetches whichever replacement won the
+     * conditional database update.
+     */
+    const fetchMessage = vi.fn(async (messageId: string) => {
+      if (messageId === OLD_MESSAGE_ID) {
+        throw unknownMessageError();
+      }
+
+      const message = replacementMessages.get(messageId);
+
+      if (!message) {
+        throw unknownMessageError();
+      }
+
+      return message;
+    });
+
+    /*
+     * Do not allow either replacement send to finish until both refreshes
+     * have reached channel.send().
+     *
+     * This guarantees both callers independently observed the deleted old
+     * message before either can attempt the authoritative linkage swap.
+     */
+    let releaseBothSends: (() => void) | undefined;
+
+    const bothSendsStarted = new Promise<void>((resolve) => {
+      releaseBothSends = resolve;
+    });
+
+    let sendCount = 0;
+
+    const sendMessage = vi.fn(async () => {
+      const sendIndex = sendCount;
+
+      sendCount += 1;
+
+      if (sendCount === 2) {
+        releaseBothSends?.();
+      }
+
+      await bothSendsStarted;
+
+      if (sendIndex === 0) {
+        return firstReplacement;
+      }
+
+      return secondReplacement;
+    });
+
+    const channel = {
+      id: ATTENDANCE_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      messages: {
+        fetch: fetchMessage,
+      },
+
+      send: sendMessage,
+    };
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: vi.fn().mockResolvedValue(channel),
+      },
+    } as unknown as Guild;
+
+    // Act
+    const [firstResult, secondResult] = await Promise.all([
+      refreshAttendanceMessage(guild, fixture.eventId),
+
+      refreshAttendanceMessage(guild, fixture.eventId),
+    ]);
+
+    // Assert
+    /*
+     * Both callers really reached recovery rather than one simply seeing an
+     * already-recovered message from the start.
+     */
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+
+    expect(
+      fetchMessage.mock.calls.filter(
+        ([messageId]) => messageId === OLD_MESSAGE_ID,
+      ),
+    ).toHaveLength(2);
+
+    /*
+     * There must still be exactly one logical attendance-message linkage.
+     */
+    const messageResult = await pool.query<{
+      id: number;
+      channel_id: string;
+      message_id: string;
+      kind: string;
+      deleted_at: Date | null;
+    }>(
+      `
+          SELECT
+            "id",
+            "channel_id",
+            "message_id",
+            "kind",
+            "deleted_at"
+          FROM "event_messages"
+          WHERE
+            "event_id" = $1
+            AND
+            "kind" = 'attendance'
+        `,
+      [fixture.eventId],
+    );
+
+    expect(messageResult.rows).toHaveLength(1);
+
+    const authoritativeMessageId = messageResult.rows[0]?.message_id;
+
+    expect([REPLACEMENT_MESSAGE_ID, SECOND_REPLACEMENT_MESSAGE_ID]).toContain(
+      authoritativeMessageId,
+    );
+
+    expect(messageResult.rows[0]).toMatchObject({
+      id: fixture.eventMessageId,
+
+      channel_id: ATTENDANCE_CHANNEL_ID,
+
+      kind: "attendance",
+
+      deleted_at: null,
+    });
+
+    /*
+     * Both refresh calls should ultimately report the same winning Discord
+     * message, even though each initially created its own candidate.
+     */
+    expect(firstResult.ok).toBe(true);
+
+    expect(secondResult.ok).toBe(true);
+
+    if (!firstResult.ok || !secondResult.ok) {
+      throw new Error(
+        "Expected both concurrent attendance recoveries to succeed.",
+      );
+    }
+
+    expect(firstResult.messageUrl).toBe(secondResult.messageUrl);
+
+    const authoritativeMessage =
+      authoritativeMessageId === firstReplacement.id
+        ? firstReplacement
+        : secondReplacement;
+
+    const duplicateMessage =
+      authoritativeMessageId === firstReplacement.id
+        ? secondReplacement
+        : firstReplacement;
+
+    expect(firstResult.messageUrl).toBe(authoritativeMessage.url);
+
+    /*
+     * The winner remains in Discord. The losing recovery cleans up the
+     * duplicate message it created.
+     */
+    expect(authoritativeMessage.delete).not.toHaveBeenCalled();
+
+    expect(duplicateMessage.delete).toHaveBeenCalledTimes(1);
+
+    /*
+     * Recovery must not recreate or modify lifecycle scheduler work.
+     */
+    const actionResult = await pool.query<{
+      action_key: string;
+      status: string;
+      attempt_count: number;
+    }>(
+      `
+          SELECT
+            "action_key",
+            "status",
+            "attempt_count"
+          FROM "scheduled_actions"
+          WHERE "event_id" = $1
+          ORDER BY "action_key"
+        `,
       [fixture.eventId],
     );
 
