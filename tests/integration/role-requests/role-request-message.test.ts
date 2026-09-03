@@ -437,6 +437,135 @@ describe("role-request group message refresh and recovery", () => {
       },
     ]);
   });
+
+  it("refreshes an existing role-request group message without creating a replacement", async () => {
+    // Arrange
+    const fixture = await createRoleRequestGroup(pool);
+
+    const editMessage = vi.fn().mockResolvedValue(undefined);
+
+    const existingMessage = {
+      id: OLD_MESSAGE_ID,
+
+      edit: editMessage,
+    };
+
+    const fetchMessage = vi.fn().mockResolvedValue(existingMessage);
+
+    const sendMessage = vi.fn();
+
+    const channel = {
+      id: ROLE_REQUEST_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      messages: {
+        fetch: fetchMessage,
+      },
+
+      send: sendMessage,
+    };
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: vi.fn().mockResolvedValue(channel),
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await refreshRoleRequestGroupMessage(guild, fixture.groupId);
+
+    // Assert
+    expect(fetchMessage).toHaveBeenCalledTimes(1);
+
+    expect(fetchMessage).toHaveBeenCalledWith(OLD_MESSAGE_ID);
+
+    expect(editMessage).toHaveBeenCalledTimes(1);
+
+    expect(editMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        allowedMentions: {
+          parse: [],
+        },
+
+        embeds: expect.any(Array),
+
+        components: expect.any(Array),
+      }),
+    );
+
+    /*
+     * Ordinary refresh must not enter recovery.
+     */
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    expect(result).toBe(true);
+
+    /*
+     * The existing Discord linkage remains authoritative.
+     */
+    const groupResult = await pool.query<{
+      id: number;
+      channel_id: string;
+      message_id: string | null;
+      closed_at: Date | null;
+    }>(
+      `
+          SELECT
+            "id",
+            "channel_id",
+            "message_id",
+            "closed_at"
+          FROM "role_request_groups"
+          WHERE "id" = $1
+        `,
+      [fixture.groupId],
+    );
+
+    expect(groupResult.rows).toEqual([
+      {
+        id: fixture.groupId,
+
+        channel_id: ROLE_REQUEST_CHANNEL_ID,
+
+        message_id: OLD_MESSAGE_ID,
+
+        closed_at: null,
+      },
+    ]);
+
+    /*
+     * Refreshing presentation must not disturb existing lifecycle work.
+     */
+    const actionResult = await pool.query<{
+      action_key: string;
+      status: string;
+      attempt_count: number;
+    }>(
+      `
+          SELECT
+            "action_key",
+            "status",
+            "attempt_count"
+          FROM "scheduled_actions"
+          WHERE "event_id" = $1
+          ORDER BY "action_key"
+        `,
+      [fixture.eventId],
+    );
+
+    expect(actionResult.rows).toEqual([
+      {
+        action_key: `role_request_group_close:${fixture.groupId}`,
+
+        status: "pending",
+
+        attempt_count: 0,
+      },
+    ]);
+  });
 });
 
 async function createRoleRequestGroup(pool: Pool): Promise<{
