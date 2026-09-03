@@ -1022,6 +1022,91 @@ describe("event scheduler", () => {
     ).toHaveBeenCalledTimes(1);
   });
 
+  it("reconciles an already-posted organiser warning when the assignment times out", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserTimeout(pool);
+
+    /*
+     * Simulate the warning having been successfully posted earlier in the
+     * organiser response window.
+     */
+    await pool.query(
+      `
+        UPDATE
+          "event_organiser_assignments"
+        SET
+          "warning_channel_id" = $2,
+          "warning_message_id" = $3,
+          "updated_at" = NOW()
+        WHERE "id" = $1
+      `,
+      [fixture.assignmentId, "300000000000000010", "300000000000000011"],
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      ended_at: Date | null;
+      warning_channel_id: string | null;
+      warning_message_id: string | null;
+    }>(
+      `
+          SELECT
+            "status",
+            "is_current",
+            "ended_at",
+            "warning_channel_id",
+            "warning_message_id"
+          FROM
+            "event_organiser_assignments"
+          WHERE "id" = $1
+        `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toHaveLength(1);
+
+    expect.soft(assignmentResult.rows[0]).toMatchObject({
+      status: "timed_out",
+
+      is_current: false,
+
+      warning_channel_id: "300000000000000010",
+
+      warning_message_id: "300000000000000011",
+    });
+
+    expect(assignmentResult.rows[0]?.ended_at).toBeInstanceOf(Date);
+
+    /*
+     * The timeout is now authoritative. Any warning which previously said
+     * the organiser was still awaiting a response must be reconciled.
+     */
+    expect(
+      organiserNotificationMocks.reconcileOrganiserPendingWarning,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      organiserNotificationMocks.reconcileOrganiserPendingWarning,
+    ).toHaveBeenCalledWith({
+      guild: expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+
+      assignmentId: fixture.assignmentId,
+    });
+  });
+
   it("does not send an organiser warning when the event completes after the scheduler reads it", async () => {
     // Arrange
     const fixture = await createOpenEventWithDueOrganiserWarning(pool);
