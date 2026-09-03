@@ -444,6 +444,146 @@ describe("attendance message refresh and recovery", () => {
       },
     ]);
   });
+
+  it("refreshes an existing attendance message without creating a replacement", async () => {
+    // Arrange
+    const fixture = await createPublishedEvent(pool);
+
+    const editMessage = vi.fn().mockResolvedValue(undefined);
+
+    const existingMessage = {
+      id: OLD_MESSAGE_ID,
+
+      url: `https://discord.test/channels/${DISCORD_GUILD_ID}/${ATTENDANCE_CHANNEL_ID}/${OLD_MESSAGE_ID}`,
+
+      edit: editMessage,
+    };
+
+    const fetchMessage = vi.fn().mockResolvedValue(existingMessage);
+
+    const sendMessage = vi.fn();
+
+    const channel = {
+      id: ATTENDANCE_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      messages: {
+        fetch: fetchMessage,
+      },
+
+      send: sendMessage,
+    };
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: vi.fn().mockResolvedValue(channel),
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await refreshAttendanceMessage(guild, fixture.eventId);
+
+    // Assert
+    expect(fetchMessage).toHaveBeenCalledTimes(1);
+
+    expect(fetchMessage).toHaveBeenCalledWith(OLD_MESSAGE_ID);
+
+    /*
+     * The existing linked message is refreshed in place.
+     */
+    expect(editMessage).toHaveBeenCalledTimes(1);
+
+    expect(editMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        allowedMentions: {
+          parse: [],
+        },
+
+        embeds: expect.any(Array),
+
+        components: expect.any(Array),
+      }),
+    );
+
+    /*
+     * Recovery is unnecessary, so no replacement message is posted.
+     */
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    expect(result).toEqual({
+      ok: true,
+
+      messageUrl: existingMessage.url,
+    });
+
+    /*
+     * The authoritative Discord linkage remains unchanged.
+     */
+    const messageResult = await pool.query<{
+      id: number;
+      channel_id: string;
+      message_id: string;
+      deleted_at: Date | null;
+    }>(
+      `
+          SELECT
+            "id",
+            "channel_id",
+            "message_id",
+            "deleted_at"
+          FROM "event_messages"
+          WHERE
+            "event_id" = $1
+            AND "kind" = 'attendance'
+        `,
+      [fixture.eventId],
+    );
+
+    expect(messageResult.rows).toEqual([
+      {
+        id: fixture.eventMessageId,
+
+        channel_id: ATTENDANCE_CHANNEL_ID,
+
+        message_id: OLD_MESSAGE_ID,
+
+        deleted_at: null,
+      },
+    ]);
+
+    /*
+     * An ordinary presentation refresh must not alter lifecycle work.
+     */
+    const actionResult = await pool.query<{
+      action_key: string;
+      status: string;
+      attempt_count: number;
+    }>(
+      `
+          SELECT
+            "action_key",
+            "status",
+            "attempt_count"
+          FROM "scheduled_actions"
+          WHERE "event_id" = $1
+          ORDER BY "action_key"
+        `,
+      [fixture.eventId],
+    );
+
+    expect(actionResult.rows).toEqual([
+      {
+        action_key: "close_attendance",
+
+        status: "pending",
+
+        attempt_count: 0,
+      },
+    ]);
+  });
 });
 
 async function createPublishedEvent(pool: Pool): Promise<{
