@@ -27,6 +27,8 @@ const REPLACEMENT_MESSAGE_ID = "810000000000000004";
 
 const ADMIN_USER_ID = "810000000000000005";
 
+const SECOND_REPLACEMENT_MESSAGE_ID = "810000000000000006";
+
 describe("role-request group message refresh and recovery", () => {
   let pool: Pool;
 
@@ -192,6 +194,236 @@ describe("role-request group message refresh and recovery", () => {
               WHERE "event_id" = $1
               ORDER BY "action_key"
             `,
+      [fixture.eventId],
+    );
+
+    expect(actionResult.rows).toEqual([
+      {
+        action_key: `role_request_group_close:${fixture.groupId}`,
+
+        status: "pending",
+
+        attempt_count: 0,
+      },
+    ]);
+  });
+
+  it("keeps only one authoritative replacement when deleted role-request message recovery races", async () => {
+    // Arrange
+    const fixture = await createRoleRequestGroup(pool);
+
+    const firstReplacement = {
+      id: REPLACEMENT_MESSAGE_ID,
+
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const secondReplacement = {
+      id: SECOND_REPLACEMENT_MESSAGE_ID,
+
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const replacementMessages = new Map([
+      [firstReplacement.id, firstReplacement],
+      [secondReplacement.id, secondReplacement],
+    ]);
+
+    const unknownMessageError = () =>
+      Object.assign(new Error("Unknown Message"), {
+        code: 10008,
+        status: 404,
+      });
+
+    /*
+     * Both refreshes must initially observe the same deleted Discord
+     * message.
+     *
+     * Once one recovery wins the database linkage, the losing recovery
+     * should be able to fetch that winning replacement.
+     */
+    const fetchMessage = vi.fn(async (messageId: string) => {
+      if (messageId === OLD_MESSAGE_ID) {
+        throw unknownMessageError();
+      }
+
+      const message = replacementMessages.get(messageId);
+
+      if (!message) {
+        throw unknownMessageError();
+      }
+
+      return message;
+    });
+
+    /*
+     * Hold both channel.send() calls until each refresh has independently
+     * reached recovery.
+     *
+     * This prevents one refresh from completing recovery before the other
+     * has observed OLD_MESSAGE_ID as missing.
+     */
+    let releaseBothSends: (() => void) | undefined;
+
+    const bothSendsStarted = new Promise<void>((resolve) => {
+      releaseBothSends = resolve;
+    });
+
+    let sendCount = 0;
+
+    const sendMessage = vi.fn(async () => {
+      const sendIndex = sendCount;
+
+      sendCount += 1;
+
+      if (sendCount === 2) {
+        releaseBothSends?.();
+      }
+
+      await bothSendsStarted;
+
+      return sendIndex === 0 ? firstReplacement : secondReplacement;
+    });
+
+    const channel = {
+      id: ROLE_REQUEST_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      messages: {
+        fetch: fetchMessage,
+      },
+
+      send: sendMessage,
+    };
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: vi.fn().mockResolvedValue(channel),
+      },
+    } as unknown as Guild;
+
+    // Act
+    const [firstResult, secondResult] = await Promise.all([
+      refreshRoleRequestGroupMessage(guild, fixture.groupId),
+
+      refreshRoleRequestGroupMessage(guild, fixture.groupId),
+    ]);
+
+    // Assert
+    /*
+     * Both callers genuinely entered recovery.
+     */
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+
+    expect(
+      fetchMessage.mock.calls.filter(
+        ([messageId]) => messageId === OLD_MESSAGE_ID,
+      ),
+    ).toHaveLength(2);
+
+    /*
+     * There is still exactly one logical role-request group.
+     */
+    const groupResult = await pool.query<{
+      id: number;
+      event_id: number;
+      channel_id: string;
+      message_id: string | null;
+      closed_at: Date | null;
+    }>(
+      `
+          SELECT
+            "id",
+            "event_id",
+            "channel_id",
+            "message_id",
+            "closed_at"
+          FROM "role_request_groups"
+          WHERE "event_id" = $1
+        `,
+      [fixture.eventId],
+    );
+
+    expect(groupResult.rows).toHaveLength(1);
+
+    const authoritativeMessageId = groupResult.rows[0]?.message_id;
+
+    expect([REPLACEMENT_MESSAGE_ID, SECOND_REPLACEMENT_MESSAGE_ID]).toContain(
+      authoritativeMessageId,
+    );
+
+    expect(groupResult.rows[0]).toMatchObject({
+      id: fixture.groupId,
+
+      event_id: fixture.eventId,
+
+      channel_id: ROLE_REQUEST_CHANNEL_ID,
+
+      closed_at: null,
+    });
+
+    /*
+     * Both callers ultimately succeed even though only one candidate
+     * replacement becomes authoritative.
+     */
+    expect(firstResult).toBe(true);
+
+    expect(secondResult).toBe(true);
+
+    const authoritativeMessage =
+      authoritativeMessageId === firstReplacement.id
+        ? firstReplacement
+        : secondReplacement;
+
+    const duplicateMessage =
+      authoritativeMessageId === firstReplacement.id
+        ? secondReplacement
+        : firstReplacement;
+
+    /*
+     * The winning Discord message remains. The losing candidate is removed.
+     */
+    expect(authoritativeMessage.delete).not.toHaveBeenCalled();
+
+    expect(duplicateMessage.delete).toHaveBeenCalledTimes(1);
+
+    /*
+     * Recovery must not recreate the group's role-option membership.
+     */
+    const groupOptionResult = await pool.query<{
+      group_id: number;
+    }>(
+      `
+          SELECT
+            "group_id"
+          FROM "role_request_group_options"
+          WHERE "group_id" = $1
+        `,
+      [fixture.groupId],
+    );
+
+    expect(groupOptionResult.rows).toHaveLength(1);
+
+    /*
+     * Existing lifecycle scheduling remains singular and untouched.
+     */
+    const actionResult = await pool.query<{
+      action_key: string;
+      status: string;
+      attempt_count: number;
+    }>(
+      `
+          SELECT
+            "action_key",
+            "status",
+            "attempt_count"
+          FROM "scheduled_actions"
+          WHERE "event_id" = $1
+          ORDER BY "action_key"
+        `,
       [fixture.eventId],
     );
 
