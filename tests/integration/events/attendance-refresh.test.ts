@@ -718,6 +718,64 @@ describe("attendance message refresh and recovery", () => {
       },
     ]);
   });
+
+  it("does not disguise an unexpected attendance-channel fetch failure as a missing channel", async () => {
+    // Arrange
+    const fixture = await createPublishedEvent(pool);
+
+    const unexpectedError = new Error("Temporary Discord failure");
+
+    const fetchChannel = vi.fn().mockRejectedValue(unexpectedError);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+    } as unknown as Guild;
+
+    // Act / Assert
+    await expect(refreshAttendanceMessage(guild, fixture.eventId)).rejects.toBe(
+      unexpectedError,
+    );
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(ATTENDANCE_CHANNEL_ID);
+
+    /*
+     * An unexpected Discord/network failure must not mutate authoritative
+     * state merely because presentation could not currently be refreshed.
+     */
+    const messageResult = await pool.query<{
+      id: number;
+      channel_id: string;
+      message_id: string;
+    }>(
+      `
+          SELECT
+            "id",
+            "channel_id",
+            "message_id"
+          FROM "event_messages"
+          WHERE
+            "event_id" = $1
+            AND "kind" = 'attendance'
+        `,
+      [fixture.eventId],
+    );
+
+    expect(messageResult.rows).toEqual([
+      {
+        id: fixture.eventMessageId,
+
+        channel_id: ATTENDANCE_CHANNEL_ID,
+
+        message_id: OLD_MESSAGE_ID,
+      },
+    ]);
+  });
 });
 
 async function createPublishedEvent(pool: Pool): Promise<{

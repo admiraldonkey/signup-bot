@@ -166,7 +166,22 @@ export async function refreshAttendanceMessage(
     };
   }
 
-  const channel = await guild.channels.fetch(event.channelId);
+  const channel = await guild.channels
+    .fetch(event.channelId)
+    .catch((error: unknown) => {
+      /*
+       * Discord explicitly reports that the configured channel no longer
+       * exists. Treat this the same as a null channel lookup.
+       *
+       * Other failures remain unexpected and must not be disguised as a
+       * deleted-channel/configuration problem.
+       */
+      if (isUnknownChannelError(error)) {
+        return null;
+      }
+
+      throw error;
+    });
 
   if (
     !channel ||
@@ -403,5 +418,19 @@ function isUnknownMessageError(error: unknown): boolean {
         code?: unknown;
       }
     ).code === 10008
+  );
+}
+
+function isUnknownChannelError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+
+  return (
+    (
+      error as {
+        code?: unknown;
+      }
+    ).code === 10003
   );
 }
