@@ -335,7 +335,22 @@ export async function refreshRoleRequestGroupMessage(
     return false;
   }
 
-  const channel = await guild.channels.fetch(group.channelId);
+  const channel = await guild.channels
+    .fetch(group.channelId)
+    .catch((error: unknown) => {
+      /*
+       * Discord explicitly reports that the stored role-request channel
+       * no longer exists.
+       *
+       * Treat this as an unavailable presentation destination, but do not
+       * disguise unrelated Discord/network failures as a deleted channel.
+       */
+      if (isUnknownChannelError(error)) {
+        return null;
+      }
+
+      throw error;
+    });
 
   if (
     !channel ||
@@ -568,5 +583,19 @@ function isUnknownMessageError(error: unknown): boolean {
         code?: unknown;
       }
     ).code === 10008
+  );
+}
+
+function isUnknownChannelError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+
+  return (
+    (
+      error as {
+        code?: unknown;
+      }
+    ).code === 10003
   );
 }

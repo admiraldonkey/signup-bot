@@ -701,6 +701,100 @@ describe("role-request group message refresh and recovery", () => {
       },
     ]);
   });
+
+  it("does not disguise an unexpected role-request channel fetch failure as a missing channel", async () => {
+    // Arrange
+    const fixture = await createRoleRequestGroup(pool);
+
+    const unexpectedError = new Error("Temporary Discord failure");
+
+    const fetchChannel = vi.fn().mockRejectedValue(unexpectedError);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+    } as unknown as Guild;
+
+    // Act / Assert
+    await expect(
+      refreshRoleRequestGroupMessage(guild, fixture.groupId),
+    ).rejects.toBe(unexpectedError);
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(ROLE_REQUEST_CHANNEL_ID);
+
+    /*
+     * A transient or unexpected Discord failure must not mutate the
+     * authoritative role-request linkage.
+     */
+    const groupResult = await pool.query<{
+      id: number;
+      event_id: number;
+      channel_id: string;
+      message_id: string | null;
+      closed_at: Date | null;
+    }>(
+      `
+          SELECT
+            "id",
+            "event_id",
+            "channel_id",
+            "message_id",
+            "closed_at"
+          FROM "role_request_groups"
+          WHERE "id" = $1
+        `,
+      [fixture.groupId],
+    );
+
+    expect(groupResult.rows).toEqual([
+      {
+        id: fixture.groupId,
+
+        event_id: fixture.eventId,
+
+        channel_id: ROLE_REQUEST_CHANNEL_ID,
+
+        message_id: OLD_MESSAGE_ID,
+
+        closed_at: null,
+      },
+    ]);
+
+    /*
+     * Existing scheduler state also remains untouched.
+     */
+    const actionResult = await pool.query<{
+      action_key: string;
+      status: string;
+      attempt_count: number;
+    }>(
+      `
+          SELECT
+            "action_key",
+            "status",
+            "attempt_count"
+          FROM "scheduled_actions"
+          WHERE "event_id" = $1
+          ORDER BY "action_key"
+        `,
+      [fixture.eventId],
+    );
+
+    expect(actionResult.rows).toEqual([
+      {
+        action_key: `role_request_group_close:${fixture.groupId}`,
+
+        status: "pending",
+
+        attempt_count: 0,
+      },
+    ]);
+  });
 });
 
 async function createRoleRequestGroup(pool: Pool): Promise<{
