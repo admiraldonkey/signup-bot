@@ -566,6 +566,141 @@ describe("role-request group message refresh and recovery", () => {
       },
     ]);
   });
+
+  it("fails safely when the linked role-request channel has been deleted", async () => {
+    // Arrange
+    const fixture = await createRoleRequestGroup(pool);
+
+    /*
+     * Discord reports a deleted/missing channel as Unknown Channel.
+     *
+     * There is no safe automatic recovery destination here. The group may
+     * intentionally have been posted somewhere other than the guild's
+     * current/default role-request channel.
+     */
+    const unknownChannelError = Object.assign(new Error("Unknown Channel"), {
+      code: 10003,
+      status: 404,
+    });
+
+    const fetchChannel = vi.fn().mockRejectedValue(unknownChannelError);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await refreshRoleRequestGroupMessage(guild, fixture.groupId);
+
+    // Assert
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(ROLE_REQUEST_CHANNEL_ID);
+
+    /*
+     * Missing destination is an expected presentation/configuration
+     * failure, not an exception which should escape the refresh helper.
+     */
+    expect(result).toBe(false);
+
+    /*
+     * The logical role-request group and its old Discord linkage remain
+     * intact. The bot must not guess another destination.
+     */
+    const groupResult = await pool.query<{
+      id: number;
+      event_id: number;
+      channel_id: string;
+      message_id: string | null;
+      closed_at: Date | null;
+    }>(
+      `
+          SELECT
+            "id",
+            "event_id",
+            "channel_id",
+            "message_id",
+            "closed_at"
+          FROM "role_request_groups"
+          WHERE "id" = $1
+        `,
+      [fixture.groupId],
+    );
+
+    expect(groupResult.rows).toEqual([
+      {
+        id: fixture.groupId,
+
+        event_id: fixture.eventId,
+
+        channel_id: ROLE_REQUEST_CHANNEL_ID,
+
+        message_id: OLD_MESSAGE_ID,
+
+        closed_at: null,
+      },
+    ]);
+
+    /*
+     * Losing the Discord presentation channel must not modify the event
+     * itself.
+     */
+    const eventResult = await pool.query<{
+      status: string;
+      published_at: Date;
+    }>(
+      `
+          SELECT
+            "status",
+            "published_at"
+          FROM "events"
+          WHERE "id" = $1
+        `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toHaveLength(1);
+
+    expect(eventResult.rows[0]?.status).toBe("open");
+
+    expect(eventResult.rows[0]?.published_at.getTime()).toBe(
+      fixture.publishedAt.getTime(),
+    );
+
+    /*
+     * Existing group lifecycle scheduling remains untouched.
+     */
+    const actionResult = await pool.query<{
+      action_key: string;
+      status: string;
+      attempt_count: number;
+    }>(
+      `
+          SELECT
+            "action_key",
+            "status",
+            "attempt_count"
+          FROM "scheduled_actions"
+          WHERE "event_id" = $1
+          ORDER BY "action_key"
+        `,
+      [fixture.eventId],
+    );
+
+    expect(actionResult.rows).toEqual([
+      {
+        action_key: `role_request_group_close:${fixture.groupId}`,
+
+        status: "pending",
+
+        attempt_count: 0,
+      },
+    ]);
+  });
 });
 
 async function createRoleRequestGroup(pool: Pool): Promise<{
