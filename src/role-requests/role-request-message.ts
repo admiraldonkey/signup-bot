@@ -335,7 +335,22 @@ export async function refreshRoleRequestGroupMessage(
     return false;
   }
 
-  const channel = await guild.channels.fetch(group.channelId);
+  const channel = await guild.channels
+    .fetch(group.channelId)
+    .catch((error: unknown) => {
+      /*
+       * Discord explicitly reports that the stored role-request channel
+       * no longer exists.
+       *
+       * Treat this as an unavailable presentation destination, but do not
+       * disguise unrelated Discord/network failures as a deleted channel.
+       */
+      if (isUnknownChannelError(error)) {
+        return null;
+      }
+
+      throw error;
+    });
 
   if (
     !channel ||
@@ -345,25 +360,140 @@ export async function refreshRoleRequestGroupMessage(
     return false;
   }
 
-  let message;
+  /*
+   * Both the ordinary refresh path and the deleted-message recovery path
+   * render from the same authoritative database state.
+   */
+  const payload = {
+    ...(await buildRoleRequestGroupMessagePayload(groupId)),
+
+    allowedMentions: {
+      /*
+       * Refreshing or recovering a presentation message must not trigger
+       * fresh role/member notifications.
+       */
+      parse: [],
+    },
+  };
+
+  /*
+   * Normal path: refresh the existing linked Discord message.
+   */
+  try {
+    const message = await channel.messages.fetch(group.messageId);
+
+    await message.edit(payload);
+
+    return true;
+  } catch (error: unknown) {
+    /*
+     * Automatic replacement is safe only when Discord explicitly says the
+     * stored message no longer exists.
+     *
+     * Preserve the previous behaviour for other fetch failures rather than
+     * risking a duplicate message during a temporary Discord/API problem.
+     */
+    if (!isUnknownMessageError(error)) {
+      return false;
+    }
+  }
+
+  /*
+   * The role-request group still exists and its destination channel is
+   * available, but the linked Discord message has been deleted.
+   *
+   * Repair only the presentation. Do not recreate the group, options,
+   * requests or scheduled close action.
+   */
+  const replacementMessage = await channel.send(payload);
+
+  let claimedReplacement:
+    | {
+        messageId: string | null;
+      }
+    | undefined;
 
   try {
-    message = await channel.messages.fetch(group.messageId);
-  } catch {
+    [claimedReplacement] = await db
+      .update(roleRequestGroups)
+      .set({
+        messageId: replacementMessage.id,
+      })
+      .where(
+        and(
+          eq(roleRequestGroups.id, groupId),
+
+          /*
+           * Concurrency fence:
+           *
+           * this recovery may replace only the exact stale Discord message
+           * ID which it originally observed.
+           */
+          eq(roleRequestGroups.messageId, group.messageId),
+        ),
+      )
+      .returning({
+        messageId: roleRequestGroups.messageId,
+      });
+  } catch (error: unknown) {
+    /*
+     * PostgreSQL remains authoritative. If we could not record this
+     * replacement, remove the Discord message rather than knowingly leaving
+     * behind an untracked duplicate.
+     */
+    await replacementMessage.delete().catch((cleanupError: unknown) => {
+      console.error(
+        `Failed to delete replacement role-request group message ${replacementMessage.id} after database recovery failure:`,
+        cleanupError,
+      );
+    });
+
+    throw error;
+  }
+
+  /*
+   * Our conditional linkage update won.
+   */
+  if (claimedReplacement) {
+    return true;
+  }
+
+  /*
+   * Another refresh recovered the same deleted message after our initial
+   * read but before our conditional update.
+   *
+   * Remove our duplicate and use the linkage which won in PostgreSQL.
+   */
+  await replacementMessage.delete().catch((cleanupError: unknown) => {
+    console.error(
+      `Failed to delete duplicate recovered role-request group message ${replacementMessage.id}:`,
+      cleanupError,
+    );
+  });
+
+  const [currentLink] = await db
+    .select({
+      messageId: roleRequestGroups.messageId,
+    })
+    .from(roleRequestGroups)
+    .where(eq(roleRequestGroups.id, groupId))
+    .limit(1);
+
+  if (!currentLink?.messageId || currentLink.messageId === group.messageId) {
     return false;
   }
 
-  const payload = await buildRoleRequestGroupMessagePayload(groupId);
+  /*
+   * Verify that the winning replacement is actually available rather than
+   * reporting success solely because its ID reached PostgreSQL.
+   */
+  try {
+    await channel.messages.fetch(currentLink.messageId);
 
-  await message.edit({
-    ...payload,
-
-    allowedMentions: {
-      parse: [],
-    },
-  });
-
-  return true;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function refreshRoleRequestMessages(
@@ -440,4 +570,32 @@ function formatSignupMarker(
     case null:
       return " • ⚪ No signup";
   }
+}
+
+function isUnknownMessageError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+
+  return (
+    (
+      error as {
+        code?: unknown;
+      }
+    ).code === 10008
+  );
+}
+
+function isUnknownChannelError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+
+  return (
+    (
+      error as {
+        code?: unknown;
+      }
+    ).code === 10003
+  );
 }
