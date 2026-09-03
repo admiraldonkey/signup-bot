@@ -36,6 +36,7 @@ import {
   cancelAllOrganiserEscalationActions,
 } from "../organisers/organiser-scheduling.js";
 import {
+  reconcileOrganiserPendingWarning,
   sendOrganiserCoverRequest,
   sendOrganiserPendingWarning,
 } from "../events/organiser-notification.js";
@@ -499,6 +500,8 @@ async function executeOrganiserWarning(
 
         isNotNull(eventOrganiserAssignments.responseDeadlineAt),
 
+        isNull(eventOrganiserAssignments.warningMessageId),
+
         ne(events.status, "cancelled"),
         ne(events.status, "completed"),
       ),
@@ -529,6 +532,88 @@ async function executeOrganiserWarning(
     console.warn(
       `Organiser warning for assignment ${assignment.id} could not be posted because no usable Event Administration channel was available.`,
     );
+
+    return;
+  }
+
+  /*
+   * Persist the exact Discord warning which was actually posted.
+   *
+   * Do not require the assignment to still be pending here. The organiser may
+   * have responded while channel.send() was in flight. Recording the Discord
+   * location even in that case gives us something concrete to reconcile.
+   *
+   * The NULL predicate prevents a second execution from replacing an already
+   * authoritative warning linkage.
+   */
+  const [storedWarning] = await db
+    .update(eventOrganiserAssignments)
+    .set({
+      warningChannelId: sent.channelId,
+
+      warningMessageId: sent.messageId,
+
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(eventOrganiserAssignments.id, assignment.id),
+
+        isNull(eventOrganiserAssignments.warningMessageId),
+      ),
+    )
+    .returning({
+      id: eventOrganiserAssignments.id,
+    });
+
+  if (!storedWarning) {
+    /*
+     * Another execution has already established an authoritative warning
+     * linkage. Do not claim this send as the live warning.
+     *
+     * We will add explicit duplicate-cleanup coverage when we exercise this
+     * concurrency case.
+     */
+    return;
+  }
+
+  /*
+   * Discord send was an external boundary. Re-check after it completes.
+   *
+   * If the organiser responded, was replaced, or the event became terminal
+   * while the warning was being sent, reconcile the just-recorded message
+   * rather than leaving a stale pending warning behind.
+   */
+  const [postSendState] = await db
+    .select({
+      status: eventOrganiserAssignments.status,
+
+      isCurrent: eventOrganiserAssignments.isCurrent,
+
+      eventStatus: events.status,
+    })
+    .from(eventOrganiserAssignments)
+    .innerJoin(events, eq(events.id, eventOrganiserAssignments.eventId))
+    .where(eq(eventOrganiserAssignments.id, assignment.id))
+    .limit(1);
+
+  if (
+    !postSendState ||
+    !postSendState.isCurrent ||
+    postSendState.status !== "pending" ||
+    postSendState.eventStatus === "cancelled" ||
+    postSendState.eventStatus === "completed"
+  ) {
+    await reconcileOrganiserPendingWarning({
+      guild,
+
+      assignmentId: assignment.id,
+    }).catch((error: unknown) => {
+      console.error(
+        `Failed to reconcile organiser warning for assignment ${assignment.id} after its state changed during delivery:`,
+        error,
+      );
+    });
 
     return;
   }

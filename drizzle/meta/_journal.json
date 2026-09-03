@@ -92,6 +92,13 @@
       "when": 1787246299415,
       "tag": "0012_add-event-publication-scheduling",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1788465318708,
+      "tag": "0013_add-organiser-escalation-id-fields",
+      "breakpoints": true
     }
   ]
 }

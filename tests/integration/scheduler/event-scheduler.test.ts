@@ -36,7 +36,13 @@ vi.mock("../../../src/events/attendance-refresh.js", () => ({
 }));
 
 const organiserNotificationMocks = vi.hoisted(() => ({
-  sendOrganiserPendingWarning: vi.fn().mockResolvedValue(true),
+  sendOrganiserPendingWarning: vi.fn().mockResolvedValue({
+    channelId: "300000000000000010",
+
+    messageId: "300000000000000011",
+  }),
+
+  reconcileOrganiserPendingWarning: vi.fn().mockResolvedValue(true),
 
   sendOrganiserCoverRequest: vi.fn().mockResolvedValue("pinged"),
 }));
@@ -44,6 +50,9 @@ const organiserNotificationMocks = vi.hoisted(() => ({
 vi.mock("../../../src/events/organiser-notification.js", () => ({
   sendOrganiserPendingWarning:
     organiserNotificationMocks.sendOrganiserPendingWarning,
+
+  reconcileOrganiserPendingWarning:
+    organiserNotificationMocks.reconcileOrganiserPendingWarning,
 
   sendOrganiserCoverRequest:
     organiserNotificationMocks.sendOrganiserCoverRequest,
@@ -76,6 +85,7 @@ describe("event scheduler", () => {
     roleRequestMessageMocks.refreshRoleRequestMessages.mockClear();
     attendanceRefreshMocks.refreshAttendanceMessage.mockClear();
     organiserNotificationMocks.sendOrganiserPendingWarning.mockClear();
+    organiserNotificationMocks.reconcileOrganiserPendingWarning.mockClear();
     organiserNotificationMocks.sendOrganiserCoverRequest.mockClear();
   });
 
@@ -1135,6 +1145,269 @@ describe("event scheduler", () => {
     expect.soft(auditResult.rows).toEqual([]);
   });
 
+  it("reconciles an organiser warning when the assignment is confirmed while the warning send is in flight", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserWarning(pool);
+
+    let signalWarningSendStarted: (() => void) | undefined;
+
+    let releaseWarningSend: (() => void) | undefined;
+
+    const warningSendStarted = new Promise<void>((resolve) => {
+      signalWarningSendStarted = resolve;
+    });
+
+    const warningSendRelease = new Promise<void>((resolve) => {
+      releaseWarningSend = resolve;
+    });
+
+    /*
+     * Let the scheduler complete all of its eligibility checks and reach the
+     * actual Discord boundary, then hold the external send open.
+     */
+    organiserNotificationMocks.sendOrganiserPendingWarning.mockImplementationOnce(
+      async () => {
+        signalWarningSendStarted?.();
+
+        await warningSendRelease;
+
+        return {
+          channelId: "300000000000000010",
+
+          messageId: "300000000000000011",
+        };
+      },
+    );
+
+    let signalReconciliationStarted: (() => void) | undefined;
+
+    const reconciliationStarted = new Promise<void>((resolve) => {
+      signalReconciliationStarted = resolve;
+    });
+
+    organiserNotificationMocks.reconcileOrganiserPendingWarning.mockImplementationOnce(
+      async () => {
+        signalReconciliationStarted?.();
+
+        return true;
+      },
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    /*
+     * At this point:
+     *
+     * - the scheduler has revalidated the assignment as pending/current;
+     * - the warning send has started;
+     * - Discord has not yet returned a message ID;
+     * - PostgreSQL therefore cannot yet contain a warning linkage.
+     */
+    await warningSendStarted;
+
+    const beforeConfirmationResult = await pool.query<{
+      status: string;
+      warning_channel_id: string | null;
+      warning_message_id: string | null;
+    }>(
+      `
+          SELECT
+            "status",
+            "warning_channel_id",
+            "warning_message_id"
+          FROM
+            "event_organiser_assignments"
+          WHERE "id" = $1
+        `,
+      [fixture.assignmentId],
+    );
+
+    expect(beforeConfirmationResult.rows).toEqual([
+      {
+        status: "pending",
+
+        warning_channel_id: null,
+
+        warning_message_id: null,
+      },
+    ]);
+
+    /*
+     * Simulate the authoritative database state produced by a successful
+     * organiser confirmation while Discord is still completing the warning
+     * send.
+     *
+     * The organiser-button integration tests separately prove that the real
+     * confirmation flow produces this state and requests warning
+     * reconciliation.
+     */
+    await pool.query(
+      `
+        UPDATE
+          "event_organiser_assignments"
+        SET
+          "status" = 'confirmed',
+          "responded_at" = NOW(),
+          "updated_at" = NOW()
+        WHERE "id" = $1
+      `,
+      [fixture.assignmentId],
+    );
+
+    /*
+     * A real organiser response also cancels outstanding warning/timeout
+     * work. Mirror that ownership change while this scheduler worker still
+     * has its external send in flight.
+     */
+    await pool.query(
+      `
+        UPDATE
+          "scheduled_actions"
+        SET
+          "status" = 'cancelled',
+          "locked_at" = null,
+          "updated_at" = NOW()
+        WHERE "id" = $1
+      `,
+      [fixture.actionId],
+    );
+
+    /*
+     * The confirmation-side reconciliation would find no warning linkage at
+     * this instant because Discord has not returned the message yet.
+     *
+     * Allow the already-started send to finish. The scheduler must then
+     * persist the returned Discord IDs, notice that the assignment became
+     * confirmed meanwhile, and reconcile the newly-recorded warning itself.
+     */
+    releaseWarningSend?.();
+
+    await reconciliationStarted;
+
+    stopEventScheduler();
+
+    // Assert
+    expect(
+      organiserNotificationMocks.sendOrganiserPendingWarning,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      organiserNotificationMocks.reconcileOrganiserPendingWarning,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      organiserNotificationMocks.reconcileOrganiserPendingWarning,
+    ).toHaveBeenCalledWith({
+      guild: expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+
+      assignmentId: fixture.assignmentId,
+    });
+
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      responded_at: Date | null;
+      ended_at: Date | null;
+      warning_channel_id: string | null;
+      warning_message_id: string | null;
+    }>(
+      `
+          SELECT
+            "status",
+            "is_current",
+            "responded_at",
+            "ended_at",
+            "warning_channel_id",
+            "warning_message_id"
+          FROM
+            "event_organiser_assignments"
+          WHERE "id" = $1
+        `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toHaveLength(1);
+
+    expect.soft(assignmentResult.rows[0]).toMatchObject({
+      status: "confirmed",
+
+      is_current: true,
+
+      ended_at: null,
+
+      warning_channel_id: "300000000000000010",
+
+      warning_message_id: "300000000000000011",
+    });
+
+    expect(assignmentResult.rows[0]?.responded_at).toBeInstanceOf(Date);
+
+    /*
+     * The response won ownership of the scheduled warning action while the
+     * Discord send was in flight.
+     */
+    const actionResult = await pool.query<{
+      status: string;
+      locked_at: Date | null;
+      completed_at: Date | null;
+    }>(
+      `
+          SELECT
+            "status",
+            "locked_at",
+            "completed_at"
+          FROM
+            "scheduled_actions"
+          WHERE "id" = $1
+        `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect.soft(actionResult.rows[0]).toMatchObject({
+      status: "cancelled",
+
+      locked_at: null,
+    });
+
+    /*
+     * This is not a successful still-pending warning delivery. The warning
+     * crossed Discord only because its send was already in progress and was
+     * immediately reconciled after the response won.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+          SELECT
+            "action",
+            "outcome"
+          FROM "audit_logs"
+          WHERE
+            "target_type" =
+              'organiser_assignment'
+            AND
+            "target_id" = $1
+            AND
+            "action" =
+              'scheduler.organiser_warning'
+            AND
+            "outcome" =
+              'success'
+        `,
+      [String(fixture.assignmentId)],
+    );
+
+    expect.soft(auditResult.rows).toEqual([]);
+  });
+
   it("sends an organiser warning normally while the assignment and event remain active", async () => {
     // Arrange
     const fixture = await createOpenEventWithDueOrganiserWarning(pool);
@@ -1171,12 +1444,16 @@ describe("event scheduler", () => {
       status: string;
       is_current: boolean;
       ended_at: Date | null;
+      warning_channel_id: string | null;
+      warning_message_id: string | null;
     }>(
       `
       SELECT
         "status",
         "is_current",
-        "ended_at"
+        "ended_at",
+        "warning_channel_id",
+        "warning_message_id"
       FROM "event_organiser_assignments"
       WHERE "id" = $1
     `,
@@ -1193,6 +1470,8 @@ describe("event scheduler", () => {
       status: "pending",
       is_current: true,
       ended_at: null,
+      warning_channel_id: "300000000000000010",
+      warning_message_id: "300000000000000011",
     });
 
     const actionResult = await pool.query<{

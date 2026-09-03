@@ -13,6 +13,7 @@ import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
 import {
   parseOrganiserCoverClaimCustomId,
   parseOrganiserResponseCustomId,
+  reconcileOrganiserPendingWarning,
 } from "../events/organiser-notification.js";
 import {
   escalateAfterFailedOrganiserAssignment,
@@ -260,6 +261,20 @@ async function handleAssignmentResponse(
   let escalation: OrganiserEscalationResult | null = null;
 
   if (guild) {
+    await reconcileOrganiserPendingWarning({
+      guild,
+
+      assignmentId: assignment.id,
+    }).catch((error: unknown) => {
+      /*
+       * The organiser response is already authoritative. Failure to tidy an
+       * older Discord warning must not undo or misreport that response.
+       */
+      console.error(
+        `Failed to reconcile organiser warning for assignment ${assignment.id}:`,
+        error,
+      );
+    });
     if (parsed.action === "confirm") {
       await refreshAttendanceMessage(guild, assignment.eventId).catch(
         (error: unknown) => {
