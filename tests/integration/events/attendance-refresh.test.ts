@@ -584,6 +584,140 @@ describe("attendance message refresh and recovery", () => {
       },
     ]);
   });
+
+  it("fails safely when the linked attendance channel has been deleted", async () => {
+    // Arrange
+    const fixture = await createPublishedEvent(pool);
+
+    /*
+     * Discord reports a deleted/missing channel as Unknown Channel.
+     *
+     * Unlike a deleted message, there is no safe automatic recovery
+     * destination here: the original event may intentionally have been
+     * published somewhere other than the guild's current default channel.
+     */
+    const unknownChannelError = Object.assign(new Error("Unknown Channel"), {
+      code: 10003,
+      status: 404,
+    });
+
+    const fetchChannel = vi.fn().mockRejectedValue(unknownChannelError);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await refreshAttendanceMessage(guild, fixture.eventId);
+
+    // Assert
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(ATTENDANCE_CHANNEL_ID);
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "channel-unavailable",
+    });
+
+    /*
+     * Losing the Discord destination must not damage or rewrite the
+     * authoritative attendance-message linkage.
+     */
+    const messageResult = await pool.query<{
+      id: number;
+      channel_id: string;
+      message_id: string;
+      deleted_at: Date | null;
+    }>(
+      `
+          SELECT
+            "id",
+            "channel_id",
+            "message_id",
+            "deleted_at"
+          FROM "event_messages"
+          WHERE
+            "event_id" = $1
+            AND "kind" = 'attendance'
+        `,
+      [fixture.eventId],
+    );
+
+    expect(messageResult.rows).toEqual([
+      {
+        id: fixture.eventMessageId,
+
+        channel_id: ATTENDANCE_CHANNEL_ID,
+
+        message_id: OLD_MESSAGE_ID,
+
+        deleted_at: null,
+      },
+    ]);
+
+    /*
+     * Channel loss is a presentation/configuration failure, not an event
+     * lifecycle transition.
+     */
+    const eventResult = await pool.query<{
+      published_at: Date;
+      status: string;
+    }>(
+      `
+          SELECT
+            "published_at",
+            "status"
+          FROM "events"
+          WHERE "id" = $1
+        `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toHaveLength(1);
+
+    expect(eventResult.rows[0]?.published_at.getTime()).toBe(
+      fixture.publishedAt.getTime(),
+    );
+
+    expect(eventResult.rows[0]?.status).toBe("open");
+
+    /*
+     * Existing lifecycle work remains untouched. The bot must not treat a
+     * missing Discord channel as a reason to replay publication or rebuild
+     * scheduler state.
+     */
+    const actionResult = await pool.query<{
+      action_key: string;
+      status: string;
+      attempt_count: number;
+    }>(
+      `
+          SELECT
+            "action_key",
+            "status",
+            "attempt_count"
+          FROM "scheduled_actions"
+          WHERE "event_id" = $1
+          ORDER BY "action_key"
+        `,
+      [fixture.eventId],
+    );
+
+    expect(actionResult.rows).toEqual([
+      {
+        action_key: "close_attendance",
+
+        status: "pending",
+
+        attempt_count: 0,
+      },
+    ]);
+  });
 });
 
 async function createPublishedEvent(pool: Pool): Promise<{
