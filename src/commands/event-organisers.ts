@@ -15,6 +15,7 @@ import {
 import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
 import {
   type OrganiserNotificationDelivery,
+  reconcileOrganiserPendingWarning,
   sendOrganiserAssignmentNotification,
 } from "../events/organiser-notification.js";
 import {
@@ -443,6 +444,21 @@ export async function clearEventOrganiser(
     );
 
   await cancelOrganiserResponseActions(event.id, assignment.id);
+
+  await reconcileOrganiserPendingWarning({
+    guild: interaction.guild,
+
+    assignmentId: assignment.id,
+  }).catch((error: unknown) => {
+    /*
+     * The organiser removal is already authoritative. Failure to tidy an older
+     * Discord warning must not undo or misreport that administrative change.
+     */
+    console.error(
+      `Failed to reconcile organiser warning for assignment ${assignment.id} after removal:`,
+      error,
+    );
+  });
 
   if (assignment.activatedAt) {
     await refreshAttendanceMessage(interaction.guild, event.id);
