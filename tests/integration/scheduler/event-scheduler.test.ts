@@ -2007,6 +2007,100 @@ describe("event scheduler", () => {
     ]);
   });
 
+  it("retries an organiser cover request after an unexpected transient delivery failure", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserCoverRequest(pool);
+
+    const transientError = new Error(
+      "Temporary Discord cover-request transport failure.",
+    );
+
+    organiserNotificationMocks.sendOrganiserCoverRequest.mockRejectedValueOnce(
+      transientError,
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionAttemptSettled(pool, fixture.actionId, 1);
+
+    stopEventScheduler();
+
+    // Assert
+    const actionResult = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+      completed_at: Date | null;
+      last_error: string | null;
+      due_at: Date;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at",
+        "last_error",
+        "due_at"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect(actionResult.rows[0]).toMatchObject({
+      status: "pending",
+
+      attempt_count: 1,
+
+      locked_at: null,
+
+      completed_at: null,
+    });
+
+    expect(actionResult.rows[0]?.last_error).toContain(
+      "Temporary Discord cover-request transport failure.",
+    );
+
+    /*
+     * Attempt 1 uses the scheduler's normal one-minute retry delay.
+     */
+    expect(actionResult.rows[0]?.due_at.getTime()).toBeGreaterThan(Date.now());
+
+    expect(
+      organiserNotificationMocks.sendOrganiserCoverRequest,
+    ).toHaveBeenCalledTimes(1);
+
+    /*
+     * A transient exception does not mean the cover request itself reached a
+     * definitive delivery outcome, so no cover-request success/failure audit
+     * should be written yet.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'event'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.organiser_cover_request'
+    `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([]);
+  });
+
   it("does not report or refresh a successful automatic completion after cancellation wins the event-state race", async () => {
     // Arrange
     const fixture = await createOpenEventWithDueCompletion(pool);
