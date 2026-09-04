@@ -529,6 +529,35 @@ async function executeOrganiserWarning(
   });
 
   if (!sent) {
+    /*
+     * A null delivery means the configured Event Administration destination is
+     * definitively unavailable rather than temporarily failing.
+     *
+     * The scheduler action should therefore complete without retrying, but the
+     * missed warning must remain visible in the persistent audit trail.
+     */
+    await writeAuditLog({
+      guildId: assignment.guildDatabaseId,
+
+      guild,
+
+      actorUserId: null,
+
+      action: "scheduler.organiser_warning",
+
+      outcome: "failure",
+
+      summary: `Could not warn that organiser assignment #${assignment.id} for "${assignment.eventName}" is still awaiting confirmation because no usable Event Administration channel was available.`,
+
+      targetType: "organiser_assignment",
+
+      targetId: String(assignment.id),
+
+      details: {
+        delivery: "failed",
+      },
+    });
+
     console.warn(
       `Organiser warning for assignment ${assignment.id} could not be posted because no usable Event Administration channel was available.`,
     );
