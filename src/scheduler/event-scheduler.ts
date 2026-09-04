@@ -1418,6 +1418,49 @@ async function executeCompleteEvent(
 
   const completedGuild = await client.guilds.fetch(event.discordGuildId);
 
+  /*
+   * Completion leaves organiser assignment history intact, but any warning
+   * belonging to a still-current pending assignment is now obsolete.
+   *
+   * Query only after completion is authoritative so Discord presentation
+   * always follows PostgreSQL state.
+   */
+  const warnedOrganiserAssignments = await db
+    .select({
+      id: eventOrganiserAssignments.id,
+    })
+    .from(eventOrganiserAssignments)
+    .where(
+      and(
+        eq(eventOrganiserAssignments.eventId, eventId),
+
+        eq(eventOrganiserAssignments.status, "pending"),
+
+        eq(eventOrganiserAssignments.isCurrent, true),
+
+        isNotNull(eventOrganiserAssignments.warningChannelId),
+
+        isNotNull(eventOrganiserAssignments.warningMessageId),
+      ),
+    );
+
+  for (const assignment of warnedOrganiserAssignments) {
+    await reconcileOrganiserPendingWarning({
+      guild: completedGuild,
+
+      assignmentId: assignment.id,
+    }).catch((error: unknown) => {
+      /*
+       * Event completion is already authoritative. Failure to tidy an old
+       * Discord warning must not undo or misreport the completion.
+       */
+      console.error(
+        `Failed to reconcile organiser warning for assignment ${assignment.id} after event completion:`,
+        error,
+      );
+    });
+  }
+
   await refreshRoleRequestMessages(completedGuild, eventId);
 
   if (event.publishedAt) {
