@@ -47,6 +47,9 @@ const PUBLICATION_MESSAGE_ID = "100000000000000005";
 const BOT_USER_ID = "100000000000000006";
 const WARNING_CHANNEL_ID = "100000000000000007";
 const WARNING_MESSAGE_ID = "100000000000000008";
+const REPLACEMENT_ORGANISER_USER_ID = "100000000000000009";
+const BACKUP_ORGANISER_USER_ID = "100000000000000010";
+const BACKUP_WARNING_MESSAGE_ID = "100000000000000011";
 
 describe("primary organiser assignment", () => {
   let pool: Pool;
@@ -471,6 +474,232 @@ describe("primary organiser assignment", () => {
       assignmentId: fixture.assignmentId,
     });
   });
+
+  it("reconciles an already-posted warning when an administrator replaces the current primary", async () => {
+    // Arrange
+    const fixture = await createPublishedPendingPrimaryWithWarning(pool);
+
+    const interaction = createOrganiserSetInteraction(fixture.eventId, {
+      userId: REPLACEMENT_ORGANISER_USER_ID,
+      displayName: "Replacement Primary Organiser",
+    });
+
+    /*
+     * Reconciliation must happen only after PostgreSQL has made the old
+     * assignment non-current and replaced.
+     */
+    notificationMocks.reconcileOrganiserPendingWarning.mockImplementationOnce(
+      async (input: { assignmentId: number }) => {
+        expect(input.assignmentId).toBe(fixture.assignmentId);
+
+        const stateAtReconciliation = await pool.query<{
+          status: string;
+          is_current: boolean;
+        }>(
+          `
+          SELECT
+            "status",
+            "is_current"
+          FROM "event_organiser_assignments"
+          WHERE "id" = $1
+        `,
+          [fixture.assignmentId],
+        );
+
+        expect(stateAtReconciliation.rows).toEqual([
+          {
+            status: "replaced",
+            is_current: false,
+          },
+        ]);
+
+        return true;
+      },
+    );
+
+    // Act
+    await setEventOrganiser(interaction);
+
+    // Assert
+    const oldAssignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      warning_channel_id: string | null;
+      warning_message_id: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current",
+        "warning_channel_id",
+        "warning_message_id"
+      FROM "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    expect(oldAssignmentResult.rows).toEqual([
+      {
+        status: "replaced",
+        is_current: false,
+        warning_channel_id: WARNING_CHANNEL_ID,
+        warning_message_id: WARNING_MESSAGE_ID,
+      },
+    ]);
+
+    const currentAssignmentResult = await pool.query<{
+      discord_user_id: string;
+      slot: string;
+      status: string;
+      is_current: boolean;
+    }>(
+      `
+      SELECT
+        "discord_user_id",
+        "slot",
+        "status",
+        "is_current"
+      FROM "event_organiser_assignments"
+      WHERE
+        "event_id" = $1
+        AND "is_current" = true
+    `,
+      [fixture.eventId],
+    );
+
+    expect(currentAssignmentResult.rows).toEqual([
+      {
+        discord_user_id: REPLACEMENT_ORGANISER_USER_ID,
+        slot: "primary",
+        status: "pending",
+        is_current: true,
+      },
+    ]);
+
+    expect(
+      notificationMocks.reconcileOrganiserPendingWarning,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      notificationMocks.reconcileOrganiserPendingWarning,
+    ).toHaveBeenCalledWith({
+      guild: interaction.guild,
+
+      assignmentId: fixture.assignmentId,
+    });
+  });
+
+  it("reconciles an already-posted warning when a new primary supersedes an activated backup", async () => {
+    // Arrange
+    const fixture = await createPublishedActivatedBackupWithWarning(pool);
+
+    const interaction = createOrganiserSetInteraction(fixture.eventId, {
+      userId: REPLACEMENT_ORGANISER_USER_ID,
+      displayName: "Replacement Primary Organiser",
+    });
+
+    notificationMocks.reconcileOrganiserPendingWarning.mockImplementationOnce(
+      async (input: { assignmentId: number }) => {
+        expect(input.assignmentId).toBe(fixture.assignmentId);
+
+        const stateAtReconciliation = await pool.query<{
+          status: string;
+          is_current: boolean;
+        }>(
+          `
+          SELECT
+            "status",
+            "is_current"
+          FROM "event_organiser_assignments"
+          WHERE "id" = $1
+        `,
+          [fixture.assignmentId],
+        );
+
+        expect(stateAtReconciliation.rows).toEqual([
+          {
+            status: "replaced",
+            is_current: false,
+          },
+        ]);
+
+        return true;
+      },
+    );
+
+    // Act
+    await setEventOrganiser(interaction);
+
+    // Assert
+    const backupResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      warning_channel_id: string | null;
+      warning_message_id: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current",
+        "warning_channel_id",
+        "warning_message_id"
+      FROM "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    expect(backupResult.rows).toEqual([
+      {
+        status: "replaced",
+        is_current: false,
+        warning_channel_id: WARNING_CHANNEL_ID,
+        warning_message_id: BACKUP_WARNING_MESSAGE_ID,
+      },
+    ]);
+
+    const currentAssignmentResult = await pool.query<{
+      discord_user_id: string;
+      slot: string;
+      status: string;
+      is_current: boolean;
+    }>(
+      `
+      SELECT
+        "discord_user_id",
+        "slot",
+        "status",
+        "is_current"
+      FROM "event_organiser_assignments"
+      WHERE
+        "event_id" = $1
+        AND "is_current" = true
+    `,
+      [fixture.eventId],
+    );
+
+    expect(currentAssignmentResult.rows).toEqual([
+      {
+        discord_user_id: REPLACEMENT_ORGANISER_USER_ID,
+        slot: "primary",
+        status: "pending",
+        is_current: true,
+      },
+    ]);
+
+    expect(
+      notificationMocks.reconcileOrganiserPendingWarning,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      notificationMocks.reconcileOrganiserPendingWarning,
+    ).toHaveBeenCalledWith({
+      guild: interaction.guild,
+
+      assignmentId: fixture.assignmentId,
+    });
+  });
 });
 
 async function createUnpublishedEvent(pool: Pool): Promise<number> {
@@ -653,9 +882,125 @@ async function createPublishedPendingPrimaryWithWarning(pool: Pool): Promise<{
   };
 }
 
+async function createPublishedActivatedBackupWithWarning(pool: Pool): Promise<{
+  eventId: number;
+  assignmentId: number;
+}> {
+  const eventId = await createUnpublishedEvent(pool);
+
+  await pool.query(
+    `
+      UPDATE "events"
+      SET
+        "published_at" = NOW() - INTERVAL '30 minutes',
+        "status" = 'open'
+      WHERE "id" = $1
+    `,
+    [eventId],
+  );
+
+  /*
+   * Preserve realistic history: the original primary has already timed out,
+   * allowing the backup to have taken over the active organiser response
+   * lifecycle.
+   */
+  await pool.query(
+    `
+      INSERT INTO "event_organiser_assignments" (
+        "event_id",
+        "slot",
+        "discord_user_id",
+        "display_name_snapshot",
+        "status",
+        "is_current",
+        "assigned_by_user_id",
+        "activated_at",
+        "response_deadline_at",
+        "ended_at"
+      )
+      VALUES (
+        $1,
+        'primary',
+        $2,
+        'Original Primary Organiser',
+        'timed_out',
+        false,
+        $3,
+        NOW() - INTERVAL '30 minutes',
+        NOW() - INTERVAL '10 minutes',
+        NOW() - INTERVAL '10 minutes'
+      )
+    `,
+    [eventId, ORGANISER_USER_ID, ADMIN_USER_ID],
+  );
+
+  const assignmentResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "event_organiser_assignments" (
+        "event_id",
+        "slot",
+        "discord_user_id",
+        "display_name_snapshot",
+        "status",
+        "is_current",
+        "assigned_by_user_id",
+        "activated_at",
+        "response_deadline_at",
+        "warning_channel_id",
+        "warning_message_id"
+      )
+      VALUES (
+        $1,
+        'backup',
+        $2,
+        'Activated Backup Organiser',
+        'pending',
+        true,
+        $3,
+        NOW() - INTERVAL '10 minutes',
+        NOW() + INTERVAL '5 minutes',
+        $4,
+        $5
+      )
+      RETURNING "id"
+    `,
+    [
+      eventId,
+      BACKUP_ORGANISER_USER_ID,
+      ADMIN_USER_ID,
+      WARNING_CHANNEL_ID,
+      BACKUP_WARNING_MESSAGE_ID,
+    ],
+  );
+
+  const assignmentId = assignmentResult.rows[0]?.id;
+
+  if (!assignmentId) {
+    throw new Error(
+      "The integration-test activated backup assignment was not created.",
+    );
+  }
+
+  return {
+    eventId,
+    assignmentId,
+  };
+}
+
 function createOrganiserSetInteraction(
   eventId: number,
+  input: {
+    userId?: string;
+    displayName?: string;
+    slot?: "primary" | "backup";
+  } = {},
 ): ChatInputCommandInteraction<"cached"> {
+  const userId = input.userId ?? ORGANISER_USER_ID;
+  const displayName = input.displayName ?? "Primary Organiser";
+  const slot = input.slot ?? "primary";
+
   const interaction = {
     guildId: DISCORD_GUILD_ID,
 
@@ -685,7 +1030,7 @@ function createOrganiserSetInteraction(
 
       members: {
         fetch: vi.fn().mockResolvedValue({
-          displayName: "Primary Organiser",
+          displayName,
 
           roles: {
             cache: {
@@ -699,10 +1044,10 @@ function createOrganiserSetInteraction(
     options: {
       getInteger: () => eventId,
 
-      getString: () => "primary",
+      getString: () => slot,
 
       getUser: () => ({
-        id: ORGANISER_USER_ID,
+        id: userId,
         bot: false,
       }),
     },
