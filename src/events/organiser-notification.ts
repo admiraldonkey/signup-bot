@@ -416,66 +416,85 @@ export async function sendOrganiserCoverRequest(input: {
     return "failed";
   }
 
-  const [channel, role] = await Promise.all([
-    input.guild.channels.fetch(input.eventAdminChannelId),
+  try {
+    const [channel, role] = await Promise.all([
+      input.guild.channels.fetch(input.eventAdminChannelId),
 
-    input.guild.roles.fetch(input.eventOrganiserRoleId),
-  ]);
+      input.guild.roles.fetch(input.eventOrganiserRoleId),
+    ]);
 
-  if (
-    !channel ||
-    channel.type !== ChannelType.GuildText ||
-    !channel.isSendable() ||
-    !role
-  ) {
-    return "failed";
+    if (
+      !channel ||
+      channel.type !== ChannelType.GuildText ||
+      !channel.isSendable() ||
+      !role
+    ) {
+      return "failed";
+    }
+
+    const botMember =
+      input.guild.members.me ?? (await input.guild.members.fetchMe());
+
+    const permissions = channel.permissionsFor(botMember);
+
+    const canPingRole =
+      role.mentionable || permissions.has(PermissionFlagsBits.MentionEveryone);
+
+    await channel.send({
+      content: [
+        canPingRole ? `<@&${role.id}>` : `**${role.name}**`,
+
+        "",
+
+        "🚨 **Event organiser cover required**",
+
+        "",
+
+        `**${input.eventName}** (#${input.eventId}) no longer has an available assigned organiser.`,
+
+        "An eligible Event Organiser can claim responsibility below.",
+      ].join("\n"),
+
+      components: [
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setCustomId(buildOrganiserCoverClaimCustomId(input.eventId))
+            .setLabel("Claim Event")
+            .setEmoji("🫡")
+            .setStyle(ButtonStyle.Primary),
+        ),
+      ],
+
+      allowedMentions: canPingRole
+        ? {
+            parse: [],
+
+            roles: [role.id],
+          }
+        : {
+            parse: [],
+          },
+    });
+
+    return canPingRole ? "pinged" : "posted_without_ping";
+  } catch (error: unknown) {
+    /*
+     * The configured Event Administration channel may have been deleted
+     * before it was fetched or while the cover request send was in flight.
+     *
+     * Discord has explicitly told us that the destination no longer exists,
+     * so retrying against the same configured channel is not useful.
+     */
+    if (isDiscordErrorCode(error, 10003)) {
+      return "failed";
+    }
+
+    /*
+     * Unexpected Discord/network failures may be temporary. Preserve them so
+     * the scheduler can apply its normal retry/backoff behaviour.
+     */
+    throw error;
   }
-
-  const botMember =
-    input.guild.members.me ?? (await input.guild.members.fetchMe());
-
-  const permissions = channel.permissionsFor(botMember);
-
-  const canPingRole =
-    role.mentionable || permissions.has(PermissionFlagsBits.MentionEveryone);
-
-  await channel.send({
-    content: [
-      canPingRole ? `<@&${role.id}>` : `**${role.name}**`,
-
-      "",
-
-      "🚨 **Event organiser cover required**",
-
-      "",
-
-      `**${input.eventName}** (#${input.eventId}) no longer has an available assigned organiser.`,
-
-      "An eligible Event Organiser can claim responsibility below.",
-    ].join("\n"),
-
-    components: [
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder()
-          .setCustomId(buildOrganiserCoverClaimCustomId(input.eventId))
-          .setLabel("Claim Event")
-          .setEmoji("🫡")
-          .setStyle(ButtonStyle.Primary),
-      ),
-    ],
-
-    allowedMentions: canPingRole
-      ? {
-          parse: [],
-
-          roles: [role.id],
-        }
-      : {
-          parse: [],
-        },
-  });
-
-  return canPingRole ? "pinged" : "posted_without_ping";
 }
 
 function buildResolvedOrganiserWarningContent(assignment: {

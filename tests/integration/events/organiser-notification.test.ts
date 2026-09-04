@@ -1029,6 +1029,88 @@ describe("organiser cover-request delivery", () => {
 
     expect(sendCoverRequest).toHaveBeenCalledTimes(1);
   });
+
+  it("propagates an unexpected Event Administration channel failure while posting a cover request", async () => {
+    // Arrange
+    const transientSendError = new Error(
+      "Temporary Discord cover-request send failure.",
+    );
+
+    const sendCoverRequest = vi.fn().mockRejectedValue(transientSendError);
+
+    const permissions = {
+      has: vi.fn().mockReturnValue(false),
+    };
+
+    const botMember = {
+      id: "820000000000000007",
+    };
+
+    const channel = {
+      id: WARNING_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: vi.fn().mockReturnValue(true),
+
+      permissionsFor: vi.fn().mockReturnValue(permissions),
+
+      send: sendCoverRequest,
+    };
+
+    const role = {
+      id: ORGANISER_ROLE_ID,
+
+      name: "Event Organiser",
+
+      mentionable: true,
+    };
+
+    const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+    const fetchRole = vi.fn().mockResolvedValue(role);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+
+      roles: {
+        fetch: fetchRole,
+      },
+
+      members: {
+        me: botMember,
+      },
+    } as unknown as Guild;
+
+    // Act / Assert
+    await expect(
+      sendOrganiserCoverRequest({
+        guild,
+
+        eventId: 456,
+
+        eventName: "Transient Cover Request Failure Test",
+
+        eventAdminChannelId: WARNING_CHANNEL_ID,
+
+        eventOrganiserRoleId: ORGANISER_ROLE_ID,
+      }),
+    ).rejects.toBe(transientSendError);
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+
+    expect(fetchRole).toHaveBeenCalledTimes(1);
+
+    expect(fetchRole).toHaveBeenCalledWith(ORGANISER_ROLE_ID);
+
+    expect(sendCoverRequest).toHaveBeenCalledTimes(1);
+  });
 });
 
 async function createConfirmedAssignmentWithWarning(pool: Pool): Promise<{
