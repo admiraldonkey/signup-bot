@@ -1493,6 +1493,139 @@ describe("event scheduler", () => {
     expect.soft(auditResult.rows).toEqual([]);
   });
 
+  it("records a non-retryable failure when an organiser warning cannot be delivered", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserWarning(pool);
+
+    /*
+     * null means the configured Event Administration destination is
+     * definitively unusable, rather than a transient Discord failure.
+     */
+    organiserNotificationMocks.sendOrganiserPendingWarning.mockResolvedValueOnce(
+      null,
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const actionResult = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+      completed_at: Date | null;
+      last_error: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at",
+        "last_error"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    /*
+     * Definitive configuration failure is not retryable. The scheduler action
+     * should settle after its first attempt rather than cycling through
+     * backoff against the same unusable channel.
+     */
+    expect(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+
+      attempt_count: 1,
+
+      locked_at: null,
+
+      last_error: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    expect(
+      organiserNotificationMocks.sendOrganiserPendingWarning,
+    ).toHaveBeenCalledTimes(1);
+
+    /*
+     * No Discord warning was actually created, so no warning linkage may be
+     * persisted on the organiser assignment.
+     */
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      warning_channel_id: string | null;
+      warning_message_id: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current",
+        "warning_channel_id",
+        "warning_message_id"
+      FROM "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toEqual([
+      {
+        status: "pending",
+
+        is_current: true,
+
+        warning_channel_id: null,
+
+        warning_message_id: null,
+      },
+    ]);
+
+    /*
+     * Although the durable action is non-retryable, the missed warning must be
+     * visible persistently rather than existing only as a process log message.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+      delivery: string | null;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome",
+        "details" ->> 'delivery' AS "delivery"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'organiser_assignment'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.organiser_warning'
+    `,
+      [String(fixture.assignmentId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "scheduler.organiser_warning",
+
+        outcome: "failure",
+
+        delivery: "failed",
+      },
+    ]);
+  });
+
   it("sends an organiser warning normally while the assignment and event remain active", async () => {
     // Arrange
     const fixture = await createOpenEventWithDueOrganiserWarning(pool);
