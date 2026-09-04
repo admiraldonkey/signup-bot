@@ -2041,6 +2041,121 @@ describe("event scheduler", () => {
     expect.soft(auditResult.rows).toEqual([]);
   });
 
+  it("reconciles an already-posted organiser warning after automatic event completion", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueCompletion(pool);
+
+    const assignmentId = await createPendingOrganiserWarningForEvent(
+      pool,
+      fixture.eventId,
+    );
+
+    const client = createSchedulerClient();
+
+    /*
+     * Discord reconciliation must happen only after PostgreSQL has made
+     * automatic completion authoritative.
+     */
+    organiserNotificationMocks.reconcileOrganiserPendingWarning.mockImplementationOnce(
+      async (input: { assignmentId: number }) => {
+        expect(input.assignmentId).toBe(assignmentId);
+
+        const eventStateAtReconciliation = await pool.query<{
+          status: string;
+        }>(
+          `
+          SELECT "status"
+          FROM "events"
+          WHERE "id" = $1
+        `,
+          [fixture.eventId],
+        );
+
+        expect(eventStateAtReconciliation.rows).toEqual([
+          {
+            status: "completed",
+          },
+        ]);
+
+        return true;
+      },
+    );
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+      SELECT "status"
+      FROM "events"
+      WHERE "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toEqual([
+      {
+        status: "completed",
+      },
+    ]);
+
+    /*
+     * Completion is an event-level lifecycle transition. The organiser
+     * assignment history remains intact; the terminal event state makes its
+     * outstanding response obsolete.
+     */
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      warning_channel_id: string | null;
+      warning_message_id: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current",
+        "warning_channel_id",
+        "warning_message_id"
+      FROM "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [assignmentId],
+    );
+
+    expect(assignmentResult.rows).toEqual([
+      {
+        status: "pending",
+
+        is_current: true,
+
+        warning_channel_id: "300000000000000012",
+
+        warning_message_id: "300000000000000013",
+      },
+    ]);
+
+    expect(
+      organiserNotificationMocks.reconcileOrganiserPendingWarning,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      organiserNotificationMocks.reconcileOrganiserPendingWarning,
+    ).toHaveBeenCalledWith({
+      guild: expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+
+      assignmentId,
+    });
+  });
+
   it("completes an overdue event normally while its lifecycle remains active", async () => {
     // Arrange
     const fixture = await createOpenEventWithDueCompletion(pool);
@@ -3162,6 +3277,62 @@ async function createOpenEventWithDueOrganiserCoverRequest(
     assignmentId,
     actionId,
   };
+}
+
+async function createPendingOrganiserWarningForEvent(
+  pool: Pool,
+  eventId: number,
+): Promise<number> {
+  const assignmentResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "event_organiser_assignments" (
+        "event_id",
+        "slot",
+        "discord_user_id",
+        "display_name_snapshot",
+        "status",
+        "is_current",
+        "assigned_by_user_id",
+        "activated_at",
+        "response_deadline_at",
+        "warning_channel_id",
+        "warning_message_id"
+      )
+      VALUES (
+        $1,
+        'primary',
+        $2,
+        'Completion Test Primary Organiser',
+        'pending',
+        true,
+        $3,
+        NOW() - INTERVAL '10 minutes',
+        NOW() + INTERVAL '5 minutes',
+        $4,
+        $5
+      )
+      RETURNING "id"
+    `,
+    [
+      eventId,
+      "300000000000000004",
+      ADMIN_USER_ID,
+      "300000000000000012",
+      "300000000000000013",
+    ],
+  );
+
+  const assignmentId = assignmentResult.rows[0]?.id;
+
+  if (!assignmentId) {
+    throw new Error(
+      "The integration-test organiser assignment was not created.",
+    );
+  }
+
+  return assignmentId;
 }
 
 async function createOpenEventWithDueCompletion(pool: Pool): Promise<{
