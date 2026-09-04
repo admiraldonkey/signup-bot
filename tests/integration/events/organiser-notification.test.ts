@@ -163,6 +163,145 @@ describe("organiser notification reconciliation", () => {
       },
     ]);
   });
+
+  it("updates an already-posted organiser warning after the organiser times out", async () => {
+    // Arrange
+    const fixture = await createConfirmedAssignmentWithWarning(pool);
+
+    /*
+     * Reuse the otherwise realistic warning fixture, then make the timeout
+     * authoritative in PostgreSQL before asking Discord presentation to catch
+     * up with that state.
+     */
+    await pool.query(
+      `
+      UPDATE "event_organiser_assignments"
+      SET
+        "status" = 'timed_out',
+        "is_current" = false,
+        "response_deadline_at" = NOW() - INTERVAL '1 minute',
+        "responded_at" = NULL
+      WHERE "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    const editWarning = vi.fn().mockResolvedValue(undefined);
+
+    const fetchMessage = vi.fn().mockResolvedValue({
+      id: WARNING_MESSAGE_ID,
+
+      edit: editWarning,
+    });
+
+    const channel = {
+      id: WARNING_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+      messages: {
+        fetch: fetchMessage,
+      },
+    };
+
+    const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await reconcileOrganiserPendingWarning({
+      guild,
+
+      assignmentId: fixture.assignmentId,
+    });
+
+    // Assert
+    expect(result).toBe(true);
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+
+    expect(fetchMessage).toHaveBeenCalledTimes(1);
+
+    expect(fetchMessage).toHaveBeenCalledWith(WARNING_MESSAGE_ID);
+
+    expect(editWarning).toHaveBeenCalledTimes(1);
+
+    const editedPayload = editWarning.mock.calls[0]?.[0];
+
+    expect(editedPayload).toEqual(
+      expect.objectContaining({
+        allowedMentions: {
+          parse: [],
+        },
+      }),
+    );
+
+    expect(editedPayload?.content).toContain(
+      "⌛ **Organiser response deadline passed**",
+    );
+
+    expect(editedPayload?.content).toContain(`<@${ORGANISER_USER_ID}>`);
+
+    expect(editedPayload?.content).toContain("primary organiser");
+
+    expect(editedPayload?.content).toContain(
+      "Organiser Warning Reconciliation Test",
+    );
+
+    expect(editedPayload?.content).toContain(`#${fixture.eventId}`);
+
+    expect(editedPayload?.content).toContain(
+      "did not confirm the **primary organiser** assignment",
+    );
+
+    /*
+     * The warning must no longer claim the organiser is merely awaiting a
+     * response after their deadline has already expired.
+     */
+    expect(editedPayload?.content).not.toContain("has not yet confirmed");
+
+    /*
+     * Reconciliation remains presentation-only. It must not modify the
+     * authoritative timeout state or discard the stored Discord linkage.
+     */
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      warning_channel_id: string | null;
+      warning_message_id: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current",
+        "warning_channel_id",
+        "warning_message_id"
+      FROM
+        "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toEqual([
+      {
+        status: "timed_out",
+
+        is_current: false,
+
+        warning_channel_id: WARNING_CHANNEL_ID,
+
+        warning_message_id: WARNING_MESSAGE_ID,
+      },
+    ]);
+  });
 });
 
 async function createConfirmedAssignmentWithWarning(pool: Pool): Promise<{

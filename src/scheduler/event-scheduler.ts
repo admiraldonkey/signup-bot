@@ -771,6 +771,20 @@ async function executeOrganiserTimeout(
 
   const guild = await client.guilds.fetch(assignment.discordGuildId);
 
+  await reconcileOrganiserPendingWarning({
+    guild,
+    assignmentId: assignment.id,
+  }).catch((error: unknown) => {
+    /*
+     * The timeout is already authoritative. Failure to tidy an older Discord
+     * warning must not undo the timeout or prevent organiser escalation.
+     */
+    console.error(
+      `Failed to reconcile organiser warning for assignment ${assignment.id} after timeout:`,
+      error,
+    );
+  });
+
   await writeAuditLog({
     guildId: assignment.guildDatabaseId,
 
