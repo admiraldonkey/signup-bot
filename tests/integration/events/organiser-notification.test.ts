@@ -11,7 +11,10 @@ import {
 } from "vitest";
 
 import { pool as applicationPool } from "../../../src/db/client.js";
-import { reconcileOrganiserPendingWarning } from "../../../src/events/organiser-notification.js";
+import {
+  reconcileOrganiserPendingWarning,
+  sendOrganiserAssignmentNotification,
+} from "../../../src/events/organiser-notification.js";
 import {
   createIntegrationPool,
   resetIntegrationDatabase,
@@ -603,6 +606,74 @@ describe("organiser notification reconciliation", () => {
         status: "cancelled",
       },
     ]);
+  });
+});
+
+describe("organiser assignment notification delivery", () => {
+  it("propagates an unexpected Event Administration channel fetch failure after DM fallback", async () => {
+    // Arrange
+    const dmError = new Error("Organiser DMs are unavailable.");
+
+    const transientChannelError = new Error(
+      "Temporary Discord channel fetch failure.",
+    );
+
+    const sendDm = vi.fn().mockRejectedValue(dmError);
+
+    const fetchMember = vi.fn().mockResolvedValue({
+      send: sendDm,
+    });
+
+    const fetchChannel = vi.fn().mockRejectedValue(transientChannelError);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      members: {
+        fetch: fetchMember,
+      },
+
+      channels: {
+        fetch: fetchChannel,
+      },
+    } as unknown as Guild;
+
+    // Act / Assert
+    await expect(
+      sendOrganiserAssignmentNotification({
+        guild,
+
+        assignmentId: 123,
+
+        eventId: 456,
+
+        eventName: "Organiser Notification Failure Test",
+
+        discordUserId: ORGANISER_USER_ID,
+
+        slot: "primary",
+
+        eventAdminChannelId: WARNING_CHANNEL_ID,
+      }),
+    ).rejects.toBe(transientChannelError);
+
+    /*
+     * The normal DM-first policy must still be attempted before falling back
+     * to the configured Event Administration channel.
+     */
+    expect(fetchMember).toHaveBeenCalledTimes(1);
+
+    expect(fetchMember).toHaveBeenCalledWith(ORGANISER_USER_ID);
+
+    expect(sendDm).toHaveBeenCalledTimes(1);
+
+    /*
+     * Once DM delivery fails, the configured administration channel is the
+     * only legitimate fallback destination.
+     */
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
   });
 });
 
