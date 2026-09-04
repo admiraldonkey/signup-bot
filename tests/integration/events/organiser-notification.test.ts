@@ -14,6 +14,7 @@ import { pool as applicationPool } from "../../../src/db/client.js";
 import {
   reconcileOrganiserPendingWarning,
   sendOrganiserAssignmentNotification,
+  sendOrganiserPendingWarning,
 } from "../../../src/events/organiser-notification.js";
 import {
   createIntegrationPool,
@@ -734,6 +735,106 @@ describe("organiser assignment notification delivery", () => {
     expect(fetchChannel).toHaveBeenCalledTimes(1);
 
     expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+  });
+});
+
+describe("organiser pending warning delivery", () => {
+  it("returns no delivery when the configured Event Administration channel has been deleted", async () => {
+    // Arrange
+    const unknownChannelError = {
+      code: 10003,
+      message: "Unknown Channel",
+    };
+
+    const fetchChannel = vi.fn().mockRejectedValue(unknownChannelError);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await sendOrganiserPendingWarning({
+      guild,
+
+      eventAdminChannelId: WARNING_CHANNEL_ID,
+
+      eventId: 456,
+
+      eventName: "Deleted Warning Channel Test",
+
+      discordUserId: ORGANISER_USER_ID,
+
+      slot: "primary",
+
+      responseDeadlineAt: new Date(Date.now() + 5 * 60_000),
+    });
+
+    // Assert
+    expect(result).toBeNull();
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+  });
+
+  it("returns no delivery when the Event Administration channel is deleted while the warning is being sent", async () => {
+    // Arrange
+    const unknownChannelError = {
+      code: 10003,
+      message: "Unknown Channel",
+    };
+
+    const sendWarning = vi.fn().mockRejectedValue(unknownChannelError);
+
+    const channel = {
+      id: WARNING_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: vi.fn().mockReturnValue(true),
+
+      send: sendWarning,
+    };
+
+    const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await sendOrganiserPendingWarning({
+      guild,
+
+      eventAdminChannelId: WARNING_CHANNEL_ID,
+
+      eventId: 456,
+
+      eventName: "Deleted Warning Channel Test",
+
+      discordUserId: ORGANISER_USER_ID,
+
+      slot: "primary",
+
+      responseDeadlineAt: new Date(Date.now() + 5 * 60_000),
+    });
+
+    // Assert
+    expect(result).toBeNull();
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+
+    expect(sendWarning).toHaveBeenCalledTimes(1);
   });
 });
 
