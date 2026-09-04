@@ -16,14 +16,22 @@ import {
 
 const notificationMocks = vi.hoisted(() => ({
   sendOrganiserAssignmentNotification: vi.fn().mockResolvedValue("dm"),
+
+  reconcileOrganiserPendingWarning: vi.fn().mockResolvedValue(true),
 }));
 
 vi.mock("../../../src/events/organiser-notification.js", () => ({
   sendOrganiserAssignmentNotification:
     notificationMocks.sendOrganiserAssignmentNotification,
+
+  reconcileOrganiserPendingWarning:
+    notificationMocks.reconcileOrganiserPendingWarning,
 }));
 
-import { setEventOrganiser } from "../../../src/commands/event-organisers.js";
+import {
+  clearEventOrganiser,
+  setEventOrganiser,
+} from "../../../src/commands/event-organisers.js";
 import { publishStoredEvent } from "../../../src/events/event-publication.js";
 import { pool as applicationPool } from "../../../src/db/client.js";
 import {
@@ -37,6 +45,8 @@ const ORGANISER_USER_ID = "100000000000000003";
 const PUBLICATION_CHANNEL_ID = "100000000000000004";
 const PUBLICATION_MESSAGE_ID = "100000000000000005";
 const BOT_USER_ID = "100000000000000006";
+const WARNING_CHANNEL_ID = "100000000000000007";
+const WARNING_MESSAGE_ID = "100000000000000008";
 
 describe("primary organiser assignment", () => {
   let pool: Pool;
@@ -48,6 +58,9 @@ describe("primary organiser assignment", () => {
   beforeEach(async () => {
     await resetIntegrationDatabase(pool);
     notificationMocks.sendOrganiserAssignmentNotification.mockClear();
+    notificationMocks.reconcileOrganiserPendingWarning
+      .mockReset()
+      .mockResolvedValue(true);
   });
 
   afterAll(async () => {
@@ -375,6 +388,89 @@ describe("primary organiser assignment", () => {
 
     expect(publicationDiscord.sendMessage).toHaveBeenCalledTimes(1);
   });
+
+  it("reconciles an already-posted organiser warning when an administrator clears the assignment", async () => {
+    // Arrange
+    const fixture = await createPublishedPendingPrimaryWithWarning(pool);
+
+    const interaction = createOrganiserSetInteraction(fixture.eventId);
+
+    /*
+     * Discord cleanup must happen only after PostgreSQL has made the removal
+     * authoritative.
+     */
+    notificationMocks.reconcileOrganiserPendingWarning.mockImplementationOnce(
+      async (input: { assignmentId: number }) => {
+        expect(input.assignmentId).toBe(fixture.assignmentId);
+
+        const stateAtReconciliation = await pool.query<{
+          status: string;
+          is_current: boolean;
+        }>(
+          `
+          SELECT
+            "status",
+            "is_current"
+          FROM "event_organiser_assignments"
+          WHERE "id" = $1
+        `,
+          [fixture.assignmentId],
+        );
+
+        expect(stateAtReconciliation.rows).toEqual([
+          {
+            status: "removed",
+            is_current: false,
+          },
+        ]);
+
+        return true;
+      },
+    );
+
+    // Act
+    await clearEventOrganiser(interaction);
+
+    // Assert
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      warning_channel_id: string | null;
+      warning_message_id: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current",
+        "warning_channel_id",
+        "warning_message_id"
+      FROM "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toEqual([
+      {
+        status: "removed",
+        is_current: false,
+        warning_channel_id: WARNING_CHANNEL_ID,
+        warning_message_id: WARNING_MESSAGE_ID,
+      },
+    ]);
+
+    expect(
+      notificationMocks.reconcileOrganiserPendingWarning,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      notificationMocks.reconcileOrganiserPendingWarning,
+    ).toHaveBeenCalledWith({
+      guild: interaction.guild,
+
+      assignmentId: fixture.assignmentId,
+    });
+  });
 });
 
 async function createUnpublishedEvent(pool: Pool): Promise<number> {
@@ -479,6 +575,82 @@ async function createUnpublishedEvent(pool: Pool): Promise<number> {
   }
 
   return eventId;
+}
+
+async function createPublishedPendingPrimaryWithWarning(pool: Pool): Promise<{
+  eventId: number;
+  assignmentId: number;
+}> {
+  const eventId = await createUnpublishedEvent(pool);
+
+  /*
+   * A pending organiser can only have received a scheduler warning after the
+   * event has been published and their response clock has started.
+   */
+  await pool.query(
+    `
+      UPDATE "events"
+      SET
+        "published_at" = NOW() - INTERVAL '30 minutes',
+        "status" = 'open'
+      WHERE "id" = $1
+    `,
+    [eventId],
+  );
+
+  const assignmentResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "event_organiser_assignments" (
+        "event_id",
+        "slot",
+        "discord_user_id",
+        "display_name_snapshot",
+        "status",
+        "is_current",
+        "assigned_by_user_id",
+        "activated_at",
+        "response_deadline_at",
+        "warning_channel_id",
+        "warning_message_id"
+      )
+      VALUES (
+        $1,
+        'primary',
+        $2,
+        'Primary Organiser',
+        'pending',
+        true,
+        $3,
+        NOW() - INTERVAL '10 minutes',
+        NOW() + INTERVAL '5 minutes',
+        $4,
+        $5
+      )
+      RETURNING "id"
+    `,
+    [
+      eventId,
+      ORGANISER_USER_ID,
+      ADMIN_USER_ID,
+      WARNING_CHANNEL_ID,
+      WARNING_MESSAGE_ID,
+    ],
+  );
+
+  const assignmentId = assignmentResult.rows[0]?.id;
+
+  if (!assignmentId) {
+    throw new Error(
+      "The integration-test organiser assignment was not created.",
+    );
+  }
+
+  return {
+    eventId,
+    assignmentId,
+  };
 }
 
 function createOrganiserSetInteraction(
