@@ -1877,6 +1877,136 @@ describe("event scheduler", () => {
     ]);
   });
 
+  it("does not retry an organiser cover request when delivery is definitively unavailable", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserCoverRequest(pool);
+
+    organiserNotificationMocks.sendOrganiserCoverRequest.mockResolvedValueOnce(
+      "failed",
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    /*
+     * Wait until the first claimed attempt has completely settled, regardless
+     * of whether production currently marks it completed or reschedules it.
+     */
+    await waitForScheduledActionAttemptSettled(pool, fixture.actionId, 1);
+
+    stopEventScheduler();
+
+    // Assert
+    const actionResult = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+      completed_at: Date | null;
+      last_error: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at",
+        "last_error"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    /*
+     * "failed" from the notification boundary means the configured
+     * destination is definitively unusable. Retrying the same configuration
+     * through the scheduler backoff cycle cannot make this attempt transiently
+     * successful.
+     *
+     * The durable action therefore completes normally after recording the
+     * delivery failure rather than returning to pending.
+     */
+    expect(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+
+      attempt_count: 1,
+
+      locked_at: null,
+
+      last_error: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    expect(
+      organiserNotificationMocks.sendOrganiserCoverRequest,
+    ).toHaveBeenCalledTimes(1);
+
+    /*
+     * The failed source assignment remains historical evidence for why cover
+     * was requested. A Discord configuration problem does not rewrite
+     * organiser domain state.
+     */
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current"
+      FROM "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toEqual([
+      {
+        status: "timed_out",
+
+        is_current: false,
+      },
+    ]);
+
+    /*
+     * Definitive non-delivery must be visible in the audit trail even though
+     * the scheduler action itself is non-retryable.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+      delivery: string | null;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome",
+        "details" ->> 'delivery' AS "delivery"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'event'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.organiser_cover_request'
+    `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "scheduler.organiser_cover_request",
+
+        outcome: "failure",
+
+        delivery: "failed",
+      },
+    ]);
+  });
+
   it("does not report or refresh a successful automatic completion after cancellation wins the event-state race", async () => {
     // Arrange
     const fixture = await createOpenEventWithDueCompletion(pool);
@@ -2593,6 +2723,47 @@ async function waitForScheduledActionStatus(
 
   throw new Error(
     `Timed out waiting for scheduled action #${actionId} to reach status "${expectedStatus}".`,
+  );
+}
+
+async function waitForScheduledActionAttemptSettled(
+  pool: Pool,
+  actionId: number,
+  expectedAttemptCount: number,
+): Promise<void> {
+  const timeoutAt = Date.now() + 3_000;
+
+  while (Date.now() < timeoutAt) {
+    const result = await pool.query<{
+      status: string;
+      attempt_count: number;
+    }>(
+      `
+        SELECT
+          "status",
+          "attempt_count"
+        FROM "scheduled_actions"
+        WHERE "id" = $1
+      `,
+      [actionId],
+    );
+
+    const action = result.rows[0];
+
+    if (
+      action?.attempt_count === expectedAttemptCount &&
+      action.status !== "processing"
+    ) {
+      return;
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+
+  throw new Error(
+    `Timed out waiting for scheduled action #${actionId} attempt ${expectedAttemptCount} to settle.`,
   );
 }
 
