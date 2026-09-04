@@ -178,13 +178,22 @@ export async function sendOrganiserAssignmentNotification(input: {
     });
 
     return "admin_channel";
-  } catch (error) {
-    console.error(
-      `Failed to send organiser assignment fallback for event ${input.eventId}:`,
-      error,
-    );
+  } catch (error: unknown) {
+    /*
+     * The configured Event Administration channel may have been deleted after
+     * it was saved. That is a known unusable destination rather than a
+     * transient delivery failure.
+     */
+    if (isDiscordErrorCode(error, 10003)) {
+      return "failed";
+    }
 
-    return "failed";
+    /*
+     * Do not classify unexpected Discord/network failures as a
+     * permanently unusable configuration. Callers can then apply the
+     * appropriate retry or authoritative-state handling.
+     */
+    throw error;
   }
 }
 

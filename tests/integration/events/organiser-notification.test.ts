@@ -675,6 +675,66 @@ describe("organiser assignment notification delivery", () => {
 
     expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
   });
+
+  it("returns failed when the configured Event Administration channel has been deleted", async () => {
+    // Arrange
+    const sendDm = vi
+      .fn()
+      .mockRejectedValue(new Error("Organiser DMs are unavailable."));
+
+    const fetchMember = vi.fn().mockResolvedValue({
+      send: sendDm,
+    });
+
+    const unknownChannelError = {
+      code: 10003,
+      message: "Unknown Channel",
+    };
+
+    const fetchChannel = vi.fn().mockRejectedValue(unknownChannelError);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      members: {
+        fetch: fetchMember,
+      },
+
+      channels: {
+        fetch: fetchChannel,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await sendOrganiserAssignmentNotification({
+      guild,
+
+      assignmentId: 123,
+
+      eventId: 456,
+
+      eventName: "Deleted Administration Channel Test",
+
+      discordUserId: ORGANISER_USER_ID,
+
+      slot: "primary",
+
+      eventAdminChannelId: WARNING_CHANNEL_ID,
+    });
+
+    // Assert
+    expect(result).toBe("failed");
+
+    expect(fetchMember).toHaveBeenCalledTimes(1);
+
+    expect(fetchMember).toHaveBeenCalledWith(ORGANISER_USER_ID);
+
+    expect(sendDm).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+  });
 });
 
 async function createConfirmedAssignmentWithWarning(pool: Pool): Promise<{
