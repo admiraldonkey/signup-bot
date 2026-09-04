@@ -245,46 +245,65 @@ export async function sendOrganiserPendingWarning(input: {
     return null;
   }
 
-  const channel = await input.guild.channels.fetch(input.eventAdminChannelId);
+  try {
+    const channel = await input.guild.channels.fetch(input.eventAdminChannelId);
 
-  if (
-    !channel ||
-    channel.type !== ChannelType.GuildText ||
-    !channel.isSendable()
-  ) {
-    return null;
-  }
+    if (
+      !channel ||
+      channel.type !== ChannelType.GuildText ||
+      !channel.isSendable()
+    ) {
+      return null;
+    }
 
-  const deadlineTimestamp = Math.floor(
-    input.responseDeadlineAt.getTime() / 1000,
-  );
+    const deadlineTimestamp = Math.floor(
+      input.responseDeadlineAt.getTime() / 1000,
+    );
 
-  const warningMessage = await channel.send({
-    content: [
-      "⚠️ **Organiser response warning**",
+    const warningMessage = await channel.send({
+      content: [
+        "⚠️ **Organiser response warning**",
 
-      "",
+        "",
 
-      `<@${input.discordUserId}> has not yet confirmed as the **${formatSlot(
-        input.slot,
-      )}** for **${input.eventName}** (#${input.eventId}).`,
+        `<@${input.discordUserId}> has not yet confirmed as the **${formatSlot(
+          input.slot,
+        )}** for **${input.eventName}** (#${input.eventId}).`,
 
-      `Response deadline: <t:${deadlineTimestamp}:F> (<t:${deadlineTimestamp}:R>)`,
-    ].join("\n"),
+        `Response deadline: <t:${deadlineTimestamp}:F> (<t:${deadlineTimestamp}:R>)`,
+      ].join("\n"),
+
+      /*
+       * Show the member mention but do not generate another ping.
+       */
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return {
+      channelId: channel.id,
+
+      messageId: warningMessage.id,
+    };
+  } catch (error: unknown) {
+    /*
+     * The configured Event Administration channel may have been deleted
+     * before it was fetched or while the warning send was in flight.
+     *
+     * Discord has explicitly told us that this destination no longer exists,
+     * so retrying the scheduled warning against the same channel is useless.
+     */
+    if (isDiscordErrorCode(error, 10003)) {
+      return null;
+    }
 
     /*
-     * Show the member mention but do not generate another ping.
+     * Unexpected Discord/network failures may be temporary. Preserve them so
+     * the scheduler can apply its normal retry/backoff behaviour.
      */
-    allowedMentions: {
-      parse: [],
-    },
-  });
-
-  return {
-    channelId: channel.id,
-
-    messageId: warningMessage.id,
-  };
+    throw error;
+  }
 }
 
 export async function reconcileOrganiserPendingWarning(input: {

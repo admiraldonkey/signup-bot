@@ -836,6 +836,60 @@ describe("organiser pending warning delivery", () => {
 
     expect(sendWarning).toHaveBeenCalledTimes(1);
   });
+
+  it("propagates an unexpected Event Administration channel failure while posting a warning", async () => {
+    // Arrange
+    const transientSendError = new Error(
+      "Temporary Discord warning send failure.",
+    );
+
+    const sendWarning = vi.fn().mockRejectedValue(transientSendError);
+
+    const channel = {
+      id: WARNING_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: vi.fn().mockReturnValue(true),
+
+      send: sendWarning,
+    };
+
+    const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+    } as unknown as Guild;
+
+    // Act / Assert
+    await expect(
+      sendOrganiserPendingWarning({
+        guild,
+
+        eventAdminChannelId: WARNING_CHANNEL_ID,
+
+        eventId: 456,
+
+        eventName: "Transient Warning Failure Test",
+
+        discordUserId: ORGANISER_USER_ID,
+
+        slot: "primary",
+
+        responseDeadlineAt: new Date(Date.now() + 5 * 60_000),
+      }),
+    ).rejects.toBe(transientSendError);
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+
+    expect(sendWarning).toHaveBeenCalledTimes(1);
+  });
 });
 
 async function createConfirmedAssignmentWithWarning(pool: Pool): Promise<{
