@@ -437,6 +437,173 @@ describe("organiser notification reconciliation", () => {
       },
     ]);
   });
+
+  it("updates an already-posted organiser warning after the event is cancelled", async () => {
+    // Arrange
+    const fixture = await createConfirmedAssignmentWithWarning(pool);
+
+    /*
+     * Recreate the state which exists when an event is cancelled while its
+     * organiser is still awaiting a response.
+     *
+     * Cancellation terminates the response requirement; it does not rewrite
+     * the organiser assignment history.
+     */
+    await pool.query(
+      `
+      UPDATE "event_organiser_assignments"
+      SET
+        "status" = 'pending',
+        "is_current" = true,
+        "responded_at" = NULL
+      WHERE "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    await pool.query(
+      `
+      UPDATE "events"
+      SET "status" = 'cancelled'
+      WHERE "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    const editWarning = vi.fn().mockResolvedValue(undefined);
+
+    const fetchMessage = vi.fn().mockResolvedValue({
+      id: WARNING_MESSAGE_ID,
+
+      edit: editWarning,
+    });
+
+    const channel = {
+      id: WARNING_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      messages: {
+        fetch: fetchMessage,
+      },
+    };
+
+    const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await reconcileOrganiserPendingWarning({
+      guild,
+
+      assignmentId: fixture.assignmentId,
+    });
+
+    // Assert
+    expect(result).toBe(true);
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+
+    expect(fetchMessage).toHaveBeenCalledTimes(1);
+
+    expect(fetchMessage).toHaveBeenCalledWith(WARNING_MESSAGE_ID);
+
+    expect(editWarning).toHaveBeenCalledTimes(1);
+
+    const editedPayload = editWarning.mock.calls[0]?.[0];
+
+    expect(editedPayload).toEqual(
+      expect.objectContaining({
+        allowedMentions: {
+          parse: [],
+        },
+      }),
+    );
+
+    expect(editedPayload?.content).toContain(
+      "ℹ️ **Organiser response no longer required**",
+    );
+
+    expect(editedPayload?.content).toContain(`<@${ORGANISER_USER_ID}>`);
+
+    expect(editedPayload?.content).toContain("primary organiser");
+
+    expect(editedPayload?.content).toContain(
+      "Organiser Warning Reconciliation Test",
+    );
+
+    expect(editedPayload?.content).toContain(`#${fixture.eventId}`);
+
+    expect(editedPayload?.content).toContain(
+      "is no longer active because the event is **cancelled**",
+    );
+
+    /*
+     * The Discord message must no longer claim that the organiser still has an
+     * outstanding response to provide.
+     */
+    expect(editedPayload?.content).not.toContain("has not yet confirmed");
+
+    /*
+     * Reconciliation is presentation-only. Cancellation remains an event-level
+     * lifecycle change and must not rewrite the organiser assignment itself.
+     */
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      warning_channel_id: string | null;
+      warning_message_id: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current",
+        "warning_channel_id",
+        "warning_message_id"
+      FROM
+        "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toEqual([
+      {
+        status: "pending",
+
+        is_current: true,
+
+        warning_channel_id: WARNING_CHANNEL_ID,
+
+        warning_message_id: WARNING_MESSAGE_ID,
+      },
+    ]);
+
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+      SELECT "status"
+      FROM "events"
+      WHERE "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toEqual([
+      {
+        status: "cancelled",
+      },
+    ]);
+  });
 });
 
 async function createConfirmedAssignmentWithWarning(pool: Pool): Promise<{

@@ -4,7 +4,7 @@ import {
   MessageFlags,
   type Role,
 } from "discord.js";
-import { and, asc, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, isNotNull, sql } from "drizzle-orm";
 import { DateTime } from "luxon";
 
 import {
@@ -25,6 +25,7 @@ import {
   refreshAttendanceMessage,
   type AttendanceRefreshResult,
 } from "../events/attendance-refresh.js";
+import { reconcileOrganiserPendingWarning } from "../events/organiser-notification.js";
 import { isValidEventTimezone } from "../time/timezones.js";
 import { handleEventResponses } from "./event-responses.js";
 import {
@@ -1645,6 +1646,49 @@ async function cancelEvent(
   }
 
   await cancelEventScheduledActions(eventId);
+
+  /*
+   * Cancellation leaves organiser assignment history intact, but any warning
+   * belonging to a still-current pending assignment is now obsolete.
+   *
+   * Read these only after the event cancellation is authoritative so Discord
+   * presentation always follows PostgreSQL state.
+   */
+  const warnedOrganiserAssignments = await db
+    .select({
+      id: eventOrganiserAssignments.id,
+    })
+    .from(eventOrganiserAssignments)
+    .where(
+      and(
+        eq(eventOrganiserAssignments.eventId, eventId),
+
+        eq(eventOrganiserAssignments.status, "pending"),
+
+        eq(eventOrganiserAssignments.isCurrent, true),
+
+        isNotNull(eventOrganiserAssignments.warningChannelId),
+
+        isNotNull(eventOrganiserAssignments.warningMessageId),
+      ),
+    );
+
+  for (const assignment of warnedOrganiserAssignments) {
+    await reconcileOrganiserPendingWarning({
+      guild: interaction.guild,
+
+      assignmentId: assignment.id,
+    }).catch((error: unknown) => {
+      /*
+       * Event cancellation is already authoritative. Failure to tidy an old
+       * Discord warning must not undo or misreport the cancellation.
+       */
+      console.error(
+        `Failed to reconcile organiser warning for assignment ${assignment.id} after event cancellation:`,
+        error,
+      );
+    });
+  }
 
   const refreshResult = event.publishedAt
     ? await refreshAttendanceMessage(interaction.guild, eventId)
