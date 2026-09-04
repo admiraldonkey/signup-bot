@@ -14,6 +14,7 @@ import { pool as applicationPool } from "../../../src/db/client.js";
 import {
   reconcileOrganiserPendingWarning,
   sendOrganiserAssignmentNotification,
+  sendOrganiserCoverRequest,
   sendOrganiserPendingWarning,
 } from "../../../src/events/organiser-notification.js";
 import {
@@ -30,6 +31,8 @@ const WARNING_MESSAGE_ID = "820000000000000003";
 const ORGANISER_USER_ID = "820000000000000004";
 
 const ADMIN_USER_ID = "820000000000000005";
+
+const ORGANISER_ROLE_ID = "820000000000000006";
 
 describe("organiser notification reconciliation", () => {
   let pool: Pool;
@@ -889,6 +892,142 @@ describe("organiser pending warning delivery", () => {
     expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
 
     expect(sendWarning).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("organiser cover-request delivery", () => {
+  it("returns failed when the configured Event Administration channel has been deleted", async () => {
+    // Arrange
+    const unknownChannelError = {
+      code: 10003,
+      message: "Unknown Channel",
+    };
+
+    const fetchChannel = vi.fn().mockRejectedValue(unknownChannelError);
+
+    const fetchRole = vi.fn().mockResolvedValue({
+      id: ORGANISER_ROLE_ID,
+
+      name: "Event Organiser",
+
+      mentionable: true,
+    });
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+
+      roles: {
+        fetch: fetchRole,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await sendOrganiserCoverRequest({
+      guild,
+
+      eventId: 456,
+
+      eventName: "Deleted Cover Channel Test",
+
+      eventAdminChannelId: WARNING_CHANNEL_ID,
+
+      eventOrganiserRoleId: ORGANISER_ROLE_ID,
+    });
+
+    // Assert
+    expect(result).toBe("failed");
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+  });
+
+  it("returns failed when the Event Administration channel is deleted while the cover request is being sent", async () => {
+    // Arrange
+    const unknownChannelError = {
+      code: 10003,
+      message: "Unknown Channel",
+    };
+
+    const sendCoverRequest = vi.fn().mockRejectedValue(unknownChannelError);
+
+    const permissions = {
+      has: vi.fn().mockReturnValue(false),
+    };
+
+    const botMember = {
+      id: "820000000000000007",
+    };
+
+    const channel = {
+      id: WARNING_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: vi.fn().mockReturnValue(true),
+
+      permissionsFor: vi.fn().mockReturnValue(permissions),
+
+      send: sendCoverRequest,
+    };
+
+    const role = {
+      id: ORGANISER_ROLE_ID,
+
+      name: "Event Organiser",
+
+      mentionable: true,
+    };
+
+    const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+    const fetchRole = vi.fn().mockResolvedValue(role);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+
+      roles: {
+        fetch: fetchRole,
+      },
+
+      members: {
+        me: botMember,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await sendOrganiserCoverRequest({
+      guild,
+
+      eventId: 456,
+
+      eventName: "Deleted Cover Channel Test",
+
+      eventAdminChannelId: WARNING_CHANNEL_ID,
+
+      eventOrganiserRoleId: ORGANISER_ROLE_ID,
+    });
+
+    // Assert
+    expect(result).toBe("failed");
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+
+    expect(fetchRole).toHaveBeenCalledTimes(1);
+
+    expect(fetchRole).toHaveBeenCalledWith(ORGANISER_ROLE_ID);
+
+    expect(sendCoverRequest).toHaveBeenCalledTimes(1);
   });
 });
 
