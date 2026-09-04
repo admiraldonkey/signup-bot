@@ -9,7 +9,19 @@ import {
   it,
   vi,
 } from "vitest";
+const organiserNotificationMocks = vi.hoisted(() => ({
+  sendOrganiserAssignmentNotification: vi.fn().mockResolvedValue("dm"),
 
+  reconcileOrganiserPendingWarning: vi.fn().mockResolvedValue(true),
+}));
+
+vi.mock("../../../src/events/organiser-notification.js", () => ({
+  sendOrganiserAssignmentNotification:
+    organiserNotificationMocks.sendOrganiserAssignmentNotification,
+
+  reconcileOrganiserPendingWarning:
+    organiserNotificationMocks.reconcileOrganiserPendingWarning,
+}));
 import { handleEventCommand } from "../../../src/commands/event.js";
 import { editEvent } from "../../../src/commands/event-edit.js";
 import { pool as applicationPool } from "../../../src/db/client.js";
@@ -20,6 +32,9 @@ import {
 
 const DISCORD_GUILD_ID = "200000000000000001";
 const ADMIN_USER_ID = "200000000000000002";
+const ORGANISER_USER_ID = "200000000000000003";
+const WARNING_CHANNEL_ID = "200000000000000004";
+const WARNING_MESSAGE_ID = "200000000000000005";
 
 describe("event lifecycle", () => {
   let pool: Pool;
@@ -29,6 +44,14 @@ describe("event lifecycle", () => {
   });
 
   beforeEach(async () => {
+    organiserNotificationMocks.reconcileOrganiserPendingWarning
+      .mockReset()
+      .mockResolvedValue(true);
+
+    organiserNotificationMocks.sendOrganiserAssignmentNotification
+      .mockReset()
+      .mockResolvedValue("dm");
+
     await resetIntegrationDatabase(pool);
   });
 
@@ -679,6 +702,112 @@ describe("event lifecycle", () => {
 
     expect.soft(auditResult.rows).toEqual([]);
   });
+
+  it("reconciles an already-posted organiser warning after event cancellation", async () => {
+    // Arrange
+    const event = await createPublishedSignupEvent(pool, "open");
+
+    const assignmentId = await createPendingOrganiserWarning(pool, event.id);
+
+    const interaction = createEventCommandInteraction("cancel", event.id);
+
+    /*
+     * Discord reconciliation must happen only after PostgreSQL has made the
+     * event cancellation authoritative.
+     */
+    organiserNotificationMocks.reconcileOrganiserPendingWarning.mockImplementationOnce(
+      async (input: { assignmentId: number }) => {
+        expect(input.assignmentId).toBe(assignmentId);
+
+        const eventStateAtReconciliation = await pool.query<{
+          status: string;
+        }>(
+          `
+          SELECT "status"
+          FROM "events"
+          WHERE "id" = $1
+        `,
+          [event.id],
+        );
+
+        expect(eventStateAtReconciliation.rows).toEqual([
+          {
+            status: "cancelled",
+          },
+        ]);
+
+        return true;
+      },
+    );
+
+    // Act
+    await handleEventCommand(interaction);
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+      SELECT "status"
+      FROM "events"
+      WHERE "id" = $1
+    `,
+      [event.id],
+    );
+
+    expect(eventResult.rows).toEqual([
+      {
+        status: "cancelled",
+      },
+    ]);
+
+    /*
+     * Cancellation does not rewrite organiser history. The assignment itself
+     * remains current/pending; the terminal event state is what makes its
+     * outstanding response obsolete.
+     */
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      warning_channel_id: string | null;
+      warning_message_id: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current",
+        "warning_channel_id",
+        "warning_message_id"
+      FROM "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [assignmentId],
+    );
+
+    expect(assignmentResult.rows).toEqual([
+      {
+        status: "pending",
+
+        is_current: true,
+
+        warning_channel_id: WARNING_CHANNEL_ID,
+
+        warning_message_id: WARNING_MESSAGE_ID,
+      },
+    ]);
+
+    expect(
+      organiserNotificationMocks.reconcileOrganiserPendingWarning,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      organiserNotificationMocks.reconcileOrganiserPendingWarning,
+    ).toHaveBeenCalledWith({
+      guild: interaction.guild,
+
+      assignmentId,
+    });
+  });
 });
 
 async function createPublishedSignupEvent(
@@ -792,6 +921,62 @@ async function createPublishedSignupEvent(
     id: eventId,
     originalAttendanceClosesAt: attendanceClosesAt,
   };
+}
+
+async function createPendingOrganiserWarning(
+  pool: Pool,
+  eventId: number,
+): Promise<number> {
+  const assignmentResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "event_organiser_assignments" (
+        "event_id",
+        "slot",
+        "discord_user_id",
+        "display_name_snapshot",
+        "status",
+        "is_current",
+        "assigned_by_user_id",
+        "activated_at",
+        "response_deadline_at",
+        "warning_channel_id",
+        "warning_message_id"
+      )
+      VALUES (
+        $1,
+        'primary',
+        $2,
+        'Pending Primary Organiser',
+        'pending',
+        true,
+        $3,
+        NOW() - INTERVAL '10 minutes',
+        NOW() + INTERVAL '5 minutes',
+        $4,
+        $5
+      )
+      RETURNING "id"
+    `,
+    [
+      eventId,
+      ORGANISER_USER_ID,
+      ADMIN_USER_ID,
+      WARNING_CHANNEL_ID,
+      WARNING_MESSAGE_ID,
+    ],
+  );
+
+  const assignmentId = assignmentResult.rows[0]?.id;
+
+  if (!assignmentId) {
+    throw new Error(
+      "The integration-test organiser assignment was not created.",
+    );
+  }
+
+  return assignmentId;
 }
 
 function createEventCommandInteraction(

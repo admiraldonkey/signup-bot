@@ -19,6 +19,8 @@ vi.mock("../../../src/events/attendance-refresh.js", () => ({
 }));
 const organiserNotificationMocks = vi.hoisted(() => ({
   sendOrganiserAssignmentNotification: vi.fn(),
+
+  reconcileOrganiserPendingWarning: vi.fn(),
 }));
 vi.mock(
   "../../../src/events/organiser-notification.js",
@@ -33,6 +35,9 @@ vi.mock(
 
       sendOrganiserAssignmentNotification:
         organiserNotificationMocks.sendOrganiserAssignmentNotification,
+
+      reconcileOrganiserPendingWarning:
+        organiserNotificationMocks.reconcileOrganiserPendingWarning,
     };
   },
 );
@@ -76,6 +81,9 @@ describe("organiser button interactions", () => {
     organiserNotificationMocks.sendOrganiserAssignmentNotification
       .mockReset()
       .mockResolvedValue("dm");
+    organiserNotificationMocks.reconcileOrganiserPendingWarning
+      .mockReset()
+      .mockResolvedValue(true);
   });
 
   afterAll(async () => {
@@ -407,6 +415,44 @@ describe("organiser button interactions", () => {
     expect(interaction.editReply).toHaveBeenLastCalledWith(
       "✅ You are confirmed as the organiser for **Organiser Interaction Race Test Event**.",
     );
+  });
+
+  it("reconciles an already-posted organiser warning after confirmation", async () => {
+    // Arrange
+    const fixture = await createActivePendingOrganiserAssignment(pool);
+
+    const interaction = createOrganiserResponseInteraction(
+      fixture.assignmentId,
+      "confirm",
+    );
+
+    // Act
+    const handled = await handleOrganiserButton(interaction);
+
+    // Assert
+    expect(handled).toBe(true);
+
+    /*
+     * Once the organiser response is authoritative, any warning which was
+     * already posted must be reconciled as well.
+     *
+     * Cancelling the scheduled warning action is insufficient because that
+     * action may already have completed and its Discord message may already
+     * exist.
+     */
+    expect(
+      organiserNotificationMocks.reconcileOrganiserPendingWarning,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      organiserNotificationMocks.reconcileOrganiserPendingWarning,
+    ).toHaveBeenCalledWith({
+      guild: expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+
+      assignmentId: fixture.assignmentId,
+    });
   });
 
   it("activates the backup organiser normally after the primary declines", async () => {

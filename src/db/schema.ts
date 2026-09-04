@@ -1173,6 +1173,18 @@ export const eventOrganiserAssignments = pgTable(
       withTimezone: true,
     }),
 
+    /*
+     * If the scheduler has posted a pending-response warning, retain its exact
+     * Discord location so the warning can later be reconciled when the
+     * assignment is confirmed, declined, timed out or otherwise resolved.
+     *
+     * Store the original channel as well as the message because the guild's
+     * configured Event Administration channel may subsequently change.
+     */
+    warningChannelId: text("warning_channel_id"),
+
+    warningMessageId: text("warning_message_id"),
+
     respondedAt: timestamp("responded_at", {
       withTimezone: true,
     }),
