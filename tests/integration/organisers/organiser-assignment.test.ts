@@ -392,6 +392,142 @@ describe("primary organiser assignment", () => {
     expect(publicationDiscord.sendMessage).toHaveBeenCalledTimes(1);
   });
 
+  it("preserves an authoritative primary assignment when notification delivery throws", async () => {
+    // Arrange
+    const eventId = await createUnpublishedEvent(pool);
+
+    /*
+     * Direct assignment to an already-published event activates the primary
+     * immediately and creates its response actions.
+     */
+    await pool.query(
+      `
+      UPDATE "events"
+      SET
+        "published_at" = NOW() - INTERVAL '5 minutes',
+        "status" = 'open'
+      WHERE "id" = $1
+    `,
+      [eventId],
+    );
+
+    const interaction = createOrganiserSetInteraction(eventId);
+
+    const notificationError = new Error(
+      "Temporary organiser notification transport failure.",
+    );
+
+    notificationMocks.sendOrganiserAssignmentNotification.mockRejectedValueOnce(
+      notificationError,
+    );
+
+    /*
+     * Capture rather than immediately asserting the rejection so we can prove
+     * that PostgreSQL has already committed the organiser state when the
+     * notification boundary fails.
+     */
+    let commandError: unknown;
+
+    try {
+      await setEventOrganiser(interaction);
+    } catch (error: unknown) {
+      commandError = error;
+    }
+
+    // Assert
+    const assignmentResult = await pool.query<{
+      id: number;
+      status: string;
+      is_current: boolean;
+      activated_at: Date | null;
+      response_deadline_at: Date | null;
+    }>(
+      `
+      SELECT
+        "id",
+        "status",
+        "is_current",
+        "activated_at",
+        "response_deadline_at"
+      FROM "event_organiser_assignments"
+      WHERE
+        "event_id" = $1
+        AND "slot" = 'primary'
+        AND "is_current" = true
+    `,
+      [eventId],
+    );
+
+    expect(assignmentResult.rows).toHaveLength(1);
+
+    expect(assignmentResult.rows[0]).toMatchObject({
+      status: "pending",
+      is_current: true,
+    });
+
+    expect(assignmentResult.rows[0]?.activated_at).not.toBeNull();
+
+    expect(assignmentResult.rows[0]?.response_deadline_at).not.toBeNull();
+
+    /*
+     * The response lifecycle must remain scheduled. A Discord delivery problem
+     * must not undo or partially create the authoritative organiser assignment.
+     */
+    const scheduledActionsResult = await pool.query<{
+      count: number;
+    }>(
+      `
+      SELECT COUNT(*)::int AS "count"
+      FROM "scheduled_actions"
+      WHERE
+        "event_id" = $1
+        AND "status" = 'pending'
+        AND (
+          "action_key" LIKE 'organiser_warning:%'
+          OR "action_key" LIKE 'organiser_timeout:%'
+        )
+    `,
+      [eventId],
+    );
+
+    expect(scheduledActionsResult.rows).toEqual([
+      {
+        count: 2,
+      },
+    ]);
+
+    /*
+     * Once the assignment is committed, notification transport failure is
+     * secondary. The command must not bubble an error which makes Discord imply
+     * that the assignment itself failed.
+     */
+    expect(commandError).toBeUndefined();
+
+    const editReply = vi.mocked(interaction.editReply);
+
+    expect(editReply).toHaveBeenCalledTimes(1);
+
+    expect(editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining(
+          `<@${ORGANISER_USER_ID}> is now the **primary organiser**`,
+        ),
+
+        allowedMentions: {
+          parse: [],
+        },
+      }),
+    );
+
+    expect(editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining(
+          "The assignment was saved, but the bot could not deliver the confirmation request",
+        ),
+      }),
+    );
+  });
+
   it("reconciles an already-posted organiser warning when an administrator clears the assignment", async () => {
     // Arrange
     const fixture = await createPublishedPendingPrimaryWithWarning(pool);
