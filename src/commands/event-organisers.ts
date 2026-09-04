@@ -346,21 +346,35 @@ export async function setEventOrganiser(
   let notification: OrganiserNotificationDelivery | null = null;
 
   if (shouldActivatePrimary) {
-    notification = await sendOrganiserAssignmentNotification({
-      guild: interaction.guild,
+    try {
+      notification = await sendOrganiserAssignmentNotification({
+        guild: interaction.guild,
 
-      assignmentId: assignment.id,
+        assignmentId: assignment.id,
 
-      eventId: event.id,
+        eventId: event.id,
 
-      eventName: event.name,
+        eventName: event.name,
 
-      discordUserId: user.id,
+        discordUserId: user.id,
 
-      slot: "primary",
+        slot: "primary",
 
-      eventAdminChannelId: context.eventAdminChannelId,
-    });
+        eventAdminChannelId: context.eventAdminChannelId,
+      });
+    } catch (error: unknown) {
+      /*
+       * The organiser assignment and response actions are already authoritative.
+       * An unexpected Discord transport failure must therefore not make the
+       * command falsely report that the assignment itself failed.
+       */
+      console.error(
+        `Failed to deliver organiser assignment notification for assignment ${assignment.id}:`,
+        error,
+      );
+
+      notification = "failed";
+    }
 
     await refreshAttendanceMessage(interaction.guild, event.id);
   }
