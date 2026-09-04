@@ -1,4 +1,4 @@
-import { ChannelType, type Guild } from "discord.js";
+import { ChannelType, PermissionFlagsBits, type Guild } from "discord.js";
 import type { Pool } from "pg";
 import {
   afterAll,
@@ -1110,6 +1110,206 @@ describe("organiser cover-request delivery", () => {
     expect(fetchRole).toHaveBeenCalledWith(ORGANISER_ROLE_ID);
 
     expect(sendCoverRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns failed when the configured Event Organiser role has been deleted", async () => {
+    // Arrange
+    const channel = {
+      id: WARNING_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: vi.fn().mockReturnValue(true),
+    };
+
+    const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+    /*
+     * discord.js RoleManager#fetch() converts Discord's Unknown Role response
+     * into null for a single-role fetch.
+     */
+    const fetchRole = vi.fn().mockResolvedValue(null);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+
+      roles: {
+        fetch: fetchRole,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await sendOrganiserCoverRequest({
+      guild,
+
+      eventId: 456,
+
+      eventName: "Deleted Organiser Role Test",
+
+      eventAdminChannelId: WARNING_CHANNEL_ID,
+
+      eventOrganiserRoleId: ORGANISER_ROLE_ID,
+    });
+
+    // Assert
+    expect(result).toBe("failed");
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+
+    expect(fetchRole).toHaveBeenCalledTimes(1);
+
+    expect(fetchRole).toHaveBeenCalledWith(ORGANISER_ROLE_ID);
+  });
+
+  it("propagates an unexpected Event Organiser role fetch failure", async () => {
+    // Arrange
+    const transientRoleError = new Error(
+      "Temporary Discord organiser-role fetch failure.",
+    );
+
+    const channel = {
+      id: WARNING_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: vi.fn().mockReturnValue(true),
+    };
+
+    const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+    const fetchRole = vi.fn().mockRejectedValue(transientRoleError);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+
+      roles: {
+        fetch: fetchRole,
+      },
+    } as unknown as Guild;
+
+    // Act / Assert
+    await expect(
+      sendOrganiserCoverRequest({
+        guild,
+
+        eventId: 456,
+
+        eventName: "Transient Organiser Role Failure Test",
+
+        eventAdminChannelId: WARNING_CHANNEL_ID,
+
+        eventOrganiserRoleId: ORGANISER_ROLE_ID,
+      }),
+    ).rejects.toBe(transientRoleError);
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+
+    expect(fetchRole).toHaveBeenCalledTimes(1);
+
+    expect(fetchRole).toHaveBeenCalledWith(ORGANISER_ROLE_ID);
+  });
+
+  it("posts a cover request without pinging when the organiser role is not mentionable", async () => {
+    // Arrange
+    const sendCoverRequest = vi.fn().mockResolvedValue({
+      id: "820000000000000008",
+    });
+
+    const permissions = {
+      has: vi.fn().mockReturnValue(false),
+    };
+
+    const botMember = {
+      id: "820000000000000007",
+    };
+
+    const channel = {
+      id: WARNING_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: vi.fn().mockReturnValue(true),
+
+      permissionsFor: vi.fn().mockReturnValue(permissions),
+
+      send: sendCoverRequest,
+    };
+
+    const role = {
+      id: ORGANISER_ROLE_ID,
+
+      name: "Event Organiser",
+
+      mentionable: false,
+    };
+
+    const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+    const fetchRole = vi.fn().mockResolvedValue(role);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+
+      roles: {
+        fetch: fetchRole,
+      },
+
+      members: {
+        me: botMember,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await sendOrganiserCoverRequest({
+      guild,
+
+      eventId: 456,
+
+      eventName: "Unmentionable Organiser Role Test",
+
+      eventAdminChannelId: WARNING_CHANNEL_ID,
+
+      eventOrganiserRoleId: ORGANISER_ROLE_ID,
+    });
+
+    // Assert
+    expect(result).toBe("posted_without_ping");
+
+    expect(sendCoverRequest).toHaveBeenCalledTimes(1);
+
+    expect(sendCoverRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("**Event Organiser**"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      }),
+    );
+
+    const sentPayload = sendCoverRequest.mock.calls[0]?.[0];
+
+    expect(sentPayload?.content).not.toContain(`<@&${ORGANISER_ROLE_ID}>`);
+
+    expect(permissions.has).toHaveBeenCalledWith(
+      PermissionFlagsBits.MentionEveryone,
+    );
   });
 });
 
