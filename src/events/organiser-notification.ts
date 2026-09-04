@@ -178,13 +178,22 @@ export async function sendOrganiserAssignmentNotification(input: {
     });
 
     return "admin_channel";
-  } catch (error) {
-    console.error(
-      `Failed to send organiser assignment fallback for event ${input.eventId}:`,
-      error,
-    );
+  } catch (error: unknown) {
+    /*
+     * The configured Event Administration channel may have been deleted after
+     * it was saved. That is a known unusable destination rather than a
+     * transient delivery failure.
+     */
+    if (isDiscordErrorCode(error, 10003)) {
+      return "failed";
+    }
 
-    return "failed";
+    /*
+     * Do not classify unexpected Discord/network failures as a
+     * permanently unusable configuration. Callers can then apply the
+     * appropriate retry or authoritative-state handling.
+     */
+    throw error;
   }
 }
 
@@ -236,46 +245,65 @@ export async function sendOrganiserPendingWarning(input: {
     return null;
   }
 
-  const channel = await input.guild.channels.fetch(input.eventAdminChannelId);
+  try {
+    const channel = await input.guild.channels.fetch(input.eventAdminChannelId);
 
-  if (
-    !channel ||
-    channel.type !== ChannelType.GuildText ||
-    !channel.isSendable()
-  ) {
-    return null;
-  }
+    if (
+      !channel ||
+      channel.type !== ChannelType.GuildText ||
+      !channel.isSendable()
+    ) {
+      return null;
+    }
 
-  const deadlineTimestamp = Math.floor(
-    input.responseDeadlineAt.getTime() / 1000,
-  );
+    const deadlineTimestamp = Math.floor(
+      input.responseDeadlineAt.getTime() / 1000,
+    );
 
-  const warningMessage = await channel.send({
-    content: [
-      "⚠️ **Organiser response warning**",
+    const warningMessage = await channel.send({
+      content: [
+        "⚠️ **Organiser response warning**",
 
-      "",
+        "",
 
-      `<@${input.discordUserId}> has not yet confirmed as the **${formatSlot(
-        input.slot,
-      )}** for **${input.eventName}** (#${input.eventId}).`,
+        `<@${input.discordUserId}> has not yet confirmed as the **${formatSlot(
+          input.slot,
+        )}** for **${input.eventName}** (#${input.eventId}).`,
 
-      `Response deadline: <t:${deadlineTimestamp}:F> (<t:${deadlineTimestamp}:R>)`,
-    ].join("\n"),
+        `Response deadline: <t:${deadlineTimestamp}:F> (<t:${deadlineTimestamp}:R>)`,
+      ].join("\n"),
+
+      /*
+       * Show the member mention but do not generate another ping.
+       */
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return {
+      channelId: channel.id,
+
+      messageId: warningMessage.id,
+    };
+  } catch (error: unknown) {
+    /*
+     * The configured Event Administration channel may have been deleted
+     * before it was fetched or while the warning send was in flight.
+     *
+     * Discord has explicitly told us that this destination no longer exists,
+     * so retrying the scheduled warning against the same channel is useless.
+     */
+    if (isDiscordErrorCode(error, 10003)) {
+      return null;
+    }
 
     /*
-     * Show the member mention but do not generate another ping.
+     * Unexpected Discord/network failures may be temporary. Preserve them so
+     * the scheduler can apply its normal retry/backoff behaviour.
      */
-    allowedMentions: {
-      parse: [],
-    },
-  });
-
-  return {
-    channelId: channel.id,
-
-    messageId: warningMessage.id,
-  };
+    throw error;
+  }
 }
 
 export async function reconcileOrganiserPendingWarning(input: {
@@ -388,66 +416,85 @@ export async function sendOrganiserCoverRequest(input: {
     return "failed";
   }
 
-  const [channel, role] = await Promise.all([
-    input.guild.channels.fetch(input.eventAdminChannelId),
+  try {
+    const [channel, role] = await Promise.all([
+      input.guild.channels.fetch(input.eventAdminChannelId),
 
-    input.guild.roles.fetch(input.eventOrganiserRoleId),
-  ]);
+      input.guild.roles.fetch(input.eventOrganiserRoleId),
+    ]);
 
-  if (
-    !channel ||
-    channel.type !== ChannelType.GuildText ||
-    !channel.isSendable() ||
-    !role
-  ) {
-    return "failed";
+    if (
+      !channel ||
+      channel.type !== ChannelType.GuildText ||
+      !channel.isSendable() ||
+      !role
+    ) {
+      return "failed";
+    }
+
+    const botMember =
+      input.guild.members.me ?? (await input.guild.members.fetchMe());
+
+    const permissions = channel.permissionsFor(botMember);
+
+    const canPingRole =
+      role.mentionable || permissions.has(PermissionFlagsBits.MentionEveryone);
+
+    await channel.send({
+      content: [
+        canPingRole ? `<@&${role.id}>` : `**${role.name}**`,
+
+        "",
+
+        "🚨 **Event organiser cover required**",
+
+        "",
+
+        `**${input.eventName}** (#${input.eventId}) no longer has an available assigned organiser.`,
+
+        "An eligible Event Organiser can claim responsibility below.",
+      ].join("\n"),
+
+      components: [
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setCustomId(buildOrganiserCoverClaimCustomId(input.eventId))
+            .setLabel("Claim Event")
+            .setEmoji("🫡")
+            .setStyle(ButtonStyle.Primary),
+        ),
+      ],
+
+      allowedMentions: canPingRole
+        ? {
+            parse: [],
+
+            roles: [role.id],
+          }
+        : {
+            parse: [],
+          },
+    });
+
+    return canPingRole ? "pinged" : "posted_without_ping";
+  } catch (error: unknown) {
+    /*
+     * The configured Event Administration channel may have been deleted
+     * before it was fetched or while the cover request send was in flight.
+     *
+     * Discord has explicitly told us that the destination no longer exists,
+     * so retrying against the same configured channel is not useful.
+     */
+    if (isDiscordErrorCode(error, 10003)) {
+      return "failed";
+    }
+
+    /*
+     * Unexpected Discord/network failures may be temporary. Preserve them so
+     * the scheduler can apply its normal retry/backoff behaviour.
+     */
+    throw error;
   }
-
-  const botMember =
-    input.guild.members.me ?? (await input.guild.members.fetchMe());
-
-  const permissions = channel.permissionsFor(botMember);
-
-  const canPingRole =
-    role.mentionable || permissions.has(PermissionFlagsBits.MentionEveryone);
-
-  await channel.send({
-    content: [
-      canPingRole ? `<@&${role.id}>` : `**${role.name}**`,
-
-      "",
-
-      "🚨 **Event organiser cover required**",
-
-      "",
-
-      `**${input.eventName}** (#${input.eventId}) no longer has an available assigned organiser.`,
-
-      "An eligible Event Organiser can claim responsibility below.",
-    ].join("\n"),
-
-    components: [
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder()
-          .setCustomId(buildOrganiserCoverClaimCustomId(input.eventId))
-          .setLabel("Claim Event")
-          .setEmoji("🫡")
-          .setStyle(ButtonStyle.Primary),
-      ),
-    ],
-
-    allowedMentions: canPingRole
-      ? {
-          parse: [],
-
-          roles: [role.id],
-        }
-      : {
-          parse: [],
-        },
-  });
-
-  return canPingRole ? "pinged" : "posted_without_ping";
 }
 
 function buildResolvedOrganiserWarningContent(assignment: {

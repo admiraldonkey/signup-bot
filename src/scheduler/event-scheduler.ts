@@ -529,6 +529,35 @@ async function executeOrganiserWarning(
   });
 
   if (!sent) {
+    /*
+     * A null delivery means the configured Event Administration destination is
+     * definitively unavailable rather than temporarily failing.
+     *
+     * The scheduler action should therefore complete without retrying, but the
+     * missed warning must remain visible in the persistent audit trail.
+     */
+    await writeAuditLog({
+      guildId: assignment.guildDatabaseId,
+
+      guild,
+
+      actorUserId: null,
+
+      action: "scheduler.organiser_warning",
+
+      outcome: "failure",
+
+      summary: `Could not warn that organiser assignment #${assignment.id} for "${assignment.eventName}" is still awaiting confirmation because no usable Event Administration channel was available.`,
+
+      targetType: "organiser_assignment",
+
+      targetId: String(assignment.id),
+
+      details: {
+        delivery: "failed",
+      },
+    });
+
     console.warn(
       `Organiser warning for assignment ${assignment.id} could not be posted because no usable Event Administration channel was available.`,
     );
@@ -966,9 +995,44 @@ async function executeOrganiserCoverRequest(
   });
 
   if (delivery === "failed") {
-    throw new Error(
-      `Cover request for event ${event.id} could not be delivered. Check the Event Administration channel and Event Organiser role configuration.`,
+    /*
+     * The notification boundary uses "failed" only for a definitively
+     * unavailable configured destination, such as a deleted Event
+     * Administration channel or Event Organiser role.
+     *
+     * Retrying the same unchanged configuration through scheduler backoff
+     * cannot make that delivery succeed, so record the failure and allow the
+     * durable action to complete normally.
+     */
+    await writeAuditLog({
+      guildId: event.guildDatabaseId,
+
+      guild,
+
+      actorUserId: null,
+
+      action: "scheduler.organiser_cover_request",
+
+      outcome: "failure",
+
+      summary: `Could not request organiser cover for "${event.name}" (#${event.id}) because the configured Event Administration channel or Event Organiser role is unavailable.`,
+
+      targetType: "event",
+
+      targetId: String(event.id),
+
+      details: {
+        sourceAssignmentId,
+
+        delivery,
+      },
+    });
+
+    console.warn(
+      `Organiser cover request for event ${event.id} could not be delivered because the configured Event Administration channel or Event Organiser role is unavailable.`,
     );
+
+    return;
   }
 
   await writeAuditLog({

@@ -1,4 +1,4 @@
-import { ChannelType, type Guild } from "discord.js";
+import { ChannelType, PermissionFlagsBits, type Guild } from "discord.js";
 import type { Pool } from "pg";
 import {
   afterAll,
@@ -11,7 +11,12 @@ import {
 } from "vitest";
 
 import { pool as applicationPool } from "../../../src/db/client.js";
-import { reconcileOrganiserPendingWarning } from "../../../src/events/organiser-notification.js";
+import {
+  reconcileOrganiserPendingWarning,
+  sendOrganiserAssignmentNotification,
+  sendOrganiserCoverRequest,
+  sendOrganiserPendingWarning,
+} from "../../../src/events/organiser-notification.js";
 import {
   createIntegrationPool,
   resetIntegrationDatabase,
@@ -26,6 +31,8 @@ const WARNING_MESSAGE_ID = "820000000000000003";
 const ORGANISER_USER_ID = "820000000000000004";
 
 const ADMIN_USER_ID = "820000000000000005";
+
+const ORGANISER_ROLE_ID = "820000000000000006";
 
 describe("organiser notification reconciliation", () => {
   let pool: Pool;
@@ -603,6 +610,706 @@ describe("organiser notification reconciliation", () => {
         status: "cancelled",
       },
     ]);
+  });
+});
+
+describe("organiser assignment notification delivery", () => {
+  it("propagates an unexpected Event Administration channel fetch failure after DM fallback", async () => {
+    // Arrange
+    const dmError = new Error("Organiser DMs are unavailable.");
+
+    const transientChannelError = new Error(
+      "Temporary Discord channel fetch failure.",
+    );
+
+    const sendDm = vi.fn().mockRejectedValue(dmError);
+
+    const fetchMember = vi.fn().mockResolvedValue({
+      send: sendDm,
+    });
+
+    const fetchChannel = vi.fn().mockRejectedValue(transientChannelError);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      members: {
+        fetch: fetchMember,
+      },
+
+      channels: {
+        fetch: fetchChannel,
+      },
+    } as unknown as Guild;
+
+    // Act / Assert
+    await expect(
+      sendOrganiserAssignmentNotification({
+        guild,
+
+        assignmentId: 123,
+
+        eventId: 456,
+
+        eventName: "Organiser Notification Failure Test",
+
+        discordUserId: ORGANISER_USER_ID,
+
+        slot: "primary",
+
+        eventAdminChannelId: WARNING_CHANNEL_ID,
+      }),
+    ).rejects.toBe(transientChannelError);
+
+    /*
+     * The normal DM-first policy must still be attempted before falling back
+     * to the configured Event Administration channel.
+     */
+    expect(fetchMember).toHaveBeenCalledTimes(1);
+
+    expect(fetchMember).toHaveBeenCalledWith(ORGANISER_USER_ID);
+
+    expect(sendDm).toHaveBeenCalledTimes(1);
+
+    /*
+     * Once DM delivery fails, the configured administration channel is the
+     * only legitimate fallback destination.
+     */
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+  });
+
+  it("returns failed when the configured Event Administration channel has been deleted", async () => {
+    // Arrange
+    const sendDm = vi
+      .fn()
+      .mockRejectedValue(new Error("Organiser DMs are unavailable."));
+
+    const fetchMember = vi.fn().mockResolvedValue({
+      send: sendDm,
+    });
+
+    const unknownChannelError = {
+      code: 10003,
+      message: "Unknown Channel",
+    };
+
+    const fetchChannel = vi.fn().mockRejectedValue(unknownChannelError);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      members: {
+        fetch: fetchMember,
+      },
+
+      channels: {
+        fetch: fetchChannel,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await sendOrganiserAssignmentNotification({
+      guild,
+
+      assignmentId: 123,
+
+      eventId: 456,
+
+      eventName: "Deleted Administration Channel Test",
+
+      discordUserId: ORGANISER_USER_ID,
+
+      slot: "primary",
+
+      eventAdminChannelId: WARNING_CHANNEL_ID,
+    });
+
+    // Assert
+    expect(result).toBe("failed");
+
+    expect(fetchMember).toHaveBeenCalledTimes(1);
+
+    expect(fetchMember).toHaveBeenCalledWith(ORGANISER_USER_ID);
+
+    expect(sendDm).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+  });
+});
+
+describe("organiser pending warning delivery", () => {
+  it("returns no delivery when the configured Event Administration channel has been deleted", async () => {
+    // Arrange
+    const unknownChannelError = {
+      code: 10003,
+      message: "Unknown Channel",
+    };
+
+    const fetchChannel = vi.fn().mockRejectedValue(unknownChannelError);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await sendOrganiserPendingWarning({
+      guild,
+
+      eventAdminChannelId: WARNING_CHANNEL_ID,
+
+      eventId: 456,
+
+      eventName: "Deleted Warning Channel Test",
+
+      discordUserId: ORGANISER_USER_ID,
+
+      slot: "primary",
+
+      responseDeadlineAt: new Date(Date.now() + 5 * 60_000),
+    });
+
+    // Assert
+    expect(result).toBeNull();
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+  });
+
+  it("returns no delivery when the Event Administration channel is deleted while the warning is being sent", async () => {
+    // Arrange
+    const unknownChannelError = {
+      code: 10003,
+      message: "Unknown Channel",
+    };
+
+    const sendWarning = vi.fn().mockRejectedValue(unknownChannelError);
+
+    const channel = {
+      id: WARNING_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: vi.fn().mockReturnValue(true),
+
+      send: sendWarning,
+    };
+
+    const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await sendOrganiserPendingWarning({
+      guild,
+
+      eventAdminChannelId: WARNING_CHANNEL_ID,
+
+      eventId: 456,
+
+      eventName: "Deleted Warning Channel Test",
+
+      discordUserId: ORGANISER_USER_ID,
+
+      slot: "primary",
+
+      responseDeadlineAt: new Date(Date.now() + 5 * 60_000),
+    });
+
+    // Assert
+    expect(result).toBeNull();
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+
+    expect(sendWarning).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates an unexpected Event Administration channel failure while posting a warning", async () => {
+    // Arrange
+    const transientSendError = new Error(
+      "Temporary Discord warning send failure.",
+    );
+
+    const sendWarning = vi.fn().mockRejectedValue(transientSendError);
+
+    const channel = {
+      id: WARNING_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: vi.fn().mockReturnValue(true),
+
+      send: sendWarning,
+    };
+
+    const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+    } as unknown as Guild;
+
+    // Act / Assert
+    await expect(
+      sendOrganiserPendingWarning({
+        guild,
+
+        eventAdminChannelId: WARNING_CHANNEL_ID,
+
+        eventId: 456,
+
+        eventName: "Transient Warning Failure Test",
+
+        discordUserId: ORGANISER_USER_ID,
+
+        slot: "primary",
+
+        responseDeadlineAt: new Date(Date.now() + 5 * 60_000),
+      }),
+    ).rejects.toBe(transientSendError);
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+
+    expect(sendWarning).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("organiser cover-request delivery", () => {
+  it("returns failed when the configured Event Administration channel has been deleted", async () => {
+    // Arrange
+    const unknownChannelError = {
+      code: 10003,
+      message: "Unknown Channel",
+    };
+
+    const fetchChannel = vi.fn().mockRejectedValue(unknownChannelError);
+
+    const fetchRole = vi.fn().mockResolvedValue({
+      id: ORGANISER_ROLE_ID,
+
+      name: "Event Organiser",
+
+      mentionable: true,
+    });
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+
+      roles: {
+        fetch: fetchRole,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await sendOrganiserCoverRequest({
+      guild,
+
+      eventId: 456,
+
+      eventName: "Deleted Cover Channel Test",
+
+      eventAdminChannelId: WARNING_CHANNEL_ID,
+
+      eventOrganiserRoleId: ORGANISER_ROLE_ID,
+    });
+
+    // Assert
+    expect(result).toBe("failed");
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+  });
+
+  it("returns failed when the Event Administration channel is deleted while the cover request is being sent", async () => {
+    // Arrange
+    const unknownChannelError = {
+      code: 10003,
+      message: "Unknown Channel",
+    };
+
+    const sendCoverRequest = vi.fn().mockRejectedValue(unknownChannelError);
+
+    const permissions = {
+      has: vi.fn().mockReturnValue(false),
+    };
+
+    const botMember = {
+      id: "820000000000000007",
+    };
+
+    const channel = {
+      id: WARNING_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: vi.fn().mockReturnValue(true),
+
+      permissionsFor: vi.fn().mockReturnValue(permissions),
+
+      send: sendCoverRequest,
+    };
+
+    const role = {
+      id: ORGANISER_ROLE_ID,
+
+      name: "Event Organiser",
+
+      mentionable: true,
+    };
+
+    const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+    const fetchRole = vi.fn().mockResolvedValue(role);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+
+      roles: {
+        fetch: fetchRole,
+      },
+
+      members: {
+        me: botMember,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await sendOrganiserCoverRequest({
+      guild,
+
+      eventId: 456,
+
+      eventName: "Deleted Cover Channel Test",
+
+      eventAdminChannelId: WARNING_CHANNEL_ID,
+
+      eventOrganiserRoleId: ORGANISER_ROLE_ID,
+    });
+
+    // Assert
+    expect(result).toBe("failed");
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+
+    expect(fetchRole).toHaveBeenCalledTimes(1);
+
+    expect(fetchRole).toHaveBeenCalledWith(ORGANISER_ROLE_ID);
+
+    expect(sendCoverRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates an unexpected Event Administration channel failure while posting a cover request", async () => {
+    // Arrange
+    const transientSendError = new Error(
+      "Temporary Discord cover-request send failure.",
+    );
+
+    const sendCoverRequest = vi.fn().mockRejectedValue(transientSendError);
+
+    const permissions = {
+      has: vi.fn().mockReturnValue(false),
+    };
+
+    const botMember = {
+      id: "820000000000000007",
+    };
+
+    const channel = {
+      id: WARNING_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: vi.fn().mockReturnValue(true),
+
+      permissionsFor: vi.fn().mockReturnValue(permissions),
+
+      send: sendCoverRequest,
+    };
+
+    const role = {
+      id: ORGANISER_ROLE_ID,
+
+      name: "Event Organiser",
+
+      mentionable: true,
+    };
+
+    const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+    const fetchRole = vi.fn().mockResolvedValue(role);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+
+      roles: {
+        fetch: fetchRole,
+      },
+
+      members: {
+        me: botMember,
+      },
+    } as unknown as Guild;
+
+    // Act / Assert
+    await expect(
+      sendOrganiserCoverRequest({
+        guild,
+
+        eventId: 456,
+
+        eventName: "Transient Cover Request Failure Test",
+
+        eventAdminChannelId: WARNING_CHANNEL_ID,
+
+        eventOrganiserRoleId: ORGANISER_ROLE_ID,
+      }),
+    ).rejects.toBe(transientSendError);
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+
+    expect(fetchRole).toHaveBeenCalledTimes(1);
+
+    expect(fetchRole).toHaveBeenCalledWith(ORGANISER_ROLE_ID);
+
+    expect(sendCoverRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns failed when the configured Event Organiser role has been deleted", async () => {
+    // Arrange
+    const channel = {
+      id: WARNING_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: vi.fn().mockReturnValue(true),
+    };
+
+    const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+    /*
+     * discord.js RoleManager#fetch() converts Discord's Unknown Role response
+     * into null for a single-role fetch.
+     */
+    const fetchRole = vi.fn().mockResolvedValue(null);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+
+      roles: {
+        fetch: fetchRole,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await sendOrganiserCoverRequest({
+      guild,
+
+      eventId: 456,
+
+      eventName: "Deleted Organiser Role Test",
+
+      eventAdminChannelId: WARNING_CHANNEL_ID,
+
+      eventOrganiserRoleId: ORGANISER_ROLE_ID,
+    });
+
+    // Assert
+    expect(result).toBe("failed");
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+
+    expect(fetchRole).toHaveBeenCalledTimes(1);
+
+    expect(fetchRole).toHaveBeenCalledWith(ORGANISER_ROLE_ID);
+  });
+
+  it("propagates an unexpected Event Organiser role fetch failure", async () => {
+    // Arrange
+    const transientRoleError = new Error(
+      "Temporary Discord organiser-role fetch failure.",
+    );
+
+    const channel = {
+      id: WARNING_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: vi.fn().mockReturnValue(true),
+    };
+
+    const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+    const fetchRole = vi.fn().mockRejectedValue(transientRoleError);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+
+      roles: {
+        fetch: fetchRole,
+      },
+    } as unknown as Guild;
+
+    // Act / Assert
+    await expect(
+      sendOrganiserCoverRequest({
+        guild,
+
+        eventId: 456,
+
+        eventName: "Transient Organiser Role Failure Test",
+
+        eventAdminChannelId: WARNING_CHANNEL_ID,
+
+        eventOrganiserRoleId: ORGANISER_ROLE_ID,
+      }),
+    ).rejects.toBe(transientRoleError);
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+
+    expect(fetchRole).toHaveBeenCalledTimes(1);
+
+    expect(fetchRole).toHaveBeenCalledWith(ORGANISER_ROLE_ID);
+  });
+
+  it("posts a cover request without pinging when the organiser role is not mentionable", async () => {
+    // Arrange
+    const sendCoverRequest = vi.fn().mockResolvedValue({
+      id: "820000000000000008",
+    });
+
+    const permissions = {
+      has: vi.fn().mockReturnValue(false),
+    };
+
+    const botMember = {
+      id: "820000000000000007",
+    };
+
+    const channel = {
+      id: WARNING_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: vi.fn().mockReturnValue(true),
+
+      permissionsFor: vi.fn().mockReturnValue(permissions),
+
+      send: sendCoverRequest,
+    };
+
+    const role = {
+      id: ORGANISER_ROLE_ID,
+
+      name: "Event Organiser",
+
+      mentionable: false,
+    };
+
+    const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+    const fetchRole = vi.fn().mockResolvedValue(role);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: fetchChannel,
+      },
+
+      roles: {
+        fetch: fetchRole,
+      },
+
+      members: {
+        me: botMember,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await sendOrganiserCoverRequest({
+      guild,
+
+      eventId: 456,
+
+      eventName: "Unmentionable Organiser Role Test",
+
+      eventAdminChannelId: WARNING_CHANNEL_ID,
+
+      eventOrganiserRoleId: ORGANISER_ROLE_ID,
+    });
+
+    // Assert
+    expect(result).toBe("posted_without_ping");
+
+    expect(sendCoverRequest).toHaveBeenCalledTimes(1);
+
+    expect(sendCoverRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("**Event Organiser**"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      }),
+    );
+
+    const sentPayload = sendCoverRequest.mock.calls[0]?.[0];
+
+    expect(sentPayload?.content).not.toContain(`<@&${ORGANISER_ROLE_ID}>`);
+
+    expect(permissions.has).toHaveBeenCalledWith(
+      PermissionFlagsBits.MentionEveryone,
+    );
   });
 });
 

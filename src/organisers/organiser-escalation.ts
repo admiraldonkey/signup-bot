@@ -306,21 +306,37 @@ export async function escalateAfterFailedOrganiserAssignment(input: {
       };
     }
 
-    const notification = await sendOrganiserAssignmentNotification({
-      guild: input.guild,
+    let notification: OrganiserNotificationDelivery;
 
-      assignmentId: activationResult.assignmentId,
+    try {
+      notification = await sendOrganiserAssignmentNotification({
+        guild: input.guild,
 
-      eventId: event.id,
+        assignmentId: activationResult.assignmentId,
 
-      eventName: event.name,
+        eventId: event.id,
 
-      discordUserId: activationResult.discordUserId,
+        eventName: event.name,
 
-      slot: "backup",
+        discordUserId: activationResult.discordUserId,
 
-      eventAdminChannelId: event.eventAdminChannelId,
-    });
+        slot: "backup",
+
+        eventAdminChannelId: event.eventAdminChannelId,
+      });
+    } catch (error: unknown) {
+      /*
+       * Backup activation and its response actions are already authoritative.
+       * An unexpected Discord transport failure must therefore not make
+       * escalation report that activation itself failed.
+       */
+      console.error(
+        `Failed to deliver backup organiser notification for assignment ${activationResult.assignmentId}:`,
+        error,
+      );
+
+      notification = "failed";
+    }
 
     await refreshAttendanceMessage(input.guild, event.id).catch(
       (error: unknown) => {

@@ -1493,6 +1493,139 @@ describe("event scheduler", () => {
     expect.soft(auditResult.rows).toEqual([]);
   });
 
+  it("records a non-retryable failure when an organiser warning cannot be delivered", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserWarning(pool);
+
+    /*
+     * null means the configured Event Administration destination is
+     * definitively unusable, rather than a transient Discord failure.
+     */
+    organiserNotificationMocks.sendOrganiserPendingWarning.mockResolvedValueOnce(
+      null,
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const actionResult = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+      completed_at: Date | null;
+      last_error: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at",
+        "last_error"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    /*
+     * Definitive configuration failure is not retryable. The scheduler action
+     * should settle after its first attempt rather than cycling through
+     * backoff against the same unusable channel.
+     */
+    expect(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+
+      attempt_count: 1,
+
+      locked_at: null,
+
+      last_error: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    expect(
+      organiserNotificationMocks.sendOrganiserPendingWarning,
+    ).toHaveBeenCalledTimes(1);
+
+    /*
+     * No Discord warning was actually created, so no warning linkage may be
+     * persisted on the organiser assignment.
+     */
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      warning_channel_id: string | null;
+      warning_message_id: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current",
+        "warning_channel_id",
+        "warning_message_id"
+      FROM "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toEqual([
+      {
+        status: "pending",
+
+        is_current: true,
+
+        warning_channel_id: null,
+
+        warning_message_id: null,
+      },
+    ]);
+
+    /*
+     * Although the durable action is non-retryable, the missed warning must be
+     * visible persistently rather than existing only as a process log message.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+      delivery: string | null;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome",
+        "details" ->> 'delivery' AS "delivery"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'organiser_assignment'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.organiser_warning'
+    `,
+      [String(fixture.assignmentId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "scheduler.organiser_warning",
+
+        outcome: "failure",
+
+        delivery: "failed",
+      },
+    ]);
+  });
+
   it("sends an organiser warning normally while the assignment and event remain active", async () => {
     // Arrange
     const fixture = await createOpenEventWithDueOrganiserWarning(pool);
@@ -1875,6 +2008,230 @@ describe("event scheduler", () => {
         delivery: "pinged",
       },
     ]);
+  });
+
+  it("does not retry an organiser cover request when delivery is definitively unavailable", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserCoverRequest(pool);
+
+    organiserNotificationMocks.sendOrganiserCoverRequest.mockResolvedValueOnce(
+      "failed",
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    /*
+     * Wait until the first claimed attempt has completely settled, regardless
+     * of whether production currently marks it completed or reschedules it.
+     */
+    await waitForScheduledActionAttemptSettled(pool, fixture.actionId, 1);
+
+    stopEventScheduler();
+
+    // Assert
+    const actionResult = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+      completed_at: Date | null;
+      last_error: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at",
+        "last_error"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    /*
+     * "failed" from the notification boundary means the configured
+     * destination is definitively unusable. Retrying the same configuration
+     * through the scheduler backoff cycle cannot make this attempt transiently
+     * successful.
+     *
+     * The durable action therefore completes normally after recording the
+     * delivery failure rather than returning to pending.
+     */
+    expect(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+
+      attempt_count: 1,
+
+      locked_at: null,
+
+      last_error: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    expect(
+      organiserNotificationMocks.sendOrganiserCoverRequest,
+    ).toHaveBeenCalledTimes(1);
+
+    /*
+     * The failed source assignment remains historical evidence for why cover
+     * was requested. A Discord configuration problem does not rewrite
+     * organiser domain state.
+     */
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current"
+      FROM "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toEqual([
+      {
+        status: "timed_out",
+
+        is_current: false,
+      },
+    ]);
+
+    /*
+     * Definitive non-delivery must be visible in the audit trail even though
+     * the scheduler action itself is non-retryable.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+      delivery: string | null;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome",
+        "details" ->> 'delivery' AS "delivery"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'event'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.organiser_cover_request'
+    `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "scheduler.organiser_cover_request",
+
+        outcome: "failure",
+
+        delivery: "failed",
+      },
+    ]);
+  });
+
+  it("retries an organiser cover request after an unexpected transient delivery failure", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserCoverRequest(pool);
+
+    const transientError = new Error(
+      "Temporary Discord cover-request transport failure.",
+    );
+
+    organiserNotificationMocks.sendOrganiserCoverRequest.mockRejectedValueOnce(
+      transientError,
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionAttemptSettled(pool, fixture.actionId, 1);
+
+    stopEventScheduler();
+
+    // Assert
+    const actionResult = await pool.query<{
+      status: string;
+      attempt_count: number;
+      locked_at: Date | null;
+      completed_at: Date | null;
+      last_error: string | null;
+      due_at: Date;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at",
+        "last_error",
+        "due_at"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect(actionResult.rows[0]).toMatchObject({
+      status: "pending",
+
+      attempt_count: 1,
+
+      locked_at: null,
+
+      completed_at: null,
+    });
+
+    expect(actionResult.rows[0]?.last_error).toContain(
+      "Temporary Discord cover-request transport failure.",
+    );
+
+    /*
+     * Attempt 1 uses the scheduler's normal one-minute retry delay.
+     */
+    expect(actionResult.rows[0]?.due_at.getTime()).toBeGreaterThan(Date.now());
+
+    expect(
+      organiserNotificationMocks.sendOrganiserCoverRequest,
+    ).toHaveBeenCalledTimes(1);
+
+    /*
+     * A transient exception does not mean the cover request itself reached a
+     * definitive delivery outcome, so no cover-request success/failure audit
+     * should be written yet.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'event'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.organiser_cover_request'
+    `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([]);
   });
 
   it("does not report or refresh a successful automatic completion after cancellation wins the event-state race", async () => {
@@ -2593,6 +2950,47 @@ async function waitForScheduledActionStatus(
 
   throw new Error(
     `Timed out waiting for scheduled action #${actionId} to reach status "${expectedStatus}".`,
+  );
+}
+
+async function waitForScheduledActionAttemptSettled(
+  pool: Pool,
+  actionId: number,
+  expectedAttemptCount: number,
+): Promise<void> {
+  const timeoutAt = Date.now() + 3_000;
+
+  while (Date.now() < timeoutAt) {
+    const result = await pool.query<{
+      status: string;
+      attempt_count: number;
+    }>(
+      `
+        SELECT
+          "status",
+          "attempt_count"
+        FROM "scheduled_actions"
+        WHERE "id" = $1
+      `,
+      [actionId],
+    );
+
+    const action = result.rows[0];
+
+    if (
+      action?.attempt_count === expectedAttemptCount &&
+      action.status !== "processing"
+    ) {
+      return;
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+
+  throw new Error(
+    `Timed out waiting for scheduled action #${actionId} attempt ${expectedAttemptCount} to settle.`,
   );
 }
 

@@ -700,6 +700,186 @@ describe("organiser button interactions", () => {
     );
   });
 
+  it("preserves an authoritative backup activation when notification delivery throws", async () => {
+    // Arrange
+    const fixture = await createCoverEventWithDormantBackup(pool);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+    } as unknown as Guild;
+
+    const notificationError = new Error(
+      "Temporary backup organiser notification transport failure.",
+    );
+
+    organiserNotificationMocks.sendOrganiserAssignmentNotification.mockRejectedValueOnce(
+      notificationError,
+    );
+
+    /*
+     * Capture the current caller behaviour rather than immediately asserting
+     * the rejection so we can prove PostgreSQL has already committed backup
+     * ownership before notification delivery fails.
+     */
+    let escalationError: unknown;
+
+    let escalationResult:
+      | Awaited<ReturnType<typeof escalateAfterFailedOrganiserAssignment>>
+      | undefined;
+
+    try {
+      escalationResult = await escalateAfterFailedOrganiserAssignment({
+        guild,
+
+        eventId: fixture.eventId,
+
+        failedAssignmentId: fixture.failedAssignmentId,
+
+        trigger: "declined",
+      });
+    } catch (error: unknown) {
+      escalationError = error;
+    }
+
+    // Assert
+    const backupResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      activated_at: Date | null;
+      response_deadline_at: Date | null;
+      responded_at: Date | null;
+      ended_at: Date | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current",
+        "activated_at",
+        "response_deadline_at",
+        "responded_at",
+        "ended_at"
+      FROM "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [fixture.backupAssignmentId],
+    );
+
+    expect(backupResult.rows).toHaveLength(1);
+
+    expect(backupResult.rows[0]).toMatchObject({
+      status: "pending",
+
+      is_current: true,
+
+      responded_at: null,
+
+      ended_at: null,
+    });
+
+    expect(backupResult.rows[0]?.activated_at).toBeInstanceOf(Date);
+
+    expect(backupResult.rows[0]?.response_deadline_at).toBeInstanceOf(Date);
+
+    /*
+     * The backup response lifecycle is committed in the same authoritative
+     * transaction as activation. Notification transport failure must not
+     * remove or invalidate that work.
+     */
+    const actionResult = await pool.query<{
+      action_key: string;
+      status: string;
+    }>(
+      `
+      SELECT
+        "action_key",
+        "status"
+      FROM "scheduled_actions"
+      WHERE "event_id" = $1
+      ORDER BY "action_key"
+    `,
+      [fixture.eventId],
+    );
+
+    expect(actionResult.rows).toEqual([
+      {
+        action_key: `organiser_timeout:${fixture.backupAssignmentId}`,
+
+        status: "pending",
+      },
+      {
+        action_key: `organiser_warning:${fixture.backupAssignmentId}`,
+
+        status: "pending",
+      },
+    ]);
+
+    /*
+     * Once activation has committed, notification transport is secondary.
+     * Escalation must report the authoritative result rather than throwing as
+     * though backup activation itself failed.
+     */
+    expect(escalationError).toBeUndefined();
+
+    expect(escalationResult).toEqual({
+      kind: "backup_activated",
+
+      assignmentId: fixture.backupAssignmentId,
+
+      notification: "failed",
+    });
+
+    /*
+     * Presentation refresh should still be attempted after successful backup
+     * activation even though the direct notification could not be delivered.
+     */
+    expect(
+      attendanceRefreshMocks.refreshAttendanceMessage,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      attendanceRefreshMocks.refreshAttendanceMessage,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+
+      fixture.eventId,
+    );
+
+    /*
+     * The audit trail should describe what actually happened: activation
+     * succeeded, while notification delivery did not.
+     */
+    const auditResult = await pool.query<{
+      action: string;
+      outcome: string;
+      notification: string | null;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome",
+        "details" ->> 'notification' AS "notification"
+      FROM "audit_logs"
+      WHERE
+        "action" = 'event.organiser.backup.activate'
+        AND "target_type" = 'organiser_assignment'
+        AND "target_id" = $1
+    `,
+      [String(fixture.backupAssignmentId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "event.organiser.backup.activate",
+
+        outcome: "success",
+
+        notification: "failed",
+      },
+    ]);
+  });
+
   it("does not create organiser cover after cancellation wins the event lifecycle race", async () => {
     // Arrange
     const fixture = await createCoverEligibleEvent(pool);
