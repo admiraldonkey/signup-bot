@@ -19,7 +19,7 @@ import {
   escalateAfterFailedOrganiserAssignment,
   type OrganiserEscalationResult,
 } from "../organisers/organiser-escalation.js";
-import { cancelOrganiserResponseActions } from "../organisers/organiser-scheduling.js";
+import { recordOrganiserResponse } from "../organisers/organiser-response-service.js";
 
 export async function handleOrganiserButton(
   interaction: ButtonInteraction,
@@ -55,192 +55,81 @@ async function handleAssignmentResponse(
     flags: MessageFlags.Ephemeral,
   });
 
-  const [assignment] = await db
-    .select({
-      id: eventOrganiserAssignments.id,
+  const result = await recordOrganiserResponse({
+    assignmentId: parsed.assignmentId,
 
-      eventId: eventOrganiserAssignments.eventId,
+    respondingUserId: interaction.user.id,
 
-      slot: eventOrganiserAssignments.slot,
-
-      discordUserId: eventOrganiserAssignments.discordUserId,
-
-      status: eventOrganiserAssignments.status,
-
-      isCurrent: eventOrganiserAssignments.isCurrent,
-
-      activatedAt: eventOrganiserAssignments.activatedAt,
-
-      eventName: events.name,
-
-      eventStatus: events.status,
-
-      guildDatabaseId: discordGuilds.id,
-
-      discordGuildId: discordGuilds.discordGuildId,
-    })
-    .from(eventOrganiserAssignments)
-    .innerJoin(events, eq(events.id, eventOrganiserAssignments.eventId))
-    .innerJoin(discordGuilds, eq(discordGuilds.id, events.ownerGuildId))
-    .where(eq(eventOrganiserAssignments.id, parsed.assignmentId))
-    .limit(1);
-
-  if (!assignment) {
-    await interaction.editReply("This organiser assignment no longer exists.");
-
-    return;
-  }
-
-  if (interaction.user.id !== assignment.discordUserId) {
-    await interaction.editReply(
-      "This organiser confirmation belongs to another member.",
-    );
-
-    return;
-  }
-
-  if (!assignment.isCurrent) {
-    await interaction.editReply(
-      "This organiser assignment is no longer current.",
-    );
-
-    return;
-  }
-
-  if (!assignment.activatedAt) {
-    await interaction.editReply(
-      "This organiser assignment is currently on standby and is not awaiting a response.",
-    );
-
-    return;
-  }
-
-  if (assignment.status !== "pending") {
-    await interaction.editReply(
-      `You have already responded to this assignment: **${formatStatus(
-        assignment.status,
-      )}**.`,
-    );
-
-    return;
-  }
-
-  if (
-    assignment.eventStatus === "cancelled" ||
-    assignment.eventStatus === "completed"
-  ) {
-    await interaction.editReply(
-      "This event is no longer accepting organiser responses.",
-    );
-
-    return;
-  }
-
-  const now = new Date();
-
-  const updateValues =
-    parsed.action === "confirm"
-      ? {
-          status: "confirmed" as const,
-
-          respondedAt: now,
-
-          updatedAt: now,
-        }
-      : {
-          status: "declined" as const,
-
-          isCurrent: false,
-
-          respondedAt: now,
-
-          endedAt: now,
-
-          updatedAt: now,
-        };
-
-  /*
-   * The initial event-state read provides useful fast feedback, but it may
-   * become stale before the organiser response is persisted.
-   *
-   * Lock the event row before changing the assignment so organiser responses
-   * and terminal event lifecycle changes have a single ordering boundary.
-   *
-   * If cancellation/completion already owns or has changed the event row,
-   * this transaction waits and then observes that newer terminal state.
-   */
-  const saveResult = await db.transaction(async (tx) => {
-    const [lockedEvent] = await tx
-      .select({
-        status: events.status,
-      })
-      .from(events)
-      .where(eq(events.id, assignment.eventId))
-      .limit(1)
-      .for("update");
-
-    if (
-      !lockedEvent ||
-      lockedEvent.status === "cancelled" ||
-      lockedEvent.status === "completed"
-    ) {
-      return {
-        kind: "event_inactive",
-      } as const;
-    }
-
-    const [updatedAssignment] = await tx
-      .update(eventOrganiserAssignments)
-      .set(updateValues)
-      .where(
-        and(
-          eq(eventOrganiserAssignments.id, assignment.id),
-
-          eq(eventOrganiserAssignments.isCurrent, true),
-
-          eq(eventOrganiserAssignments.status, "pending"),
-
-          isNotNull(eventOrganiserAssignments.activatedAt),
-        ),
-      )
-      .returning({
-        id: eventOrganiserAssignments.id,
-      });
-
-    if (!updatedAssignment) {
-      return {
-        kind: "assignment_changed",
-      } as const;
-    }
-
-    return {
-      kind: "saved",
-    } as const;
+    action: parsed.action,
   });
 
-  if (saveResult.kind === "event_inactive") {
-    await interaction.editReply(
-      "This event is no longer accepting organiser responses.",
-    );
+  switch (result.kind) {
+    case "assignment_not_found":
+      await interaction.editReply(
+        "This organiser assignment no longer exists.",
+      );
 
-    return;
+      return;
+
+    case "wrong_user":
+      await interaction.editReply(
+        "This organiser confirmation belongs to another member.",
+      );
+
+      return;
+
+    case "assignment_not_current":
+      await interaction.editReply(
+        "This organiser assignment is no longer current.",
+      );
+
+      return;
+
+    case "assignment_standby":
+      await interaction.editReply(
+        "This organiser assignment is currently on standby and is not awaiting a response.",
+      );
+
+      return;
+
+    case "already_responded":
+      await interaction.editReply(
+        `You have already responded to this assignment: **${formatStatus(
+          result.status,
+        )}**.`,
+      );
+
+      return;
+
+    case "event_inactive":
+      await interaction.editReply(
+        "This event is no longer accepting organiser responses.",
+      );
+
+      return;
+
+    case "assignment_changed":
+      await interaction.editReply(
+        "This organiser assignment changed before your response could be saved. Please check the current event status.",
+      );
+
+      return;
+
+    case "saved":
+      break;
   }
 
-  if (saveResult.kind === "assignment_changed") {
-    await interaction.editReply(
-      "This organiser assignment changed before your response could be saved. Please check the current event status.",
-    );
-
-    return;
-  }
-
-  await cancelOrganiserResponseActions(assignment.eventId, assignment.id);
+  const { assignment } = result;
 
   await interaction.message
     .edit({
       components: [],
     })
     .catch((error: unknown) => {
+      /*
+       * The organiser response is already authoritative. Failing to remove
+       * stale Discord buttons cannot undo that database state.
+       */
       console.error(
         `Failed to remove organiser buttons for assignment ${assignment.id}:`,
         error,
@@ -251,7 +140,7 @@ async function handleAssignmentResponse(
 
   try {
     guild = await interaction.client.guilds.fetch(assignment.discordGuildId);
-  } catch (error) {
+  } catch (error: unknown) {
     console.error(
       `Failed to fetch guild ${assignment.discordGuildId} after organiser response:`,
       error,
@@ -275,6 +164,7 @@ async function handleAssignmentResponse(
         error,
       );
     });
+
     if (parsed.action === "confirm") {
       await refreshAttendanceMessage(guild, assignment.eventId).catch(
         (error: unknown) => {
