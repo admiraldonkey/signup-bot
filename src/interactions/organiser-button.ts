@@ -1,20 +1,16 @@
 import { type ButtonInteraction, MessageFlags } from "discord.js";
-import { and, eq, inArray, isNotNull, ne } from "drizzle-orm";
 
 import { writeAuditLog } from "../audit/audit-log.js";
-import { db } from "../db/client.js";
-import {
-  discordGuilds,
-  eventOrganiserAssignments,
-  events,
-  guildSettings,
-} from "../db/schema.js";
 import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
 import {
   parseOrganiserCoverClaimCustomId,
   parseOrganiserResponseCustomId,
 } from "../events/organiser-notification.js";
 import { reconcileOrganiserPendingWarning } from "../events/organiser-warning-reconciliation.js";
+import {
+  claimEventOrganiserCover,
+  getOrganiserCoverClaimContext,
+} from "../organisers/organiser-cover-service.js";
 import {
   escalateAfterFailedOrganiserAssignment,
   type OrganiserEscalationResult,
@@ -256,59 +252,46 @@ async function handleCoverClaim(
     return;
   }
 
-  const [event] = await db
-    .select({
-      id: events.id,
+  const context = await getOrganiserCoverClaimContext({
+    eventId,
 
-      name: events.name,
+    discordGuildId: interaction.guildId,
+  });
 
-      status: events.status,
+  switch (context.kind) {
+    case "event_unavailable":
+      await interaction.editReply(
+        "This cover request no longer belongs to an available event in this server.",
+      );
 
-      startsAt: events.startsAt,
+      return;
 
-      guildDatabaseId: events.ownerGuildId,
+    case "event_inactive":
+      await interaction.editReply(
+        "This event no longer requires organiser cover.",
+      );
 
-      discordGuildId: discordGuilds.discordGuildId,
+      return;
 
-      eventOrganiserRoleId: guildSettings.eventOrganiserRoleId,
-    })
-    .from(events)
-    .innerJoin(discordGuilds, eq(discordGuilds.id, events.ownerGuildId))
-    .leftJoin(guildSettings, eq(guildSettings.guildId, events.ownerGuildId))
-    .where(eq(events.id, eventId))
-    .limit(1);
+    case "event_started":
+      await interaction.editReply(
+        "This event has already started and can no longer be claimed through organiser cover.",
+      );
 
-  if (!event || event.discordGuildId !== interaction.guildId) {
-    await interaction.editReply(
-      "This cover request no longer belongs to an available event in this server.",
-    );
+      return;
 
-    return;
+    case "role_not_configured":
+      await interaction.editReply(
+        "This server does not currently have an Event Organiser role configured.",
+      );
+
+      return;
+
+    case "eligible":
+      break;
   }
 
-  if (event.status === "cancelled" || event.status === "completed") {
-    await interaction.editReply(
-      "This event no longer requires organiser cover.",
-    );
-
-    return;
-  }
-
-  if (event.startsAt <= new Date()) {
-    await interaction.editReply(
-      "This event has already started and can no longer be claimed through organiser cover.",
-    );
-
-    return;
-  }
-
-  if (!event.eventOrganiserRoleId) {
-    await interaction.editReply(
-      "This server does not currently have an Event Organiser role configured.",
-    );
-
-    return;
-  }
+  const { event } = context;
 
   if (!interaction.member.roles.cache.has(event.eventOrganiserRoleId)) {
     await interaction.editReply(
@@ -318,197 +301,52 @@ async function handleCoverClaim(
     return;
   }
 
-  /*
-   * The earlier event checks provide useful fast feedback, but they may become
-   * stale before organiser state is persisted.
-   *
-   * Lock the event lifecycle row before checking or creating organiser state.
-   * This gives terminal lifecycle changes and cover claims a single ordering
-   * boundary.
-   */
-  const claimResult = await db.transaction(async (tx) => {
-    const [lockedEvent] = await tx
-      .select({
-        status: events.status,
+  const claimResult = await claimEventOrganiserCover({
+    eventId: event.id,
 
-        startsAt: events.startsAt,
-      })
-      .from(events)
-      .where(eq(events.id, event.id))
-      .limit(1)
-      .for("update");
+    organiserUserId: interaction.user.id,
 
-    if (
-      !lockedEvent ||
-      lockedEvent.status === "cancelled" ||
-      lockedEvent.status === "completed"
-    ) {
-      return {
-        kind: "event_inactive",
-      } as const;
-    }
-
-    /*
-     * Re-check the time after obtaining the lifecycle lock as well. The
-     * interaction may have spent time waiting for another transaction.
-     */
-    if (lockedEvent.startsAt <= new Date()) {
-      return {
-        kind: "event_started",
-      } as const;
-    }
-
-    const [activeAssignment] = await tx
-      .select({
-        id: eventOrganiserAssignments.id,
-      })
-      .from(eventOrganiserAssignments)
-      .where(
-        and(
-          eq(eventOrganiserAssignments.eventId, event.id),
-
-          eq(eventOrganiserAssignments.isCurrent, true),
-
-          isNotNull(eventOrganiserAssignments.activatedAt),
-
-          inArray(eventOrganiserAssignments.status, ["pending", "confirmed"]),
-        ),
-      )
-      .limit(1);
-
-    if (activeAssignment) {
-      return {
-        kind: "active_assignment",
-      } as const;
-    }
-
-    const now = new Date();
-
-    const [coverAssignment] = await tx
-      .insert(eventOrganiserAssignments)
-      .values({
-        eventId: event.id,
-
-        slot: "cover",
-
-        discordUserId: interaction.user.id,
-
-        displayNameSnapshot: interaction.member.displayName,
-
-        status: "confirmed",
-
-        isCurrent: true,
-
-        assignedByUserId: interaction.user.id,
-
-        activatedAt: now,
-
-        responseDeadlineAt: null,
-
-        respondedAt: now,
-
-        updatedAt: now,
-      })
-      /*
-       * The partial unique current-cover constraint still protects two
-       * simultaneous Claim Event presses.
-       */
-      .onConflictDoNothing()
-      .returning({
-        id: eventOrganiserAssignments.id,
-      });
-
-    if (!coverAssignment) {
-      return {
-        kind: "cover_taken",
-      } as const;
-    }
-
-    return {
-      kind: "created",
-      coverAssignment,
-      now,
-    } as const;
+    displayNameSnapshot: interaction.member.displayName,
   });
 
-  if (claimResult.kind === "event_inactive") {
-    await interaction.editReply(
-      "This event no longer requires organiser cover.",
-    );
+  switch (claimResult.kind) {
+    case "event_inactive":
+      await interaction.editReply(
+        "This event no longer requires organiser cover.",
+      );
 
-    return;
-  }
+      return;
 
-  if (claimResult.kind === "event_started") {
-    await interaction.editReply(
-      "This event has already started and can no longer be claimed through organiser cover.",
-    );
+    case "event_started":
+      await interaction.editReply(
+        "This event has already started and can no longer be claimed through organiser cover.",
+      );
 
-    return;
-  }
+      return;
 
-  if (claimResult.kind === "active_assignment") {
-    await interaction.editReply(
-      "This event already has an active organiser assignment.",
-    );
+    case "active_assignment":
+      await interaction.editReply(
+        "This event already has an active organiser assignment.",
+      );
 
-    return;
-  }
+      return;
 
-  if (claimResult.kind === "cover_taken") {
-    await interaction.editReply(
-      "Another organiser claimed this event before your response was saved.",
-    );
+    case "cover_taken":
+      await interaction.editReply(
+        "Another organiser claimed this event before your response was saved.",
+      );
 
-    return;
-  }
+      return;
 
-  const { coverAssignment, now } = claimResult;
+    case "ownership_lost":
+      await interaction.editReply(
+        "Another active organiser assignment was created while you were claiming cover, so your claim was not applied.",
+      );
 
-  /*
-   * Defensive second check for a simultaneously-created primary or
-   * backup assignment, which uses a different slot and therefore
-   * would not collide with the cover unique constraint.
-   */
-  const [conflictingAssignment] = await db
-    .select({
-      id: eventOrganiserAssignments.id,
-    })
-    .from(eventOrganiserAssignments)
-    .where(
-      and(
-        eq(eventOrganiserAssignments.eventId, event.id),
+      return;
 
-        ne(eventOrganiserAssignments.id, coverAssignment.id),
-
-        eq(eventOrganiserAssignments.isCurrent, true),
-
-        isNotNull(eventOrganiserAssignments.activatedAt),
-
-        inArray(eventOrganiserAssignments.status, ["pending", "confirmed"]),
-      ),
-    )
-    .limit(1);
-
-  if (conflictingAssignment) {
-    await db
-      .update(eventOrganiserAssignments)
-      .set({
-        status: "replaced",
-
-        isCurrent: false,
-
-        endedAt: now,
-
-        updatedAt: now,
-      })
-      .where(eq(eventOrganiserAssignments.id, coverAssignment.id));
-
-    await interaction.editReply(
-      "Another active organiser assignment was created while you were claiming cover, so your claim was not applied.",
-    );
-
-    return;
+    case "claimed":
+      break;
   }
 
   await interaction.message
@@ -528,6 +366,10 @@ async function handleCoverClaim(
       },
     })
     .catch((error: unknown) => {
+      /*
+       * Organiser ownership is already authoritative. Failure to update the
+       * cover-request message cannot invalidate the successful claim.
+       */
       console.error(
         `Failed to update cover-request message for event ${event.id}:`,
         error,
@@ -551,7 +393,7 @@ async function handleCoverClaim(
 
     targetType: "organiser_assignment",
 
-    targetId: String(coverAssignment.id),
+    targetId: String(claimResult.assignmentId),
 
     details: {
       eventId: event.id,
