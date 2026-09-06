@@ -588,6 +588,67 @@ src/events/organiser-display.ts
 src/commands/event-organisers.ts
 ```
 
+## Organiser Service Boundaries
+
+Authoritative organiser state transitions are deliberately separated from
+Discord command and interaction handling.
+
+The main organiser domain operations are:
+
+```text
+src/organisers/organiser-assignment-service.ts
+    -> assign or remove primary/backup organisers
+
+src/organisers/organiser-response-service.ts
+    -> record organiser confirmation or decline
+
+src/organisers/organiser-escalation-service.ts
+    -> activate a dormant backup or queue general cover
+
+src/organisers/organiser-cover-service.ts
+    -> validate and claim active cover ownership
+```
+
+Discord-facing adapters remain responsible for interaction-specific concerns:
+
+```text
+src/commands/event-organisers.ts
+    -> slash-command input
+    -> Discord member/role validation
+    -> service invocation
+    -> notification/audit/response formatting
+
+src/interactions/organiser-button.ts
+    -> button input
+    -> Discord-specific validation
+    -> service invocation
+    -> Discord presentation/audit/escalation orchestration
+```
+
+Other organiser concerns remain separate:
+
+```text
+src/events/organiser-notification.ts
+    -> outbound Discord organiser notifications
+
+src/events/organiser-warning-reconciliation.ts
+    -> reconcile previously sent warning messages with authoritative state
+
+src/organisers/organiser-scheduling.ts
+    -> durable organiser warning/timeout action construction and cancellation
+
+src/organisers/organiser-types.ts
+    -> shared organiser domain vocabulary
+```
+
+This separation is intended to keep PostgreSQL-backed organiser behaviour
+reusable without requiring the destination application to adopt this bot's
+slash-command structure or Discord message presentation.
+
+The services deliberately remain concrete rather than introducing generic
+repository or dependency-injection abstractions before an actual integration
+requires them.
+
 ---
 
 # Event Creator vs Event Organiser
@@ -1383,7 +1444,9 @@ src/
     attendance-refresh.ts
     event-publication.ts
     organiser-display.ts
+    organiser-formatting.ts
     organiser-notification.ts
+    organiser-warning-reconciliation.ts
 
   interactions/
     attendance-button.ts
@@ -1391,9 +1454,13 @@ src/
     role-request-button.ts
 
   organisers/
-    organiser-service.ts
-    organiser-scheduling.ts
+    organiser-assignment-service.ts
+    organiser-cover-service.ts
     organiser-escalation.ts
+    organiser-escalation-service.ts
+    organiser-response-service.ts
+    organiser-scheduling.ts
+    organiser-types.ts
 
   reminders/
     reminder-scheduling.ts
@@ -1441,9 +1508,13 @@ This should be done deliberately rather than waiting until the hard platform lim
 
 ## Large command handlers
 
-Some event command modules have become large.
+Some event command modules remain large, but organiser workflows have now been
+refactored so their authoritative state transitions live behind explicit
+domain/service operations.
 
-A future refactor should move reusable domain operations into services.
+The same pattern should be applied selectively to other large command modules
+where it improves clarity, portability or testability. It should not be used
+merely to reduce line counts.
 
 Command handlers should primarily perform:
 
