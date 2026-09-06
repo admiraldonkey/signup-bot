@@ -21,15 +21,16 @@ import {
 import {
   buildOrganiserResponseActionValues,
   calculateOrganiserResponseDeadline,
-  cancelOrganiserResponseActions,
   ORGANISER_COVER_REQUEST_ACTION_PREFIX,
   ORGANISER_TIMEOUT_ACTION_PREFIX,
   ORGANISER_WARNING_ACTION_PREFIX,
 } from "../organisers/organiser-scheduling.js";
+import {
+  type EditableOrganiserSlot,
+  removeEventOrganiserAssignment,
+} from "../organisers/organiser-assignment-service.js";
 
 type CachedInteraction = ChatInputCommandInteraction<"cached">;
-
-type EditableOrganiserSlot = "primary" | "backup";
 
 export async function setEventOrganiser(
   interaction: CachedInteraction,
@@ -455,65 +456,47 @@ export async function clearEventOrganiser(
 
   const slot: EditableOrganiserSlot = slotText;
 
-  const event = await findOwnedEvent(context.guildId, eventId);
+  const result = await removeEventOrganiserAssignment({
+    guildDatabaseId: context.guildId,
+    eventId,
+    slot,
+  });
 
-  if (!event) {
-    await interaction.editReply(
-      `Event #${eventId} was not found in this server.`,
-    );
+  switch (result.kind) {
+    case "event_not_found":
+      await interaction.editReply(
+        `Event #${eventId} was not found in this server.`,
+      );
 
-    return;
+      return;
+
+    case "event_inactive":
+      await interaction.editReply(
+        "Organisers cannot be changed on cancelled or completed events.",
+      );
+
+      return;
+
+    case "assignment_not_found":
+      await interaction.editReply(
+        `This event does not currently have a **${slot} organiser**.`,
+      );
+
+      return;
+
+    case "removed":
+      break;
   }
 
-  if (event.status === "cancelled" || event.status === "completed") {
-    await interaction.editReply(
-      "Organisers cannot be changed on cancelled or completed events.",
-    );
-
-    return;
-  }
-
-  const assignment = await findCurrentAssignment(event.id, slot);
-
-  if (!assignment) {
-    await interaction.editReply(
-      `This event does not currently have a **${slot} organiser**.`,
-    );
-
-    return;
-  }
-
-  const now = new Date();
-
-  await db
-    .update(eventOrganiserAssignments)
-    .set({
-      status: "removed",
-
-      isCurrent: false,
-
-      endedAt: now,
-
-      updatedAt: now,
-    })
-    .where(
-      and(
-        eq(eventOrganiserAssignments.id, assignment.id),
-
-        eq(eventOrganiserAssignments.isCurrent, true),
-      ),
-    );
-
-  await cancelOrganiserResponseActions(event.id, assignment.id);
+  const { event, assignment } = result;
 
   await reconcileOrganiserPendingWarning({
     guild: interaction.guild,
-
     assignmentId: assignment.id,
   }).catch((error: unknown) => {
     /*
-     * The organiser removal is already authoritative. Failure to tidy an older
-     * Discord warning must not undo or misreport that administrative change.
+     * The organiser removal is already authoritative. Failure to tidy an
+     * older Discord warning must not undo or misreport that change.
      */
     console.error(
       `Failed to reconcile organiser warning for assignment ${assignment.id} after removal:`,
