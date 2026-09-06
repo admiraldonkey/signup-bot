@@ -361,6 +361,8 @@ export async function setEventOrganiser(
         slot: "primary",
 
         eventAdminChannelId: context.eventAdminChannelId,
+
+        organiserDmsEnabled: context.organiserDmsEnabled,
       });
     } catch (error: unknown) {
       /*
@@ -417,7 +419,10 @@ export async function setEventOrganiser(
       "The backup has been stored on standby and will only be contacted if the primary becomes unavailable.",
     );
   } else {
-    response.push("", formatNotificationDelivery(notification));
+    response.push(
+      "",
+      formatNotificationDelivery(notification, context.organiserDmsEnabled),
+    );
   }
 
   await interaction.editReply({
@@ -657,16 +662,21 @@ async function findCurrentAssignment(
 
 function formatNotificationDelivery(
   delivery: OrganiserNotificationDelivery | null,
+  organiserDmsEnabled: boolean,
 ): string {
   switch (delivery) {
     case "dm":
       return "📨 Confirmation request sent by DM.";
 
     case "admin_channel":
-      return "📨 The organiser could not be DMed, so a confirmation request was posted in the Event Administration channel.";
+      return organiserDmsEnabled
+        ? "📨 The organiser could not be DMed, so a confirmation request was posted in the Event Administration channel."
+        : "📨 Confirmation request posted in the Event Administration channel.";
 
     case "failed":
-      return "⚠️ The assignment was saved, but the bot could not deliver the confirmation request by DM or through the Event Administration channel.";
+      return organiserDmsEnabled
+        ? "⚠️ The assignment was saved, but the bot could not deliver the confirmation request by DM or through the Event Administration channel."
+        : "⚠️ The assignment was saved, but the bot could not deliver the confirmation request through the Event Administration channel.";
 
     case null:
       return "No confirmation request was sent.";

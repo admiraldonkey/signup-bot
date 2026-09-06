@@ -59,6 +59,8 @@ export async function escalateAfterFailedOrganiserAssignment(input: {
 
       eventAdminChannelId: guildSettings.eventAdminChannelId,
 
+      organiserDmsEnabled: guildSettings.organiserDmsEnabled,
+
       backupResponseMinutes: guildSettings.organiserBackupResponseMinutes,
 
       warningMinutesBefore: guildSettings.organiserWarningMinutesBefore,
@@ -323,6 +325,8 @@ export async function escalateAfterFailedOrganiserAssignment(input: {
         slot: "backup",
 
         eventAdminChannelId: event.eventAdminChannelId,
+
+        organiserDmsEnabled: event.organiserDmsEnabled,
       });
     } catch (error: unknown) {
       /*

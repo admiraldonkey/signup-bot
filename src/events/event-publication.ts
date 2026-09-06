@@ -100,6 +100,8 @@ export async function publishStoredEvent(
 
       eventAdminChannelId: guildSettings.eventAdminChannelId,
 
+      organiserDmsEnabled: guildSettings.organiserDmsEnabled,
+
       organiserPrimaryResponseMinutes:
         guildSettings.organiserPrimaryResponseMinutes,
 
@@ -513,6 +515,8 @@ export async function publishStoredEvent(
             slot: "primary",
 
             eventAdminChannelId: event.eventAdminChannelId,
+
+            organiserDmsEnabled: event.organiserDmsEnabled ?? true,
 
             eventMessageUrl: sentMessage.url,
           });

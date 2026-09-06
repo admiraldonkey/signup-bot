@@ -614,6 +614,150 @@ describe("organiser notification reconciliation", () => {
 });
 
 describe("organiser assignment notification delivery", () => {
+  it("uses DM delivery when organiser DMs are enabled and the DM succeeds", async () => {
+    // Arrange
+    const sendDm = vi.fn().mockResolvedValue(undefined);
+
+    const fetchMember = vi.fn().mockResolvedValue({
+      send: sendDm,
+    });
+
+    const fetchChannel = vi.fn();
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      members: {
+        fetch: fetchMember,
+      },
+
+      channels: {
+        fetch: fetchChannel,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await sendOrganiserAssignmentNotification({
+      guild,
+
+      assignmentId: 123,
+
+      eventId: 456,
+
+      eventName: "DM Enabled Test",
+
+      discordUserId: ORGANISER_USER_ID,
+
+      slot: "primary",
+
+      eventAdminChannelId: WARNING_CHANNEL_ID,
+
+      organiserDmsEnabled: true,
+    });
+
+    // Assert
+    expect(result).toBe("dm");
+
+    expect(fetchMember).toHaveBeenCalledTimes(1);
+
+    expect(fetchMember).toHaveBeenCalledWith(ORGANISER_USER_ID);
+
+    expect(sendDm).toHaveBeenCalledTimes(1);
+
+    /*
+     * Successful DM delivery must not also post an administration-channel
+     * notification.
+     */
+    expect(fetchChannel).not.toHaveBeenCalled();
+  });
+
+  it("sends directly to the Event Administration channel when organiser DMs are disabled", async () => {
+    // Arrange
+    const fetchMember = vi.fn();
+
+    const sendAdminNotification = vi.fn().mockResolvedValue({
+      id: "820000000000000009",
+    });
+
+    const channel = {
+      id: WARNING_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: vi.fn().mockReturnValue(true),
+
+      send: sendAdminNotification,
+    };
+
+    const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      members: {
+        fetch: fetchMember,
+      },
+
+      channels: {
+        fetch: fetchChannel,
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await sendOrganiserAssignmentNotification({
+      guild,
+
+      assignmentId: 123,
+
+      eventId: 456,
+
+      eventName: "DM Disabled Test",
+
+      discordUserId: ORGANISER_USER_ID,
+
+      slot: "primary",
+
+      eventAdminChannelId: WARNING_CHANNEL_ID,
+
+      organiserDmsEnabled: false,
+    });
+
+    // Assert
+    expect(result).toBe("admin_channel");
+
+    /*
+     * This is the critical feature-switch guarantee: disabling organiser DMs
+     * means the DM path is skipped entirely, not merely attempted and ignored.
+     */
+    expect(fetchMember).not.toHaveBeenCalled();
+
+    expect(fetchChannel).toHaveBeenCalledTimes(1);
+
+    expect(fetchChannel).toHaveBeenCalledWith(WARNING_CHANNEL_ID);
+
+    expect(sendAdminNotification).toHaveBeenCalledTimes(1);
+
+    expect(sendAdminNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining(
+          "Direct organiser DMs are disabled for this server.",
+        ),
+
+        allowedMentions: {
+          parse: [],
+
+          users: [ORGANISER_USER_ID],
+        },
+      }),
+    );
+
+    const sentPayload = sendAdminNotification.mock.calls[0]?.[0];
+
+    expect(sentPayload?.content).not.toContain(
+      "The bot could not deliver a DM",
+    );
+  });
+
   it("propagates an unexpected Event Administration channel fetch failure after DM fallback", async () => {
     // Arrange
     const dmError = new Error("Organiser DMs are unavailable.");
@@ -658,6 +802,8 @@ describe("organiser assignment notification delivery", () => {
         slot: "primary",
 
         eventAdminChannelId: WARNING_CHANNEL_ID,
+
+        organiserDmsEnabled: true,
       }),
     ).rejects.toBe(transientChannelError);
 
@@ -724,6 +870,8 @@ describe("organiser assignment notification delivery", () => {
       slot: "primary",
 
       eventAdminChannelId: WARNING_CHANNEL_ID,
+
+      organiserDmsEnabled: true,
     });
 
     // Assert

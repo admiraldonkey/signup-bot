@@ -1,0 +1,1 @@
+ALTER TABLE "guild_settings" ADD COLUMN "organiser_dms_enabled" boolean DEFAULT true NOT NULL;
