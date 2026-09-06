@@ -22,6 +22,8 @@ export async function getGuildConfiguration(discordGuildId: string) {
 
       eventOrganiserRoleId: guildSettings.eventOrganiserRoleId,
 
+      organiserDmsEnabled: guildSettings.organiserDmsEnabled,
+
       organiserPrimaryResponseMinutes:
         guildSettings.organiserPrimaryResponseMinutes,
 
@@ -44,6 +46,8 @@ export async function getGuildConfiguration(discordGuildId: string) {
 
   return {
     ...configuration,
+
+    organiserDmsEnabled: configuration.organiserDmsEnabled ?? true,
 
     organiserPrimaryResponseMinutes:
       configuration.organiserPrimaryResponseMinutes ?? 80,

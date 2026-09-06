@@ -142,6 +142,30 @@ export const commandDefinitions = [
 
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("features")
+        .setDescription(
+          "Enables or disables optional server-level bot features.",
+        )
+        .addStringOption((option) =>
+          option
+            .setName("feature")
+            .setDescription("The feature to configure.")
+            .setRequired(true)
+            .addChoices({
+              name: "Organiser DMs",
+              value: "organiser-dms",
+            }),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("enabled")
+            .setDescription("Whether this feature should be enabled.")
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("status")
         .setDescription("Shows the server's current bot configuration."),
     ),

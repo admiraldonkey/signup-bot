@@ -157,6 +157,27 @@ describe("primary organiser assignment", () => {
     await setEventOrganiser(interaction);
 
     /*
+     * Publication must use the server-level notification policy which exists
+     * when the dormant primary is activated.
+     */
+    await pool.query(
+      `
+    UPDATE "guild_settings"
+    SET
+      "organiser_dms_enabled" = false,
+      "event_admin_channel_id" = $2,
+      "updated_at" = NOW()
+    WHERE
+      "guild_id" = (
+        SELECT "owner_guild_id"
+        FROM "events"
+        WHERE "id" = $1
+      )
+  `,
+      [eventId, WARNING_CHANNEL_ID],
+    );
+
+    /*
      * Confirm the starting state for this test:
      * assignment exists, but publication has not activated it.
      */
@@ -385,6 +406,10 @@ describe("primary organiser assignment", () => {
 
         slot: "primary",
 
+        eventAdminChannelId: WARNING_CHANNEL_ID,
+
+        organiserDmsEnabled: false,
+
         eventMessageUrl: `https://discord.test/messages/${PUBLICATION_MESSAGE_ID}`,
       }),
     );
@@ -409,6 +434,27 @@ describe("primary organiser assignment", () => {
       WHERE "id" = $1
     `,
       [eventId],
+    );
+
+    /*
+     * Simulate a server which deliberately routes organiser assignment prompts
+     * directly through its Event Administration channel.
+     */
+    await pool.query(
+      `
+    UPDATE "guild_settings"
+    SET
+      "organiser_dms_enabled" = false,
+      "event_admin_channel_id" = $2,
+      "updated_at" = NOW()
+    WHERE
+      "guild_id" = (
+        SELECT "owner_guild_id"
+        FROM "events"
+        WHERE "id" = $1
+      )
+  `,
+      [eventId, WARNING_CHANNEL_ID],
     );
 
     const interaction = createOrganiserSetInteraction(eventId);
@@ -502,6 +548,26 @@ describe("primary organiser assignment", () => {
      * that the assignment itself failed.
      */
     expect(commandError).toBeUndefined();
+
+    expect(
+      notificationMocks.sendOrganiserAssignmentNotification,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      notificationMocks.sendOrganiserAssignmentNotification,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventId,
+
+        discordUserId: ORGANISER_USER_ID,
+
+        slot: "primary",
+
+        eventAdminChannelId: WARNING_CHANNEL_ID,
+
+        organiserDmsEnabled: false,
+      }),
+    );
 
     const editReply = vi.mocked(interaction.editReply);
 

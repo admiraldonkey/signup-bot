@@ -93,6 +93,8 @@ export async function sendOrganiserAssignmentNotification(input: {
 
   eventAdminChannelId: string | null;
 
+  organiserDmsEnabled: boolean;
+
   eventMessageUrl?: string | null;
 }): Promise<OrganiserNotificationDelivery> {
   const slotLabel = formatSlot(input.slot);
@@ -110,23 +112,29 @@ export async function sendOrganiserAssignmentNotification(input: {
     .join("\n");
 
   /*
-   * DM is the preferred delivery method.
+   * DM is the preferred delivery method when enabled for this server.
+   *
+   * When organiser DMs are disabled, do not fetch the member or attempt a DM
+   * at all. Delivery proceeds directly to the configured Event Administration
+   * channel.
    */
-  try {
-    const member = await input.guild.members.fetch(input.discordUserId);
+  if (input.organiserDmsEnabled) {
+    try {
+      const member = await input.guild.members.fetch(input.discordUserId);
 
-    await member.send({
-      content: dmContent,
+      await member.send({
+        content: dmContent,
 
-      components: [buildOrganiserResponseButtons(input.assignmentId)],
-    });
+        components: [buildOrganiserResponseButtons(input.assignmentId)],
+      });
 
-    return "dm";
-  } catch {
-    /*
-     * DM failure is expected for members who disable server DMs.
-     * Fall through to the private administration channel.
-     */
+      return "dm";
+    } catch {
+      /*
+       * DM failure is expected for members who disable server DMs.
+       * Fall through to the private administration channel.
+       */
+    }
   }
 
   if (!input.eventAdminChannelId) {
@@ -144,6 +152,10 @@ export async function sendOrganiserAssignmentNotification(input: {
       return "failed";
     }
 
+    const deliveryExplanation = input.organiserDmsEnabled
+      ? `The bot could not deliver a DM to <@${input.discordUserId}>.`
+      : "Direct organiser DMs are disabled for this server.";
+
     await channel.send({
       content: [
         `||<@${input.discordUserId}>||`,
@@ -152,7 +164,7 @@ export async function sendOrganiserAssignmentNotification(input: {
 
         "⚠️ **Organiser confirmation required**",
 
-        `The bot could not deliver a DM to <@${input.discordUserId}>.`,
+        deliveryExplanation,
 
         "",
 

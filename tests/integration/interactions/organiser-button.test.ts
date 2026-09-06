@@ -62,6 +62,8 @@ const COVER_ORGANISER_USER_ID = "700000000000000005";
 
 const EVENT_ORGANISER_ROLE_ID = "700000000000000006";
 
+const EVENT_ADMIN_CHANNEL_ID = "700000000000000007";
+
 describe("organiser button interactions", () => {
   let pool: Pool;
 
@@ -467,6 +469,27 @@ describe("organiser button interactions", () => {
       );
     }
 
+    /*
+     * Automatic escalation must use the same server-level organiser notification
+     * policy as direct/manual assignment.
+     */
+    await pool.query(
+      `
+    UPDATE "guild_settings"
+    SET
+      "organiser_dms_enabled" = false,
+      "event_admin_channel_id" = $2,
+      "updated_at" = NOW()
+    WHERE
+      "guild_id" = (
+        SELECT "owner_guild_id"
+        FROM "events"
+        WHERE "id" = $1
+      )
+  `,
+      [fixture.eventId, EVENT_ADMIN_CHANNEL_ID],
+    );
+
     const interaction = createOrganiserResponseInteraction(
       fixture.assignmentId,
       "decline",
@@ -628,7 +651,9 @@ describe("organiser button interactions", () => {
 
         slot: "backup",
 
-        eventAdminChannelId: null,
+        eventAdminChannelId: EVENT_ADMIN_CHANNEL_ID,
+
+        organiserDmsEnabled: false,
       }),
     );
 

@@ -98,6 +98,12 @@ export async function handleSetupCommand(
     return;
   }
 
+  if (subcommand === "features") {
+    await configureGuildFeature(interaction);
+
+    return;
+  }
+
   if (subcommand === "regions") {
     await configureEventRegions(interaction);
     return;
@@ -706,6 +712,134 @@ async function configureGuild(
   });
 }
 
+async function configureGuildFeature(
+  interaction: ChatInputCommandInteraction,
+): Promise<void> {
+  const discordGuildId = interaction.guildId;
+
+  if (!discordGuildId) {
+    throw new Error("The setup features command requires a Discord server.");
+  }
+
+  const feature = interaction.options.getString("feature", true);
+  const enabled = interaction.options.getBoolean("enabled", true);
+
+  const [configuredGuild] = await db
+    .select({
+      id: discordGuilds.id,
+      name: discordGuilds.name,
+    })
+    .from(discordGuilds)
+    .where(eq(discordGuilds.discordGuildId, discordGuildId))
+    .limit(1);
+
+  if (!configuredGuild) {
+    await interaction.editReply(
+      "This server has not been initialised. Run `/setup initialise` first.",
+    );
+
+    return;
+  }
+
+  const [settings] = await db
+    .select({
+      organiserDmsEnabled: guildSettings.organiserDmsEnabled,
+      eventAdminChannelId: guildSettings.eventAdminChannelId,
+    })
+    .from(guildSettings)
+    .where(eq(guildSettings.guildId, configuredGuild.id))
+    .limit(1);
+
+  if (!settings) {
+    await interaction.editReply(
+      "This server's settings could not be found. Run `/setup initialise` first.",
+    );
+
+    return;
+  }
+
+  if (feature !== "organiser-dms") {
+    throw new Error(`Unknown guild feature: ${feature}`);
+  }
+
+  /*
+   * When organiser DMs are disabled, the Event Administration channel
+   * becomes the sole assignment-notification destination.
+   *
+   * Do not allow administrators to deliberately configure a state in which
+   * organiser confirmation requests have nowhere to go.
+   */
+  if (!enabled && !settings.eventAdminChannelId) {
+    await interaction.editReply({
+      content: [
+        "❌ Organiser DMs cannot be disabled yet.",
+        "",
+        "Configure an Event Administration channel with `/setup configure` first.",
+        "When organiser DMs are disabled, assignment confirmation requests are sent directly to that channel.",
+      ].join("\n"),
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const now = new Date();
+
+  await db
+    .update(guildSettings)
+    .set({
+      organiserDmsEnabled: enabled,
+      updatedAt: now,
+    })
+    .where(eq(guildSettings.guildId, configuredGuild.id));
+
+  await writeAuditLog({
+    guildId: configuredGuild.id,
+
+    guild: interaction.guild,
+
+    actorUserId: interaction.user.id,
+
+    action: "setup.feature.update",
+
+    outcome: "success",
+
+    summary: `${enabled ? "Enabled" : "Disabled"} organiser DMs for this server.`,
+
+    targetType: "guild",
+
+    targetId: discordGuildId,
+
+    details: {
+      feature: "organiser-dms",
+      enabled,
+      previousValue: settings.organiserDmsEnabled,
+    },
+  });
+
+  await interaction.editReply({
+    content: enabled
+      ? [
+          "✅ **Organiser DMs enabled.**",
+          "",
+          "New organiser assignments will try a direct message first.",
+          "If the DM cannot be delivered, the bot will fall back to the Event Administration channel.",
+        ].join("\n")
+      : [
+          "✅ **Organiser DMs disabled.**",
+          "",
+          "New organiser assignments will skip direct messages and send confirmation requests straight to the Event Administration channel.",
+        ].join("\n"),
+
+    allowedMentions: {
+      parse: [],
+    },
+  });
+}
+
 async function configureEventRegions(
   interaction: ChatInputCommandInteraction,
 ): Promise<void> {
@@ -855,6 +989,7 @@ async function showSetupStatus(
       roleRequestChannelId: guildSettings.defaultRoleRequestChannelId,
       eventAdminChannelId: guildSettings.eventAdminChannelId,
       eventOrganiserRoleId: guildSettings.eventOrganiserRoleId,
+      organiserDmsEnabled: guildSettings.organiserDmsEnabled,
       organiserPrimaryResponseMinutes:
         guildSettings.organiserPrimaryResponseMinutes,
       organiserBackupResponseMinutes:
@@ -938,6 +1073,9 @@ async function showSetupStatus(
           : "Not set"
       }`,
       `• Event organiser role: ${eventOrganiserRoleDisplay}`,
+      `• Organiser DMs: ${
+        (settings?.organiserDmsEnabled ?? true) ? "Enabled" : "Disabled"
+      }`,
       `• Attendance channel: ${
         settings?.attendanceChannelId
           ? `<#${settings.attendanceChannelId}>`
