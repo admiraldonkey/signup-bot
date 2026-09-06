@@ -1,17 +1,10 @@
 import { type ChatInputCommandInteraction } from "discord.js";
-import { and, eq, inArray, isNotNull, like, or } from "drizzle-orm";
 
 import { writeAuditLog } from "../audit/audit-log.js";
 import {
   getGuildConfiguration,
   memberCanManageEvents,
 } from "../auth/event-admin.js";
-import { db } from "../db/client.js";
-import {
-  eventOrganiserAssignments,
-  events,
-  scheduledActions,
-} from "../db/schema.js";
 import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
 import {
   type OrganiserNotificationDelivery,
@@ -19,13 +12,7 @@ import {
   sendOrganiserAssignmentNotification,
 } from "../events/organiser-notification.js";
 import {
-  buildOrganiserResponseActionValues,
-  calculateOrganiserResponseDeadline,
-  ORGANISER_COVER_REQUEST_ACTION_PREFIX,
-  ORGANISER_TIMEOUT_ACTION_PREFIX,
-  ORGANISER_WARNING_ACTION_PREFIX,
-} from "../organisers/organiser-scheduling.js";
-import {
+  assignEventOrganiser,
   type EditableOrganiserSlot,
   removeEventOrganiserAssignment,
 } from "../organisers/organiser-assignment-service.js";
@@ -63,24 +50,6 @@ export async function setEventOrganiser(
     return;
   }
 
-  const event = await findOwnedEvent(context.guildId, eventId);
-
-  if (!event) {
-    await interaction.editReply(
-      `Event #${eventId} was not found in this server.`,
-    );
-
-    return;
-  }
-
-  if (event.status === "cancelled" || event.status === "completed") {
-    await interaction.editReply(
-      "Organisers cannot be changed on cancelled or completed events.",
-    );
-
-    return;
-  }
-
   let member;
 
   try {
@@ -104,239 +73,76 @@ export async function setEventOrganiser(
     return;
   }
 
-  if (slot === "backup") {
-    const currentPrimary = await findCurrentAssignment(event.id, "primary");
+  const result = await assignEventOrganiser({
+    guildDatabaseId: context.guildId,
 
-    if (
-      !currentPrimary ||
-      !["pending", "confirmed"].includes(currentPrimary.status)
-    ) {
+    eventId,
+
+    slot,
+
+    organiserUserId: user.id,
+
+    displayNameSnapshot: member.displayName,
+
+    assignedByUserId: interaction.user.id,
+
+    primaryResponseMinutes: context.organiserPrimaryResponseMinutes,
+
+    warningMinutesBefore: context.organiserWarningMinutesBefore,
+  });
+
+  switch (result.kind) {
+    case "event_not_found":
+      await interaction.editReply(
+        `Event #${eventId} was not found in this server.`,
+      );
+
+      return;
+
+    case "event_inactive":
+      await interaction.editReply(
+        "Organisers cannot be changed on cancelled or completed events.",
+      );
+
+      return;
+
+    case "backup_requires_primary":
       await interaction.editReply(
         "Assign an active primary organiser before assigning a backup organiser.",
       );
 
       return;
-    }
+
+    case "organiser_already_assigned_to_other_slot":
+      await interaction.editReply(
+        `That member is already the current **${result.otherSlot}** organiser. Clear that assignment first.`,
+      );
+
+      return;
+
+    case "organiser_already_current":
+      await interaction.editReply(
+        `<@${user.id}> is already the current **${slot}** organiser for this event.`,
+      );
+
+      return;
+
+    case "assigned":
+      break;
   }
 
-  const otherSlot: EditableOrganiserSlot =
-    slot === "primary" ? "backup" : "primary";
+  const { event, assignment, replacedAssignmentIds } = result;
 
-  const otherAssignment = await findCurrentAssignment(event.id, otherSlot);
-
-  if (otherAssignment?.discordUserId === user.id) {
-    await interaction.editReply(
-      `That member is already the current **${otherSlot}** organiser. Clear that assignment first.`,
-    );
-
-    return;
-  }
-
-  const existing = await findCurrentAssignment(event.id, slot);
-
-  if (
-    existing?.discordUserId === user.id &&
-    (existing.status === "pending" || existing.status === "confirmed")
-  ) {
-    await interaction.editReply(
-      `<@${user.id}> is already the current **${slot}** organiser for this event.`,
-    );
-
-    return;
-  }
-
-  const now = new Date();
-
-  const shouldActivatePrimary =
-    slot === "primary" && event.publishedAt !== null;
-
-  const { assignment, replacedAssignmentIds } = await db.transaction(
-    async (transaction) => {
-      const replacedAssignmentIds: number[] = [];
-
-      if (existing) {
-        const replacedAssignments = await transaction
-          .update(eventOrganiserAssignments)
-          .set({
-            status: "replaced",
-
-            isCurrent: false,
-
-            endedAt: now,
-
-            updatedAt: now,
-          })
-          .where(eq(eventOrganiserAssignments.id, existing.id))
-          .returning({
-            id: eventOrganiserAssignments.id,
-          });
-
-        replacedAssignmentIds.push(
-          ...replacedAssignments.map(
-            (replacedAssignment) => replacedAssignment.id,
-          ),
-        );
-      }
-
-      /*
-       * A newly assigned primary supersedes any currently-active
-       * backup or cover organiser.
-       *
-       * Dormant backups are deliberately retained.
-       */
-      if (slot === "primary") {
-        const replacedActivatedAssignments = await transaction
-          .update(eventOrganiserAssignments)
-          .set({
-            status: "replaced",
-
-            isCurrent: false,
-
-            endedAt: now,
-
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(eventOrganiserAssignments.eventId, event.id),
-              eq(eventOrganiserAssignments.isCurrent, true),
-
-              isNotNull(eventOrganiserAssignments.activatedAt),
-
-              inArray(eventOrganiserAssignments.slot, ["backup", "cover"]),
-            ),
-          )
-          .returning({
-            id: eventOrganiserAssignments.id,
-          });
-
-        replacedAssignmentIds.push(
-          ...replacedActivatedAssignments.map(
-            (replacedAssignment) => replacedAssignment.id,
-          ),
-        );
-
-        /*
-         * Cancel old organiser escalation work, including a cover
-         * request which may have just become unnecessary.
-         */
-        await transaction
-          .update(scheduledActions)
-          .set({
-            status: "cancelled",
-
-            lockedAt: null,
-
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(scheduledActions.eventId, event.id),
-
-              inArray(scheduledActions.status, ["pending", "processing"]),
-
-              or(
-                like(
-                  scheduledActions.actionKey,
-                  `${ORGANISER_WARNING_ACTION_PREFIX}%`,
-                ),
-
-                like(
-                  scheduledActions.actionKey,
-                  `${ORGANISER_TIMEOUT_ACTION_PREFIX}%`,
-                ),
-
-                like(
-                  scheduledActions.actionKey,
-                  `${ORGANISER_COVER_REQUEST_ACTION_PREFIX}%`,
-                ),
-              ),
-            ),
-          );
-      }
-
-      const activatedAt = shouldActivatePrimary ? now : null;
-
-      const responseDeadlineAt = shouldActivatePrimary
-        ? calculateOrganiserResponseDeadline(
-            now,
-            context.organiserPrimaryResponseMinutes,
-          )
-        : null;
-
-      const [created] = await transaction
-        .insert(eventOrganiserAssignments)
-        .values({
-          eventId: event.id,
-
-          slot,
-
-          discordUserId: user.id,
-
-          displayNameSnapshot: member.displayName,
-
-          status: "pending",
-
-          isCurrent: true,
-
-          assignedByUserId: interaction.user.id,
-
-          activatedAt,
-
-          responseDeadlineAt,
-
-          updatedAt: now,
-        })
-        .returning({
-          id: eventOrganiserAssignments.id,
-        });
-
-      if (!created) {
-        throw new Error(
-          "The organiser assignment was not returned by the database.",
-        );
-      }
-
-      if (shouldActivatePrimary) {
-        if (!activatedAt || !responseDeadlineAt) {
-          throw new Error(
-            "The primary organiser activation times were not created.",
-          );
-        }
-
-        const actions = buildOrganiserResponseActionValues({
-          eventId: event.id,
-
-          assignmentId: created.id,
-
-          activatedAt,
-
-          responseDeadlineAt,
-
-          warningMinutesBefore: context.organiserWarningMinutesBefore,
-        });
-
-        await transaction.insert(scheduledActions).values(actions);
-      }
-
-      return {
-        assignment: created,
-
-        replacedAssignmentIds,
-      };
-    },
-  );
-
+  /*
+   * Replacement is already authoritative at this point. Discord warning
+   * reconciliation is secondary presentation cleanup.
+   */
   for (const replacedAssignmentId of replacedAssignmentIds) {
     await reconcileOrganiserPendingWarning({
       guild: interaction.guild,
 
       assignmentId: replacedAssignmentId,
     }).catch((error: unknown) => {
-      /*
-       * Replacement is already authoritative. Failure to tidy an older Discord
-       * warning must not undo or misreport the newly assigned organiser.
-       */
       console.error(
         `Failed to reconcile organiser warning for replaced assignment ${replacedAssignmentId}:`,
         error,
@@ -346,7 +152,9 @@ export async function setEventOrganiser(
 
   let notification: OrganiserNotificationDelivery | null = null;
 
-  if (shouldActivatePrimary) {
+  const activePrimary = slot === "primary" && assignment.activatedAt !== null;
+
+  if (activePrimary) {
     try {
       notification = await sendOrganiserAssignmentNotification({
         guild: interaction.guild,
@@ -367,9 +175,8 @@ export async function setEventOrganiser(
       });
     } catch (error: unknown) {
       /*
-       * The organiser assignment and response actions are already authoritative.
-       * An unexpected Discord transport failure must therefore not make the
-       * command falsely report that the assignment itself failed.
+       * The organiser assignment and response actions are already
+       * authoritative. Notification failure cannot invalidate that state.
        */
       console.error(
         `Failed to deliver organiser assignment notification for assignment ${assignment.id}:`,
@@ -589,58 +396,6 @@ async function getOrganiserContext(interaction: CachedInteraction) {
   }
 
   return configuration;
-}
-
-async function findOwnedEvent(guildDatabaseId: number, eventId: number) {
-  const [event] = await db
-    .select({
-      id: events.id,
-
-      name: events.name,
-
-      status: events.status,
-      publishedAt: events.publishedAt,
-    })
-    .from(events)
-    .where(
-      and(
-        eq(events.id, eventId),
-
-        eq(events.ownerGuildId, guildDatabaseId),
-      ),
-    )
-    .limit(1);
-
-  return event ?? null;
-}
-
-async function findCurrentAssignment(
-  eventId: number,
-  slot: EditableOrganiserSlot,
-) {
-  const [assignment] = await db
-    .select({
-      id: eventOrganiserAssignments.id,
-
-      discordUserId: eventOrganiserAssignments.discordUserId,
-
-      status: eventOrganiserAssignments.status,
-
-      activatedAt: eventOrganiserAssignments.activatedAt,
-    })
-    .from(eventOrganiserAssignments)
-    .where(
-      and(
-        eq(eventOrganiserAssignments.eventId, eventId),
-
-        eq(eventOrganiserAssignments.slot, slot),
-
-        eq(eventOrganiserAssignments.isCurrent, true),
-      ),
-    )
-    .limit(1);
-
-  return assignment ?? null;
 }
 
 function formatNotificationDelivery(
