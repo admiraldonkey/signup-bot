@@ -8,9 +8,9 @@ import {
 import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
 import {
   type OrganiserNotificationDelivery,
-  reconcileOrganiserPendingWarning,
   sendOrganiserAssignmentNotification,
 } from "../events/organiser-notification.js";
+import { reconcileOrganiserPendingWarning } from "../events/organiser-warning-reconciliation.js";
 import {
   assignEventOrganiser,
   type EditableOrganiserSlot,

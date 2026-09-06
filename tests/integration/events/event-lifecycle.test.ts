@@ -18,7 +18,9 @@ const organiserNotificationMocks = vi.hoisted(() => ({
 vi.mock("../../../src/events/organiser-notification.js", () => ({
   sendOrganiserAssignmentNotification:
     organiserNotificationMocks.sendOrganiserAssignmentNotification,
+}));
 
+vi.mock("../../../src/events/organiser-warning-reconciliation.js", () => ({
   reconcileOrganiserPendingWarning:
     organiserNotificationMocks.reconcileOrganiserPendingWarning,
 }));

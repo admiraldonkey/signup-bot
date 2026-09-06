@@ -35,12 +35,14 @@ vi.mock(
 
       sendOrganiserAssignmentNotification:
         organiserNotificationMocks.sendOrganiserAssignmentNotification,
-
-      reconcileOrganiserPendingWarning:
-        organiserNotificationMocks.reconcileOrganiserPendingWarning,
     };
   },
 );
+
+vi.mock("../../../src/events/organiser-warning-reconciliation.js", () => ({
+  reconcileOrganiserPendingWarning:
+    organiserNotificationMocks.reconcileOrganiserPendingWarning,
+}));
 
 import { handleOrganiserButton } from "../../../src/interactions/organiser-button.js";
 import { escalateAfterFailedOrganiserAssignment } from "../../../src/organisers/organiser-escalation.js";

@@ -51,12 +51,15 @@ vi.mock("../../../src/events/organiser-notification.js", () => ({
   sendOrganiserPendingWarning:
     organiserNotificationMocks.sendOrganiserPendingWarning,
 
-  reconcileOrganiserPendingWarning:
-    organiserNotificationMocks.reconcileOrganiserPendingWarning,
-
   sendOrganiserCoverRequest:
     organiserNotificationMocks.sendOrganiserCoverRequest,
 }));
+
+vi.mock("../../../src/events/organiser-warning-reconciliation.js", () => ({
+  reconcileOrganiserPendingWarning:
+    organiserNotificationMocks.reconcileOrganiserPendingWarning,
+}));
+
 import {
   startEventScheduler,
   stopEventScheduler,
