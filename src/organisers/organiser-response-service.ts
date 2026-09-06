@@ -7,23 +7,18 @@ import {
   events,
 } from "../db/schema.js";
 import { cancelOrganiserResponseActions } from "./organiser-scheduling.js";
-
-export type OrganiserResponseAction = "confirm" | "decline";
-
-export type OrganiserAssignmentStatus =
-  | "pending"
-  | "confirmed"
-  | "declined"
-  | "timed_out"
-  | "replaced"
-  | "removed";
+import type {
+  OrganiserAssignmentSlot,
+  OrganiserAssignmentStatus,
+  OrganiserResponseAction,
+} from "./organiser-types.js";
 
 type SavedOrganiserResponse = {
   id: number;
 
   eventId: number;
 
-  slot: "primary" | "backup" | "cover";
+  slot: OrganiserAssignmentSlot;
 
   discordUserId: string;
 
@@ -33,6 +28,11 @@ type SavedOrganiserResponse = {
 
   discordGuildId: string;
 };
+
+export type {
+  OrganiserAssignmentStatus,
+  OrganiserResponseAction,
+} from "./organiser-types.js";
 
 export type RecordOrganiserResponseResult =
   | {

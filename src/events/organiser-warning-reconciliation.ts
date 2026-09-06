@@ -4,8 +4,12 @@ import { eq } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { eventOrganiserAssignments, events } from "../db/schema.js";
 import { isDiscordErrorCode } from "../discord/discord-errors.js";
+import type {
+  OrganiserAssignmentSlot,
+  OrganiserAssignmentStatus,
+} from "../organisers/organiser-types.js";
 
-type OrganiserAssignmentSlot = "primary" | "backup" | "cover";
+import { formatOrganiserSlot } from "./organiser-formatting.js";
 
 export async function reconcileOrganiserPendingWarning(input: {
   guild: Guild;
@@ -110,17 +114,11 @@ function buildResolvedOrganiserWarningContent(assignment: {
 
   slot: OrganiserAssignmentSlot;
 
-  status:
-    | "pending"
-    | "confirmed"
-    | "declined"
-    | "timed_out"
-    | "replaced"
-    | "removed";
+  status: OrganiserAssignmentStatus;
 
   eventStatus: "scheduled" | "open" | "closed" | "cancelled" | "completed";
 }): string {
-  const slotLabel = formatSlot(assignment.slot);
+  const slotLabel = formatOrganiserSlot(assignment.slot);
 
   if (
     assignment.eventStatus === "cancelled" ||
@@ -185,18 +183,5 @@ function buildResolvedOrganiserWarningContent(assignment: {
 
         `The **${slotLabel}** response request for <@${assignment.discordUserId}> on **${assignment.eventName}** (#${assignment.eventId}) is no longer active.`,
       ].join("\n");
-  }
-}
-
-function formatSlot(slot: OrganiserAssignmentSlot): string {
-  switch (slot) {
-    case "primary":
-      return "primary organiser";
-
-    case "backup":
-      return "backup organiser";
-
-    case "cover":
-      return "cover organiser";
   }
 }

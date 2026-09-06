@@ -14,8 +14,9 @@ import {
   ORGANISER_TIMEOUT_ACTION_PREFIX,
   ORGANISER_WARNING_ACTION_PREFIX,
 } from "./organiser-scheduling.js";
+import type { EditableOrganiserSlot } from "./organiser-types.js";
 
-export type EditableOrganiserSlot = "primary" | "backup";
+export type { EditableOrganiserSlot } from "./organiser-types.js";
 
 export type AssignEventOrganiserResult =
   | {

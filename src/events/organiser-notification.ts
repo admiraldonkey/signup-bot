@@ -7,12 +7,19 @@ import {
   type Guild,
 } from "discord.js";
 import { isDiscordErrorCode } from "../discord/discord-errors.js";
+import type {
+  OrganiserAssignmentSlot,
+  OrganiserResponseAction,
+} from "../organisers/organiser-types.js";
 
-export type OrganiserResponseAction = "confirm" | "decline";
+import { formatOrganiserSlot } from "./organiser-formatting.js";
+
+export type {
+  OrganiserAssignmentSlot,
+  OrganiserResponseAction,
+} from "../organisers/organiser-types.js";
 
 export type OrganiserNotificationDelivery = "dm" | "admin_channel" | "failed";
-
-export type OrganiserAssignmentSlot = "primary" | "backup" | "cover";
 
 export function buildOrganiserResponseCustomId(
   assignmentId: number,
@@ -62,19 +69,6 @@ function buildOrganiserResponseButtons(
   );
 }
 
-function formatSlot(slot: OrganiserAssignmentSlot): string {
-  switch (slot) {
-    case "primary":
-      return "primary organiser";
-
-    case "backup":
-      return "backup organiser";
-
-    case "cover":
-      return "cover organiser";
-  }
-}
-
 export async function sendOrganiserAssignmentNotification(input: {
   guild: Guild;
 
@@ -94,7 +88,7 @@ export async function sendOrganiserAssignmentNotification(input: {
 
   eventMessageUrl?: string | null;
 }): Promise<OrganiserNotificationDelivery> {
-  const slotLabel = formatSlot(input.slot);
+  const slotLabel = formatOrganiserSlot(input.slot);
 
   const dmContent = [
     `You have been assigned as the **${slotLabel}** for **${input.eventName}** (#${input.eventId}).`,
@@ -275,7 +269,7 @@ export async function sendOrganiserPendingWarning(input: {
 
         "",
 
-        `<@${input.discordUserId}> has not yet confirmed as the **${formatSlot(
+        `<@${input.discordUserId}> has not yet confirmed as the **${formatOrganiserSlot(
           input.slot,
         )}** for **${input.eventName}** (#${input.eventId}).`,
 

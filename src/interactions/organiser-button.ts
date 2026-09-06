@@ -16,6 +16,7 @@ import {
   type OrganiserEscalationResult,
 } from "../organisers/organiser-escalation.js";
 import { recordOrganiserResponse } from "../organisers/organiser-response-service.js";
+import type { OrganiserAssignmentStatus } from "../organisers/organiser-types.js";
 
 export async function handleOrganiserButton(
   interaction: ButtonInteraction,
@@ -428,15 +429,7 @@ function formatEscalationResult(
   }
 }
 
-function formatStatus(
-  status:
-    | "pending"
-    | "confirmed"
-    | "declined"
-    | "timed_out"
-    | "replaced"
-    | "removed",
-): string {
+function formatStatus(status: OrganiserAssignmentStatus): string {
   switch (status) {
     case "pending":
       return "Awaiting confirmation";
