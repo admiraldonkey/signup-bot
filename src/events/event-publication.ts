@@ -333,6 +333,8 @@ export async function publishStoredEvent(
 
             startsAt: event.startsAt,
 
+            organisersEnabled: event.organisersEnabled ?? true,
+
             organiser,
 
             signupsEnabled: event.signupsEnabled,

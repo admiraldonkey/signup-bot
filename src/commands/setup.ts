@@ -780,36 +780,6 @@ async function configureGuildFeature(
         );
       }
 
-      if (!enabled) {
-        /*
-         * PostgreSQL state is already authoritative. Discord cleanup is secondary
-         * and must not undo or misreport the successful disable transition.
-         */
-        for (const assignment of transition.retiredAssignments) {
-          await reconcileOrganiserPendingWarning({
-            guild,
-
-            assignmentId: assignment.id,
-          }).catch((error: unknown) => {
-            console.error(
-              `Failed to reconcile organiser warning for assignment ${assignment.id} after disabling organisers:`,
-              error,
-            );
-          });
-        }
-
-        for (const affectedEventId of transition.affectedEventIds) {
-          await refreshAttendanceMessage(guild, affectedEventId).catch(
-            (error: unknown) => {
-              console.error(
-                `Failed to refresh event ${affectedEventId} after disabling organisers:`,
-                error,
-              );
-            },
-          );
-        }
-      }
-
       await writeAuditLog({
         guildId: configuredGuild.id,
 
@@ -853,6 +823,45 @@ async function configureGuildFeature(
           parse: [],
         },
       });
+
+      if (!enabled) {
+        /*
+         * The PostgreSQL transition and administrator response are already
+         * authoritative.
+         *
+         * Discord presentation cleanup is secondary. Run independent cleanup work
+         * concurrently so one slow or rate-limited Discord request does not delay
+         * every other affected assignment/event.
+         *
+         * We still await completion before leaving the handler so cleanup failures
+         * are observed and logged rather than becoming detached background work.
+         */
+        await Promise.all([
+          ...transition.retiredAssignments.map(async (assignment) => {
+            await reconcileOrganiserPendingWarning({
+              guild,
+
+              assignmentId: assignment.id,
+            }).catch((error: unknown) => {
+              console.error(
+                `Failed to reconcile organiser warning for assignment ${assignment.id} after disabling organisers:`,
+                error,
+              );
+            });
+          }),
+
+          ...transition.affectedEventIds.map(async (affectedEventId) => {
+            await refreshAttendanceMessage(guild, affectedEventId).catch(
+              (error: unknown) => {
+                console.error(
+                  `Failed to refresh event ${affectedEventId} after disabling organisers:`,
+                  error,
+                );
+              },
+            );
+          }),
+        ]);
+      }
 
       return;
     }

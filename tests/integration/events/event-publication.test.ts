@@ -187,6 +187,21 @@ describe("event publication organiser feature", () => {
     ).not.toHaveBeenCalled();
 
     expect(send).toHaveBeenCalledTimes(1);
+    const sentPayload = send.mock.calls[0]?.[0] as
+      | {
+          embeds?: {
+            toJSON(): {
+              description?: string;
+            };
+          }[];
+        }
+      | undefined;
+
+    const description = sentPayload?.embeds?.[0]?.toJSON().description ?? "";
+
+    expect(description).not.toContain("**Organiser**");
+
+    expect(description).not.toContain("Not assigned");
   });
 });
 

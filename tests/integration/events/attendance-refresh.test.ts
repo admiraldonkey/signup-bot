@@ -585,6 +585,80 @@ describe("attendance message refresh and recovery", () => {
     ]);
   });
 
+  it("omits organiser presentation when organisers are disabled", async () => {
+    // Arrange
+    const fixture = await createPublishedEvent(pool);
+
+    await pool.query(
+      `
+      UPDATE "guild_settings"
+      SET
+        "organisers_enabled" = false,
+        "updated_at" = NOW()
+      WHERE "guild_id" = (
+        SELECT "owner_guild_id"
+        FROM "events"
+        WHERE "id" = $1
+      )
+    `,
+      [fixture.eventId],
+    );
+
+    const editMessage = vi.fn().mockResolvedValue(undefined);
+
+    const existingMessage = {
+      id: OLD_MESSAGE_ID,
+
+      url: `https://discord.test/channels/${DISCORD_GUILD_ID}/${ATTENDANCE_CHANNEL_ID}/${OLD_MESSAGE_ID}`,
+
+      edit: editMessage,
+    };
+
+    const channel = {
+      id: ATTENDANCE_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      messages: {
+        fetch: vi.fn().mockResolvedValue(existingMessage),
+      },
+
+      send: vi.fn(),
+    };
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: vi.fn().mockResolvedValue(channel),
+      },
+    } as unknown as Guild;
+
+    // Act
+    const result = await refreshAttendanceMessage(guild, fixture.eventId);
+
+    // Assert
+    expect(result.ok).toBe(true);
+
+    expect(editMessage).toHaveBeenCalledTimes(1);
+
+    const payload = editMessage.mock.calls[0]?.[0] as
+      | {
+          embeds?: {
+            toJSON(): {
+              description?: string;
+            };
+          }[];
+        }
+      | undefined;
+
+    const description = payload?.embeds?.[0]?.toJSON().description ?? "";
+
+    expect(description).not.toContain("**Organiser**");
+
+    expect(description).not.toContain("Not assigned");
+  });
+
   it("fails safely when the linked attendance channel has been deleted", async () => {
     // Arrange
     const fixture = await createPublishedEvent(pool);
@@ -802,6 +876,16 @@ async function createPublishedEvent(pool: Pool): Promise<{
   if (!guildDatabaseId) {
     throw new Error("The integration-test guild was not created.");
   }
+
+  await pool.query(
+    `
+    INSERT INTO "guild_settings" (
+      "guild_id"
+    )
+    VALUES ($1)
+  `,
+    [guildDatabaseId],
+  );
 
   const eventTypeResult = await pool.query<{
     id: number;
