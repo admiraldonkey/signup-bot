@@ -437,6 +437,83 @@ describe("organiser cover service", () => {
       ]);
     },
   );
+
+  it("does not expose cover eligibility when organisers are disabled", async () => {
+    // Arrange
+    const fixture = await createCoverFixture(pool);
+
+    await pool.query(
+      `
+      UPDATE "guild_settings"
+      SET
+        "organisers_enabled" = false,
+        "updated_at" = NOW()
+      WHERE "guild_id" = $1
+    `,
+      [fixture.guildId],
+    );
+
+    // Act
+    const result = await getOrganiserCoverClaimContext({
+      eventId: fixture.eventId,
+
+      discordGuildId: DISCORD_GUILD_ID,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "organisers_disabled",
+    });
+  });
+
+  it("does not create a cover assignment when organisers are disabled", async () => {
+    // Arrange
+    const fixture = await createCoverFixture(pool);
+
+    await pool.query(
+      `
+      UPDATE "guild_settings"
+      SET
+        "organisers_enabled" = false,
+        "updated_at" = NOW()
+      WHERE "guild_id" = $1
+    `,
+      [fixture.guildId],
+    );
+
+    // Act
+    const result = await claimEventOrganiserCover({
+      eventId: fixture.eventId,
+
+      organiserUserId: COVER_USER_ID,
+
+      displayNameSnapshot: "Cover Organiser",
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "organisers_disabled",
+    });
+
+    const assignmentResult = await pool.query<{
+      count: number;
+    }>(
+      `
+        SELECT COUNT(*)::int AS "count"
+        FROM "event_organiser_assignments"
+        WHERE
+          "event_id" = $1
+          AND "slot" = 'cover'
+      `,
+      [fixture.eventId],
+    );
+
+    expect(assignmentResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+  });
 });
 
 async function createCoverFixture(

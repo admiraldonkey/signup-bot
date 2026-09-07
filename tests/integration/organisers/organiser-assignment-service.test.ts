@@ -2,7 +2,10 @@ import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { pool as applicationPool } from "../../../src/db/client.js";
-import { assignEventOrganiser } from "../../../src/organisers/organiser-assignment-service.js";
+import {
+  assignEventOrganiser,
+  removeEventOrganiserAssignment,
+} from "../../../src/organisers/organiser-assignment-service.js";
 import {
   createIntegrationPool,
   resetIntegrationDatabase,
@@ -432,6 +435,165 @@ describe("organiser assignment service", () => {
 
       ended_at: null,
     });
+  });
+
+  it("does not create an organiser assignment when organisers are disabled", async () => {
+    // Arrange
+    const fixture = await createEvent(pool, {
+      published: true,
+    });
+
+    await pool.query(
+      `
+      UPDATE "guild_settings"
+      SET
+        "organisers_enabled" = false,
+        "updated_at" = NOW()
+      WHERE "guild_id" = $1
+    `,
+      [fixture.guildId],
+    );
+
+    // Act
+    const result = await assignEventOrganiser({
+      guildDatabaseId: fixture.guildId,
+
+      eventId: fixture.eventId,
+
+      slot: "primary",
+
+      organiserUserId: PRIMARY_USER_ID,
+
+      displayNameSnapshot: "Disabled Organiser",
+
+      assignedByUserId: ADMIN_USER_ID,
+
+      primaryResponseMinutes: 80,
+
+      warningMinutesBefore: 15,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "organisers_disabled",
+    });
+
+    const assignmentResult = await pool.query<{
+      count: number;
+    }>(
+      `
+        SELECT COUNT(*)::int AS "count"
+        FROM "event_organiser_assignments"
+        WHERE "event_id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    expect(assignmentResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+
+    const actionResult = await pool.query<{
+      count: number;
+    }>(
+      `
+        SELECT COUNT(*)::int AS "count"
+        FROM "scheduled_actions"
+        WHERE "event_id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    expect(actionResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+  });
+
+  it("does not mutate a current assignment through organiser removal when organisers are disabled", async () => {
+    // Arrange
+    const fixture = await createEvent(pool, {
+      published: false,
+    });
+
+    const original = await assignEventOrganiser({
+      guildDatabaseId: fixture.guildId,
+
+      eventId: fixture.eventId,
+
+      slot: "primary",
+
+      organiserUserId: PRIMARY_USER_ID,
+
+      displayNameSnapshot: "Primary Organiser",
+
+      assignedByUserId: ADMIN_USER_ID,
+
+      primaryResponseMinutes: 80,
+
+      warningMinutesBefore: 15,
+    });
+
+    if (original.kind !== "assigned") {
+      throw new Error(
+        `Expected organiser assignment to succeed, received "${original.kind}".`,
+      );
+    }
+
+    /*
+     * Deliberately disable the setting directly rather than using the normal
+     * disable transition. This creates a state which proves the removal
+     * operation itself enforces the parent feature boundary.
+     */
+    await pool.query(
+      `
+      UPDATE "guild_settings"
+      SET
+        "organisers_enabled" = false,
+        "updated_at" = NOW()
+      WHERE "guild_id" = $1
+    `,
+      [fixture.guildId],
+    );
+
+    // Act
+    const result = await removeEventOrganiserAssignment({
+      guildDatabaseId: fixture.guildId,
+
+      eventId: fixture.eventId,
+
+      slot: "primary",
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "organisers_disabled",
+    });
+
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+    }>(
+      `
+        SELECT
+          "status",
+          "is_current"
+        FROM "event_organiser_assignments"
+        WHERE "id" = $1
+      `,
+      [original.assignment.id],
+    );
+
+    expect(assignmentResult.rows).toEqual([
+      {
+        status: "pending",
+
+        is_current: true,
+      },
+    ]);
   });
 });
 

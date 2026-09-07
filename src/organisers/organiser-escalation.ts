@@ -26,6 +26,9 @@ export type OrganiserEscalationResult =
       kind: "already_resolved";
     }
   | {
+      kind: "organisers_disabled";
+    }
+  | {
       kind: "event_inactive";
     };
 
@@ -45,6 +48,11 @@ export async function escalateAfterFailedOrganiserAssignment(input: {
 
     trigger: input.trigger,
   });
+  if (transition.kind === "organisers_disabled") {
+    return {
+      kind: "organisers_disabled",
+    };
+  }
 
   if (transition.kind === "event_inactive") {
     return {

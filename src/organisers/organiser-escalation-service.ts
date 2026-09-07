@@ -50,6 +50,9 @@ export type AdvanceOrganiserEscalationResult =
       kind: "already_resolved";
     }
   | {
+      kind: "organisers_disabled";
+    }
+  | {
       kind: "event_inactive";
     };
 
@@ -83,6 +86,8 @@ export async function advanceOrganiserEscalation(input: {
 
       eventAdminChannelId: guildSettings.eventAdminChannelId,
 
+      organisersEnabled: guildSettings.organisersEnabled,
+
       organiserDmsEnabled: guildSettings.organiserDmsEnabled,
 
       backupResponseMinutes: guildSettings.organiserBackupResponseMinutes,
@@ -97,6 +102,12 @@ export async function advanceOrganiserEscalation(input: {
   if (!event) {
     return {
       kind: "event_inactive",
+    };
+  }
+
+  if (!event.organisersEnabled) {
+    return {
+      kind: "organisers_disabled",
     };
   }
 
@@ -163,6 +174,20 @@ export async function advanceOrganiserEscalation(input: {
      * which acts as the shared organiser-ownership ordering boundary.
      */
     const activationResult = await db.transaction(async (transaction) => {
+      const [featureSettings] = await transaction
+        .select({
+          organisersEnabled: guildSettings.organisersEnabled,
+        })
+        .from(guildSettings)
+        .where(eq(guildSettings.guildId, event.guildDatabaseId))
+        .limit(1)
+        .for("share");
+
+      if (!featureSettings?.organisersEnabled) {
+        return {
+          kind: "organisers_disabled",
+        } as const;
+      }
       const [lockedBackup] = await transaction
         .select({
           id: eventOrganiserAssignments.id,
@@ -305,6 +330,12 @@ export async function advanceOrganiserEscalation(input: {
       } as const;
     });
 
+    if (activationResult.kind === "organisers_disabled") {
+      return {
+        kind: "organisers_disabled",
+      };
+    }
+
     if (activationResult.kind === "event_inactive") {
       return {
         kind: "event_inactive",
@@ -351,6 +382,27 @@ export async function advanceOrganiserEscalation(input: {
     input.trigger === "declined" ? "declined" : "timed_out";
 
   const queueResult = await db.transaction(async (transaction) => {
+    /*
+     * Hold a shared lock on the organiser feature row for the lifetime of the
+     * authoritative mutation.
+     *
+     * Other organiser workflows may proceed concurrently, while the exclusive
+     * organiser-disable transition must wait for this operation to finish.
+     */
+    const [featureSettings] = await transaction
+      .select({
+        organisersEnabled: guildSettings.organisersEnabled,
+      })
+      .from(guildSettings)
+      .where(eq(guildSettings.guildId, event.guildDatabaseId))
+      .limit(1)
+      .for("share");
+
+    if (!featureSettings?.organisersEnabled) {
+      return {
+        kind: "organisers_disabled",
+      } as const;
+    }
     const [lockedFailedAssignment] = await transaction
       .select({
         id: eventOrganiserAssignments.id,
@@ -448,6 +500,12 @@ export async function advanceOrganiserEscalation(input: {
       kind: "queued",
     } as const;
   });
+
+  if (queueResult.kind === "organisers_disabled") {
+    return {
+      kind: "organisers_disabled",
+    };
+  }
 
   if (queueResult.kind === "event_inactive") {
     return {

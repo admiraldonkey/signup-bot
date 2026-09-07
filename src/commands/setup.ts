@@ -18,6 +18,9 @@ import {
   auditDeniedCommandAttempt,
   writeAuditLog,
 } from "../audit/audit-log.js";
+import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
+import { reconcileOrganiserPendingWarning } from "../events/organiser-warning-reconciliation.js";
+import { setGuildOrganisersEnabled } from "../organisers/organiser-feature-service.js";
 
 const DEFAULT_EVENT_TYPES = [
   {
@@ -717,7 +720,9 @@ async function configureGuildFeature(
 ): Promise<void> {
   const discordGuildId = interaction.guildId;
 
-  if (!discordGuildId) {
+  const guild = interaction.guild;
+
+  if (!discordGuildId || !guild) {
     throw new Error("The setup features command requires a Discord server.");
   }
 
@@ -743,7 +748,10 @@ async function configureGuildFeature(
 
   const [settings] = await db
     .select({
+      organisersEnabled: guildSettings.organisersEnabled,
+
       organiserDmsEnabled: guildSettings.organiserDmsEnabled,
+
       eventAdminChannelId: guildSettings.eventAdminChannelId,
     })
     .from(guildSettings)
@@ -758,86 +766,190 @@ async function configureGuildFeature(
     return;
   }
 
-  if (feature !== "organiser-dms") {
-    throw new Error(`Unknown guild feature: ${feature}`);
+  switch (feature) {
+    case "organisers": {
+      const transition = await setGuildOrganisersEnabled({
+        guildDatabaseId: configuredGuild.id,
+
+        enabled,
+      });
+
+      if (transition.kind === "settings_not_found") {
+        throw new Error(
+          `Guild settings disappeared while configuring organisers for guild ${configuredGuild.id}.`,
+        );
+      }
+
+      await writeAuditLog({
+        guildId: configuredGuild.id,
+
+        guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "setup.feature.update",
+
+        outcome: "success",
+
+        summary: `${enabled ? "Enabled" : "Disabled"} organisers for this server.`,
+
+        targetType: "guild",
+
+        targetId: discordGuildId,
+
+        details: {
+          feature: "organisers",
+
+          enabled,
+
+          previousValue: transition.previousValue,
+        },
+      });
+
+      await interaction.editReply({
+        content: enabled
+          ? [
+              "✅ **Organisers enabled.**",
+              "",
+              "Event organiser assignment and organiser workflows are available for this server.",
+            ].join("\n")
+          : [
+              "✅ **Organisers disabled.**",
+              "",
+              "Event organiser workflows are disabled for this server.",
+            ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      if (!enabled) {
+        /*
+         * The PostgreSQL transition and administrator response are already
+         * authoritative.
+         *
+         * Discord presentation cleanup is secondary. Run independent cleanup work
+         * concurrently so one slow or rate-limited Discord request does not delay
+         * every other affected assignment/event.
+         *
+         * We still await completion before leaving the handler so cleanup failures
+         * are observed and logged rather than becoming detached background work.
+         */
+        await Promise.all([
+          ...transition.retiredAssignments.map(async (assignment) => {
+            await reconcileOrganiserPendingWarning({
+              guild,
+
+              assignmentId: assignment.id,
+            }).catch((error: unknown) => {
+              console.error(
+                `Failed to reconcile organiser warning for assignment ${assignment.id} after disabling organisers:`,
+                error,
+              );
+            });
+          }),
+
+          ...transition.affectedEventIds.map(async (affectedEventId) => {
+            await refreshAttendanceMessage(guild, affectedEventId).catch(
+              (error: unknown) => {
+                console.error(
+                  `Failed to refresh event ${affectedEventId} after disabling organisers:`,
+                  error,
+                );
+              },
+            );
+          }),
+        ]);
+      }
+
+      return;
+    }
+
+    case "organiser-dms": {
+      /*
+       * When organiser DMs are disabled, the Event Administration channel
+       * becomes the sole assignment-notification destination.
+       */
+      if (!enabled && !settings.eventAdminChannelId) {
+        await interaction.editReply({
+          content: [
+            "❌ Organiser DMs cannot be disabled yet.",
+            "",
+            "Configure an Event Administration channel with `/setup configure` first.",
+            "When organiser DMs are disabled, assignment confirmation requests are sent directly to that channel.",
+          ].join("\n"),
+
+          allowedMentions: {
+            parse: [],
+          },
+        });
+
+        return;
+      }
+
+      const now = new Date();
+
+      await db
+        .update(guildSettings)
+        .set({
+          organiserDmsEnabled: enabled,
+
+          updatedAt: now,
+        })
+        .where(eq(guildSettings.guildId, configuredGuild.id));
+
+      await writeAuditLog({
+        guildId: configuredGuild.id,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "setup.feature.update",
+
+        outcome: "success",
+
+        summary: `${enabled ? "Enabled" : "Disabled"} organiser DMs for this server.`,
+
+        targetType: "guild",
+
+        targetId: discordGuildId,
+
+        details: {
+          feature: "organiser-dms",
+
+          enabled,
+
+          previousValue: settings.organiserDmsEnabled,
+        },
+      });
+
+      await interaction.editReply({
+        content: enabled
+          ? [
+              "✅ **Organiser DMs enabled.**",
+              "",
+              "New organiser assignments will try a direct message first.",
+              "If the DM cannot be delivered, the bot will fall back to the Event Administration channel.",
+            ].join("\n")
+          : [
+              "✅ **Organiser DMs disabled.**",
+              "",
+              "New organiser assignments will skip direct messages and send confirmation requests straight to the Event Administration channel.",
+            ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+    }
+
+    default:
+      throw new Error(`Unknown guild feature: ${feature}`);
   }
-
-  /*
-   * When organiser DMs are disabled, the Event Administration channel
-   * becomes the sole assignment-notification destination.
-   *
-   * Do not allow administrators to deliberately configure a state in which
-   * organiser confirmation requests have nowhere to go.
-   */
-  if (!enabled && !settings.eventAdminChannelId) {
-    await interaction.editReply({
-      content: [
-        "❌ Organiser DMs cannot be disabled yet.",
-        "",
-        "Configure an Event Administration channel with `/setup configure` first.",
-        "When organiser DMs are disabled, assignment confirmation requests are sent directly to that channel.",
-      ].join("\n"),
-
-      allowedMentions: {
-        parse: [],
-      },
-    });
-
-    return;
-  }
-
-  const now = new Date();
-
-  await db
-    .update(guildSettings)
-    .set({
-      organiserDmsEnabled: enabled,
-      updatedAt: now,
-    })
-    .where(eq(guildSettings.guildId, configuredGuild.id));
-
-  await writeAuditLog({
-    guildId: configuredGuild.id,
-
-    guild: interaction.guild,
-
-    actorUserId: interaction.user.id,
-
-    action: "setup.feature.update",
-
-    outcome: "success",
-
-    summary: `${enabled ? "Enabled" : "Disabled"} organiser DMs for this server.`,
-
-    targetType: "guild",
-
-    targetId: discordGuildId,
-
-    details: {
-      feature: "organiser-dms",
-      enabled,
-      previousValue: settings.organiserDmsEnabled,
-    },
-  });
-
-  await interaction.editReply({
-    content: enabled
-      ? [
-          "✅ **Organiser DMs enabled.**",
-          "",
-          "New organiser assignments will try a direct message first.",
-          "If the DM cannot be delivered, the bot will fall back to the Event Administration channel.",
-        ].join("\n")
-      : [
-          "✅ **Organiser DMs disabled.**",
-          "",
-          "New organiser assignments will skip direct messages and send confirmation requests straight to the Event Administration channel.",
-        ].join("\n"),
-
-    allowedMentions: {
-      parse: [],
-    },
-  });
 }
 
 async function configureEventRegions(
@@ -989,6 +1101,7 @@ async function showSetupStatus(
       roleRequestChannelId: guildSettings.defaultRoleRequestChannelId,
       eventAdminChannelId: guildSettings.eventAdminChannelId,
       eventOrganiserRoleId: guildSettings.eventOrganiserRoleId,
+      organisersEnabled: guildSettings.organisersEnabled,
       organiserDmsEnabled: guildSettings.organiserDmsEnabled,
       organiserPrimaryResponseMinutes:
         guildSettings.organiserPrimaryResponseMinutes,
@@ -1073,6 +1186,9 @@ async function showSetupStatus(
           : "Not set"
       }`,
       `• Event organiser role: ${eventOrganiserRoleDisplay}`,
+      `• Organisers: ${
+        (settings?.organisersEnabled ?? true) ? "Enabled" : "Disabled"
+      }`,
       `• Organiser DMs: ${
         (settings?.organiserDmsEnabled ?? true) ? "Enabled" : "Disabled"
       }`,

@@ -10,6 +10,7 @@ import {
   events,
   eventTypes,
   eventPingRoles,
+  guildSettings,
 } from "../db/schema.js";
 import {
   type AttendanceCounts,
@@ -129,6 +130,8 @@ export async function refreshAttendanceMessage(
 
       showDetailedDeadline: events.showDetailedDeadline,
 
+      organisersEnabled: guildSettings.organisersEnabled,
+
       startsAt: events.startsAt,
 
       signupsEnabled: events.signupsEnabled,
@@ -146,6 +149,7 @@ export async function refreshAttendanceMessage(
     .from(events)
     .innerJoin(eventTypes, eq(eventTypes.id, events.eventTypeId))
     .leftJoin(eventAudiences, eq(eventAudiences.id, events.audienceId))
+    .innerJoin(guildSettings, eq(guildSettings.guildId, events.ownerGuildId))
     .innerJoin(
       eventMessages,
       and(
@@ -249,6 +253,8 @@ export async function refreshAttendanceMessage(
           showDetailedDeadline: event.showDetailedDeadline,
 
           startsAt: event.startsAt,
+
+          organisersEnabled: event.organisersEnabled,
 
           organiser,
 

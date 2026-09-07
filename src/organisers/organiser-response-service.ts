@@ -5,6 +5,7 @@ import {
   discordGuilds,
   eventOrganiserAssignments,
   events,
+  guildSettings,
 } from "../db/schema.js";
 import { cancelOrganiserResponseActions } from "./organiser-scheduling.js";
 import type {
@@ -51,6 +52,9 @@ export type RecordOrganiserResponseResult =
       kind: "already_responded";
 
       status: OrganiserAssignmentStatus;
+    }
+  | {
+      kind: "organisers_disabled";
     }
   | {
       kind: "event_inactive";
@@ -182,6 +186,38 @@ export async function recordOrganiserResponse(input: {
    * event transitions have one authoritative ordering boundary.
    */
   const saveResult = await db.transaction(async (transaction) => {
+    /*
+     * The organiser feature row is the shared ordering boundary between
+     * organiser mutations and disabling the organiser subsystem.
+     *
+     * Hold a shared lock on the organiser feature row for the lifetime of the
+     * authoritative mutation.
+     *
+     * Other organiser workflows may proceed concurrently, while the exclusive
+     * organiser-disable transition must wait for this operation to finish.
+     */
+    const [featureSettings] = await transaction
+      .select({
+        organisersEnabled: guildSettings.organisersEnabled,
+      })
+      .from(guildSettings)
+      .where(eq(guildSettings.guildId, assignment.guildDatabaseId))
+      .limit(1)
+      .for("share");
+
+    if (!featureSettings?.organisersEnabled) {
+      return {
+        kind: "organisers_disabled",
+      } as const;
+    }
+
+    /*
+     * The initial read provides useful fast validation but may become stale
+     * before the response is written.
+     *
+     * Lock the event lifecycle row so organiser responses and terminal event
+     * transitions have one authoritative ordering boundary.
+     */
     const [lockedEvent] = await transaction
       .select({
         status: events.status,
@@ -229,6 +265,12 @@ export async function recordOrganiserResponse(input: {
       kind: "saved",
     } as const;
   });
+
+  if (saveResult.kind === "organisers_disabled") {
+    return {
+      kind: "organisers_disabled",
+    };
+  }
 
   if (saveResult.kind === "event_inactive") {
     return {

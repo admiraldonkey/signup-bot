@@ -475,6 +475,53 @@ describe("organiser response service", () => {
       ]);
     },
   );
+
+  it("does not record a response when organisers are disabled", async () => {
+    // Arrange
+    const fixture = await createResponseFixture(pool);
+
+    await pool.query(
+      `
+      UPDATE "guild_settings"
+      SET
+        "organisers_enabled" = false,
+        "updated_at" = NOW()
+      WHERE "guild_id" = $1
+    `,
+      [fixture.guildId],
+    );
+
+    // Act
+    const result = await recordOrganiserResponse({
+      assignmentId: fixture.assignmentId,
+
+      respondingUserId: ORGANISER_USER_ID,
+
+      action: "confirm",
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "organisers_disabled",
+    });
+
+    await expectPendingAssignmentUnchanged(pool, fixture.assignmentId);
+
+    const actionResult = await readResponseActions(pool, fixture.eventId);
+
+    expect(actionResult).toEqual([
+      {
+        action_key: `organiser_timeout:${fixture.assignmentId}`,
+
+        status: "pending",
+      },
+      {
+        action_key: `organiser_warning:${fixture.assignmentId}`,
+
+        status: "pending",
+      },
+    ]);
+  });
 });
 
 async function createResponseFixture(

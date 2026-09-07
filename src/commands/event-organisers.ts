@@ -28,6 +28,14 @@ export async function setEventOrganiser(
     return;
   }
 
+  if (!context.organisersEnabled) {
+    await interaction.editReply(
+      "Event organisers are disabled for this server.",
+    );
+
+    return;
+  }
+
   const eventId = interaction.options.getInteger("event-id", true);
 
   const slotText = interaction.options.getString("slot", true);
@@ -102,6 +110,13 @@ export async function setEventOrganiser(
     case "event_inactive":
       await interaction.editReply(
         "Organisers cannot be changed on cancelled or completed events.",
+      );
+
+      return;
+
+    case "organisers_disabled":
+      await interaction.editReply(
+        "Event organisers were disabled before this assignment could be saved.",
       );
 
       return;
@@ -251,6 +266,14 @@ export async function clearEventOrganiser(
     return;
   }
 
+  if (!context.organisersEnabled) {
+    await interaction.editReply(
+      "Event organisers are disabled for this server.",
+    );
+
+    return;
+  }
+
   const eventId = interaction.options.getInteger("event-id", true);
 
   const slotText = interaction.options.getString("slot", true);
@@ -280,6 +303,13 @@ export async function clearEventOrganiser(
     case "event_inactive":
       await interaction.editReply(
         "Organisers cannot be changed on cancelled or completed events.",
+      );
+
+      return;
+
+    case "organisers_disabled":
+      await interaction.editReply(
+        "Event organisers were disabled before this assignment could be saved.",
       );
 
       return;

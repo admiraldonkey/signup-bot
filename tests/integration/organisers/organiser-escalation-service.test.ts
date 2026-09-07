@@ -356,6 +356,136 @@ describe("organiser escalation service", () => {
     ]);
   });
 
+  it("does not escalate when organisers are disabled", async () => {
+    // Arrange
+    const fixture = await createEscalationFixture(pool, {
+      withBackup: true,
+    });
+
+    if (!fixture.backupAssignmentId) {
+      throw new Error("Expected the fixture to include a dormant backup.");
+    }
+
+    await pool.query(
+      `
+      UPDATE "guild_settings"
+      SET
+        "organisers_enabled" = false,
+        "updated_at" = NOW()
+      WHERE "guild_id" = $1
+    `,
+      [fixture.guildId],
+    );
+
+    // Act
+    const result = await advanceOrganiserEscalation({
+      eventId: fixture.eventId,
+
+      failedAssignmentId: fixture.failedAssignmentId,
+
+      trigger: "declined",
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "organisers_disabled",
+    });
+
+    const backupResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      activated_at: Date | null;
+      response_deadline_at: Date | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "is_current",
+          "activated_at",
+          "response_deadline_at"
+        FROM "event_organiser_assignments"
+        WHERE "id" = $1
+      `,
+      [fixture.backupAssignmentId],
+    );
+
+    expect(backupResult.rows).toEqual([
+      {
+        status: "pending",
+
+        is_current: true,
+
+        activated_at: null,
+
+        response_deadline_at: null,
+      },
+    ]);
+
+    const actionResult = await pool.query<{
+      count: number;
+    }>(
+      `
+        SELECT COUNT(*)::int AS "count"
+        FROM "scheduled_actions"
+        WHERE "event_id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    expect(actionResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+  });
+
+  it("does not queue organiser cover when organisers are disabled", async () => {
+    // Arrange
+    const fixture = await createEscalationFixture(pool);
+
+    await pool.query(
+      `
+      UPDATE "guild_settings"
+      SET
+        "organisers_enabled" = false,
+        "updated_at" = NOW()
+      WHERE "guild_id" = $1
+    `,
+      [fixture.guildId],
+    );
+
+    // Act
+    const result = await advanceOrganiserEscalation({
+      eventId: fixture.eventId,
+
+      failedAssignmentId: fixture.failedAssignmentId,
+
+      trigger: "declined",
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "organisers_disabled",
+    });
+
+    const actionResult = await pool.query<{
+      count: number;
+    }>(
+      `
+        SELECT COUNT(*)::int AS "count"
+        FROM "scheduled_actions"
+        WHERE "event_id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    expect(actionResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+  });
+
   it("does not escalate a cancelled event", async () => {
     // Arrange
     const fixture = await createEscalationFixture(pool, {

@@ -151,10 +151,16 @@ export const commandDefinitions = [
             .setName("feature")
             .setDescription("The feature to configure.")
             .setRequired(true)
-            .addChoices({
-              name: "Organiser DMs",
-              value: "organiser-dms",
-            }),
+            .addChoices(
+              {
+                name: "Organisers",
+                value: "organisers",
+              },
+              {
+                name: "Organiser DMs",
+                value: "organiser-dms",
+              },
+            ),
         )
         .addBooleanOption((option) =>
           option

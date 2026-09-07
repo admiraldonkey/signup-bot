@@ -13,6 +13,9 @@ export type OrganiserCoverClaimContextResult =
       kind: "event_unavailable";
     }
   | {
+      kind: "organisers_disabled";
+    }
+  | {
       kind: "event_inactive";
     }
   | {
@@ -36,6 +39,9 @@ export type OrganiserCoverClaimContextResult =
     };
 
 export type ClaimEventOrganiserCoverResult =
+  | {
+      kind: "organisers_disabled";
+    }
   | {
       kind: "event_inactive";
     }
@@ -85,6 +91,8 @@ export async function getOrganiserCoverClaimContext(input: {
       discordGuildId: discordGuilds.discordGuildId,
 
       eventOrganiserRoleId: guildSettings.eventOrganiserRoleId,
+
+      organisersEnabled: guildSettings.organisersEnabled,
     })
     .from(events)
     .innerJoin(discordGuilds, eq(discordGuilds.id, events.ownerGuildId))
@@ -95,6 +103,12 @@ export async function getOrganiserCoverClaimContext(input: {
   if (!event || event.discordGuildId !== input.discordGuildId) {
     return {
       kind: "event_unavailable",
+    };
+  }
+
+  if (!event.organisersEnabled) {
+    return {
+      kind: "organisers_disabled",
     };
   }
 
@@ -150,7 +164,41 @@ export async function claimEventOrganiserCover(input: {
    * Terminal lifecycle transitions and cover claims therefore share one
    * authoritative ordering boundary.
    */
+  const [eventIdentity] = await db
+    .select({
+      guildDatabaseId: events.ownerGuildId,
+    })
+    .from(events)
+    .where(eq(events.id, input.eventId))
+    .limit(1);
+
+  if (!eventIdentity) {
+    return {
+      kind: "event_inactive",
+    };
+  }
   const claimResult = await db.transaction(async (transaction) => {
+    /*
+     * Hold a shared lock on the organiser feature row for the lifetime of the
+     * authoritative mutation.
+     *
+     * Other organiser workflows may proceed concurrently, while the exclusive
+     * organiser-disable transition must wait for this operation to finish.
+     */
+    const [featureSettings] = await transaction
+      .select({
+        organisersEnabled: guildSettings.organisersEnabled,
+      })
+      .from(guildSettings)
+      .where(eq(guildSettings.guildId, eventIdentity.guildDatabaseId))
+      .limit(1)
+      .for("share");
+
+    if (!featureSettings?.organisersEnabled) {
+      return {
+        kind: "organisers_disabled",
+      } as const;
+    }
     const [lockedEvent] = await transaction
       .select({
         status: events.status,
@@ -258,6 +306,7 @@ export async function claimEventOrganiserCover(input: {
   });
 
   if (
+    claimResult.kind === "organisers_disabled" ||
     claimResult.kind === "event_inactive" ||
     claimResult.kind === "event_started" ||
     claimResult.kind === "active_assignment" ||

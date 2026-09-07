@@ -23,6 +23,7 @@ import {
   buildAttendanceEmbed,
   EMPTY_ATTENDANCE_COUNTS,
 } from "./attendance-message.js";
+import { refreshAttendanceMessage } from "./attendance-refresh.js";
 import { getPublicOrganiserDisplay } from "./organiser-display.js";
 import {
   type OrganiserNotificationDelivery,
@@ -99,6 +100,8 @@ export async function publishStoredEvent(
       defaultAttendanceChannelId: guildSettings.defaultAttendanceChannelId,
 
       eventAdminChannelId: guildSettings.eventAdminChannelId,
+
+      organisersEnabled: guildSettings.organisersEnabled,
 
       organiserDmsEnabled: guildSettings.organiserDmsEnabled,
 
@@ -290,14 +293,16 @@ export async function publishStoredEvent(
    * until after the Discord message has successfully been sent.
    */
   const organiser =
-    activeOrganiser ??
-    (dormantPrimary
-      ? {
-          discordUserId: dormantPrimary.discordUserId,
+    (event.organisersEnabled ?? true)
+      ? (activeOrganiser ??
+        (dormantPrimary
+          ? {
+              discordUserId: dormantPrimary.discordUserId,
 
-          status: "pending" as const,
-        }
-      : null);
+              status: "pending" as const,
+            }
+          : null))
+      : null;
 
   const publishedStatus = event.signupsEnabled
     ? ("open" as const)
@@ -328,6 +333,8 @@ export async function publishStoredEvent(
 
             startsAt: event.startsAt,
 
+            organisersEnabled: event.organisersEnabled ?? true,
+
             organiser,
 
             signupsEnabled: event.signupsEnabled,
@@ -355,6 +362,23 @@ export async function publishStoredEvent(
     const publicationTime = new Date();
 
     const publication = await db.transaction(async (transaction) => {
+      /*
+       * Publication itself remains available when organisers are disabled.
+       *
+       * A shared feature lock only governs whether a dormant organiser may be
+       * activated as part of this publication. The organiser-disable transition
+       * takes the corresponding exclusive lock.
+       */
+      const [featureSettings] = await transaction
+        .select({
+          organisersEnabled: guildSettings.organisersEnabled,
+        })
+        .from(guildSettings)
+        .where(eq(guildSettings.guildId, event.guildDatabaseId))
+        .limit(1)
+        .for("share");
+
+      const organisersEnabled = featureSettings?.organisersEnabled ?? true;
       /*
        * This conditional update also protects against a manual
        * publication racing the scheduler.
@@ -392,6 +416,8 @@ export async function publishStoredEvent(
           claimed: false as const,
 
           activatedPrimaryAssignmentId: null,
+
+          organisersEnabled,
         };
       }
 
@@ -409,7 +435,7 @@ export async function publishStoredEvent(
 
       let activatedPrimaryAssignmentId: number | null = null;
 
-      if (dormantPrimary) {
+      if (organisersEnabled && dormantPrimary) {
         const activatedAt = publicationTime;
 
         const responseDeadlineAt = calculateOrganiserResponseDeadline(
@@ -465,6 +491,8 @@ export async function publishStoredEvent(
         claimed: true as const,
 
         activatedPrimaryAssignmentId,
+
+        organisersEnabled,
       };
     });
 
@@ -493,6 +521,29 @@ export async function publishStoredEvent(
 
         eventName: event.name,
       };
+    }
+
+    /*
+     * The Discord publication message is sent before the authoritative
+     * publication transaction.
+     *
+     * If organisers were disabled between the initial read and that
+     * transaction, the message may have been built with stale organiser
+     * presentation. Refresh it from the now-authoritative database state.
+     */
+    if (!publication.organisersEnabled && organiser) {
+      await refreshAttendanceMessage(guild, event.id).catch(
+        (error: unknown) => {
+          /*
+           * Publication has already committed. Presentation repair is secondary
+           * and must not convert a successful publication into a failure.
+           */
+          console.error(
+            `Failed to refresh event ${event.id} after organisers were disabled during publication:`,
+            error,
+          );
+        },
+      );
     }
 
     let primaryOrganiserNotification: OrganiserNotificationDelivery | null =

@@ -41,6 +41,7 @@ export interface AttendanceEventDisplay {
   timezone: string;
   showDetailedDeadline: boolean;
   startsAt: Date;
+  organisersEnabled: boolean;
   organiser: AttendanceOrganiserDisplay | null;
   signupsEnabled: boolean;
   attendanceClosesAt: Date | null;
@@ -200,9 +201,11 @@ export function buildAttendanceEmbed(
     ].join("\n"),
   );
 
-  descriptionParts.push(
-    ["**Organiser**", formatOrganiser(event.organiser)].join("\n"),
-  );
+  if (event.organisersEnabled) {
+    descriptionParts.push(
+      ["**Organiser**", formatOrganiser(event.organiser)].join("\n"),
+    );
+  }
 
   descriptionParts.push(["**Starts At**", startDisplayValue].join("\n"));
 

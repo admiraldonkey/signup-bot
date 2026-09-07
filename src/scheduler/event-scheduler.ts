@@ -441,6 +441,8 @@ async function executeOrganiserWarning(
       discordGuildId: discordGuilds.discordGuildId,
 
       eventAdminChannelId: guildSettings.eventAdminChannelId,
+
+      organisersEnabled: guildSettings.organisersEnabled,
     })
     .from(eventOrganiserAssignments)
     .innerJoin(events, eq(events.id, eventOrganiserAssignments.eventId))
@@ -460,6 +462,7 @@ async function executeOrganiserWarning(
   }
 
   if (
+    !assignment.organisersEnabled ||
     !assignment.isCurrent ||
     assignment.status !== "pending" ||
     !assignment.activatedAt ||
@@ -486,11 +489,14 @@ async function executeOrganiserWarning(
     })
     .from(eventOrganiserAssignments)
     .innerJoin(events, eq(events.id, eventOrganiserAssignments.eventId))
+    .innerJoin(guildSettings, eq(guildSettings.guildId, events.ownerGuildId))
     .where(
       and(
         eq(eventOrganiserAssignments.id, assignment.id),
 
         eq(eventOrganiserAssignments.eventId, eventId),
+
+        eq(guildSettings.organisersEnabled, true),
 
         eq(eventOrganiserAssignments.isCurrent, true),
 
@@ -706,10 +712,31 @@ async function executeOrganiserTimeout(
     return;
   }
 
-  let assignmentTimedOut = false;
+  let timeoutResult: "timed_out" | "obsolete" | "organisers_disabled" =
+    "obsolete";
 
   try {
-    assignmentTimedOut = await db.transaction(async (transaction) => {
+    timeoutResult = await db.transaction(async (transaction) => {
+      /*
+       * Hold a shared feature lock for the authoritative timeout mutation.
+       *
+       * Other organiser workflows may proceed concurrently, while the
+       * exclusive organiser-disable transition must wait for this operation
+       * to finish.
+       */
+      const [featureSettings] = await transaction
+        .select({
+          organisersEnabled: guildSettings.organisersEnabled,
+        })
+        .from(guildSettings)
+        .where(eq(guildSettings.guildId, assignment.guildDatabaseId))
+        .limit(1)
+        .for("share");
+
+      if (!featureSettings?.organisersEnabled) {
+        return "organisers_disabled" as const;
+      }
+
       const now = new Date();
 
       /*
@@ -750,7 +777,7 @@ async function executeOrganiserTimeout(
        * Confirmation, decline or replacement won the assignment race.
        */
       if (!timedOut) {
-        return false;
+        return "obsolete" as const;
       }
 
       /*
@@ -778,7 +805,7 @@ async function executeOrganiserTimeout(
         transaction.rollback();
       }
 
-      return true;
+      return "timed_out" as const;
     });
   } catch (error) {
     /*
@@ -794,7 +821,7 @@ async function executeOrganiserTimeout(
     throw error;
   }
 
-  if (!assignmentTimedOut) {
+  if (timeoutResult !== "timed_out") {
     return;
   }
 
@@ -863,6 +890,8 @@ async function executeOrganiserCoverRequest(
       eventAdminChannelId: guildSettings.eventAdminChannelId,
 
       eventOrganiserRoleId: guildSettings.eventOrganiserRoleId,
+
+      organisersEnabled: guildSettings.organisersEnabled,
     })
     .from(events)
     .innerJoin(discordGuilds, eq(discordGuilds.id, events.ownerGuildId))
@@ -874,7 +903,11 @@ async function executeOrganiserCoverRequest(
     return;
   }
 
-  if (event.status === "cancelled" || event.status === "completed") {
+  if (
+    !event.organisersEnabled ||
+    event.status === "cancelled" ||
+    event.status === "completed"
+  ) {
     return;
   }
 
@@ -937,15 +970,19 @@ async function executeOrganiserCoverRequest(
     })
     .from(eventOrganiserAssignments)
     .innerJoin(events, eq(events.id, eventOrganiserAssignments.eventId))
+    .innerJoin(guildSettings, eq(guildSettings.guildId, events.ownerGuildId))
     .where(
       and(
         eq(eventOrganiserAssignments.id, sourceAssignmentId),
 
         eq(eventOrganiserAssignments.eventId, event.id),
 
+        eq(guildSettings.organisersEnabled, true),
+
         inArray(eventOrganiserAssignments.status, ["declined", "timed_out"]),
 
         ne(events.status, "cancelled"),
+
         ne(events.status, "completed"),
       ),
     )
