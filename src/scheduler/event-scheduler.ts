@@ -36,10 +36,10 @@ import {
   cancelAllOrganiserEscalationActions,
 } from "../organisers/organiser-scheduling.js";
 import {
-  reconcileOrganiserPendingWarning,
   sendOrganiserCoverRequest,
   sendOrganiserPendingWarning,
 } from "../events/organiser-notification.js";
+import { reconcileOrganiserPendingWarning } from "../events/organiser-warning-reconciliation.js";
 import { ROLE_REQUEST_GROUP_CLOSE_ACTION_PREFIX } from "../role-requests/role-request-scheduling.js";
 import {
   refreshRoleRequestGroupMessage,

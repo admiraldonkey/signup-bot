@@ -25,7 +25,7 @@ import {
   refreshAttendanceMessage,
   type AttendanceRefreshResult,
 } from "../events/attendance-refresh.js";
-import { reconcileOrganiserPendingWarning } from "../events/organiser-notification.js";
+import { reconcileOrganiserPendingWarning } from "../events/organiser-warning-reconciliation.js";
 import { isValidEventTimezone } from "../time/timezones.js";
 import { handleEventResponses } from "./event-responses.js";
 import {

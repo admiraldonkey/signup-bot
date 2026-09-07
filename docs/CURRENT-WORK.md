@@ -1,6 +1,6 @@
 # Current Development State
 
-**Last updated:** 28 August 2026
+**Last updated:** 07 September 2026
 
 This document is intended as a temporary handoff/checkpoint for the current state of development.
 
@@ -173,6 +173,42 @@ Guild setup also includes configuration for:
 - Primary response timing
 - Backup response timing
 - Warning timing
+
+---
+
+# Recently Implemented: Organiser Notification Delivery Setting
+
+Guild administrators may control organiser assignment DM delivery using:
+
+```text
+/setup features
+    Organiser DMs
+```
+
+The setting is guild-level and defaults to enabled for backwards compatibility.
+
+Behaviour:
+
+```text
+Organiser DMs enabled
+    -> try direct message
+    -> if DM delivery fails, fall back to Event Administration
+
+Organiser DMs disabled
+    -> skip the DM attempt entirely
+    -> send the assignment request directly to Event Administration
+```
+
+The setting applies consistently to:
+
+- Direct primary assignment
+- Publication-time activation of a dormant primary
+- Automatic backup activation
+
+Organiser DMs cannot be disabled unless an Event Administration channel is
+configured.
+
+Configuration changes are persisted in PostgreSQL and recorded in the audit log.
 
 ---
 
@@ -653,64 +689,52 @@ rather than spending substantial development time polishing temporary event-mess
 
 ---
 
-# Immediate Next Development Task
+# Current Development State
 
-Continue the repository-wide reliability review with a focused pass on **Discord message failure and recovery behaviour**.
+The repository-wide reliability review has now covered substantial event
+lifecycle, scheduler, Discord recovery and organiser failure behaviour.
 
-The immediate priority is to verify what happens when Discord-facing state disappears while valid authoritative database state remains.
+Recent reliability work includes:
 
-Primary targets:
+- Event lifecycle race protection
+- Scheduler claiming, fencing, retries and stale-lock recovery
+- Attendance and role-request message recovery
+- Organiser warning reconciliation
+- Organiser notification failure classification
+- Non-retryable handling for permanently unavailable Discord configuration
+- Persistent auditing of definitive organiser warning/cover delivery failures
+- Organiser response, escalation and cover-ownership concurrency protection
 
-1. Public event message is manually deleted
-2. Role-request group message is manually deleted
-3. Publication or attendance channel is removed
-4. Role-request channel is removed
-5. Ping/notification role is removed
-6. Event Administration channel is removed
+A portability-focused organiser refactor has also separated authoritative
+organiser state transitions from Discord command/interaction adapters.
 
-The preferred reliability model is:
+Current organiser service boundaries include:
 
 ```text
-PostgreSQL state
-    -> authoritative
-
-Discord message/channel/role
-    -> recover where the correct replacement is unambiguous
-    -> otherwise fail safely and provide an administrative recovery path
+assignment / removal
+response
+escalation
+cover claim
 ```
 
-For deleted messages where the original destination channel still exists, investigate automatic replacement without republishing or otherwise replaying unrelated event lifecycle behaviour.
+These operations now have direct PostgreSQL integration coverage in addition to
+their existing command, interaction and scheduler regression coverage.
 
-Recovery must avoid:
+The broader architecture/code-quality review remains incremental rather than a
+standing rewrite project. Future refactoring should be driven by concrete
+clarity, duplication, testability or portability benefits.
 
-- Duplicate event publication
-- Duplicate role-request pools
-- Duplicate scheduled actions
-- Re-triggering organiser activation
-- Re-triggering reminders or other lifecycle effects
-- Losing valid database state merely because Discord presentation state was removed
+Near-term development can therefore return primarily to feature work while
+continuing the established rule:
 
-Continue using regression tests before production fixes where a concrete failure can be reproduced.
+```text
+new behaviour
+    -> tests alongside the feature
 
-The broader repository-wide architecture and code-quality review remains ongoing.
-
-Primary goals remain:
-
-1. Identify potential bugs
-2. Identify lifecycle/race issues
-3. Identify overly large modules/functions
-4. Reduce unnecessary coupling
-5. Improve comments around non-obvious domain behaviour
-6. Improve automated test coverage
-7. Improve scheduler reliability/idempotency
-8. Improve portability
-9. Identify dead or legacy code/schema
-10. Review public-repository quality
-11. Review `/event` command structure before reaching Discord's subcommand limit
-
-Avoid speculative rewrites.
-
-Prefer incremental refactoring backed by tests.
+discovered bug
+    -> regression test first
+    -> production fix
+```
 
 ---
 
@@ -858,9 +882,15 @@ Non-playing legitimate attendance should count as present without creating false
 
 # High-Priority Feature Flag Follow-Up
 
-Add guild-level optional feature settings.
+Guild-level feature configuration has begun with:
 
-Likely initial switches:
+```text
+organiserDmsEnabled
+```
+
+This establishes the intended runtime configuration pattern.
+
+Further useful switches may include:
 
 ```text
 organisersEnabled
@@ -869,9 +899,15 @@ roleRequestsEnabled
 attendanceReportingEnabled
 ```
 
-Role requests should continue respecting event-type configuration.
+Feature switches should be exposed through administrator-only server
+configuration and evaluated at runtime rather than dynamically changing
+slash-command registration.
 
-Runtime feature checks are preferred to dynamically modifying slash-command registration.
+Dependencies between switches must be explicit. For example, disabling a parent
+feature such as organisers should not leave dependent organiser workflows in an
+incoherent state.
+
+Role requests should continue respecting event-type configuration.
 
 ---
 
@@ -924,10 +960,10 @@ Templates should eventually define:
 Areas which deserve specific review include:
 
 - `/event` is approaching Discord's maximum subcommand count
-- Central event command files are large
+- Some central event command files remain large outside the organiser subsystem
 - Administrative authorisation/configuration logic is repeated
 - Similar event-loading queries exist in several modules
-- Some service boundaries are still command-oriented rather than domain-oriented
+- Some non-organiser service boundaries are still command-oriented rather than domain-oriented
 - Role-request output may eventually exceed Discord embed limits
 - Role options have limited edit/remove administration
 - Role groups have limited edit/reopen/delete/repost administration
@@ -937,7 +973,7 @@ Areas which deserve specific review include:
 - Some earlier template/role-request opening fields may now be legacy
 - Old event-message concepts should be reviewed for actual current use
 - Guild defaults currently required during event creation may eventually become conditional under feature flags
-- Tests should increasingly target domain/service behaviour rather than only command outputs
+- Continue adding direct domain/service tests where new service boundaries are introduced
 
 Do not remove apparently unused schema fields until:
 

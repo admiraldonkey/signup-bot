@@ -12,11 +12,11 @@ import {
 
 import { pool as applicationPool } from "../../../src/db/client.js";
 import {
-  reconcileOrganiserPendingWarning,
   sendOrganiserAssignmentNotification,
   sendOrganiserCoverRequest,
   sendOrganiserPendingWarning,
 } from "../../../src/events/organiser-notification.js";
+import { reconcileOrganiserPendingWarning } from "../../../src/events/organiser-warning-reconciliation.js";
 import {
   createIntegrationPool,
   resetIntegrationDatabase,
