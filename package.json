@@ -15,7 +15,9 @@
     "test:watch": "vitest",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --config vitest.coverage.config.ts --coverage",
+    "test:coverage:unit": "vitest run --config vitest.coverage.config.ts --coverage --project unit",
+    "test:coverage:integration": "vitest run --config vitest.coverage.config.ts --coverage --project integration"
   },
   "keywords": [],
   "author": "",
