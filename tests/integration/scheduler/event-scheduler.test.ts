@@ -840,6 +840,159 @@ describe("event scheduler", () => {
     expect.soft(auditResult.rows).toEqual([]);
   });
 
+  it("does not time out an overdue organiser when organisers are disabled", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserTimeout(pool);
+
+    /*
+     * Deliberately change only the feature flag rather than calling the normal
+     * disable service.
+     *
+     * That proves the scheduler executor itself enforces the feature boundary
+     * instead of relying on the disable transition having already cleaned up
+     * this action.
+     */
+    await pool.query(
+      `
+      UPDATE "guild_settings"
+      SET
+        "organisers_enabled" = false,
+        "updated_at" = NOW()
+      WHERE "guild_id" = (
+        SELECT "owner_guild_id"
+        FROM "events"
+        WHERE "id" = $1
+      )
+    `,
+      [fixture.eventId],
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const assignmentResult = await pool.query<{
+      status: string;
+
+      is_current: boolean;
+
+      ended_at: Date | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "is_current",
+          "ended_at"
+        FROM "event_organiser_assignments"
+        WHERE "id" = $1
+      `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toEqual([
+      {
+        status: "pending",
+
+        is_current: true,
+
+        ended_at: null,
+      },
+    ]);
+
+    /*
+     * The durable scheduler action itself may complete normally because its
+     * requested work has become obsolete.
+     */
+    const actionResult = await pool.query<{
+      status: string;
+
+      attempt_count: number;
+
+      locked_at: Date | null;
+
+      completed_at: Date | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "attempt_count",
+          "locked_at",
+          "completed_at"
+        FROM "scheduled_actions"
+        WHERE "id" = $1
+      `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect.soft(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+
+      attempt_count: 1,
+
+      locked_at: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    /*
+     * No timeout happened, so there must be no timeout-success audit or
+     * downstream cover escalation.
+     */
+    const auditResult = await pool.query<{
+      count: number;
+    }>(
+      `
+        SELECT COUNT(*)::int
+          AS "count"
+        FROM "audit_logs"
+        WHERE
+          "action" =
+            'scheduler.organiser_timeout'
+          AND "target_id" = $1
+          AND "outcome" = 'success'
+      `,
+      [String(fixture.assignmentId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+
+    const coverActionResult = await pool.query<{
+      count: number;
+    }>(
+      `
+        SELECT COUNT(*)::int
+          AS "count"
+        FROM "scheduled_actions"
+        WHERE
+          "event_id" = $1
+          AND "action_key" = $2
+      `,
+      [fixture.eventId, `organiser_cover_request:${fixture.assignmentId}`],
+    );
+
+    expect(coverActionResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+
+    expect(
+      organiserNotificationMocks.reconcileOrganiserPendingWarning,
+    ).not.toHaveBeenCalled();
+  });
+
   it("times out an overdue organiser normally while the parent event remains active", async () => {
     // Arrange
     const fixture = await createOpenEventWithDueOrganiserTimeout(pool);
@@ -1108,6 +1261,193 @@ describe("event scheduler", () => {
 
       assignmentId: fixture.assignmentId,
     });
+  });
+
+  it("does not send an organiser warning when organisers are disabled after the scheduler reads it", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserWarning(pool);
+
+    const guildFetch = createBlockedGuildFetchSchedulerClient();
+
+    // Act
+    startEventScheduler(guildFetch.client);
+
+    /*
+     * The scheduler has already:
+     *
+     * - claimed the warning action;
+     * - read the assignment;
+     * - observed organisers as enabled.
+     *
+     * Pausing the external guild fetch gives the feature change a deterministic
+     * point at which to win before the final pre-delivery revalidation.
+     */
+    await guildFetch.waitUntilFetchStarted();
+
+    await pool.query(
+      `
+      UPDATE "guild_settings"
+      SET
+        "organisers_enabled" = false,
+        "updated_at" = NOW()
+      WHERE "guild_id" = (
+        SELECT "owner_guild_id"
+        FROM "events"
+        WHERE "id" = $1
+      )
+    `,
+      [fixture.eventId],
+    );
+
+    guildFetch.releaseFetch();
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    expect(
+      organiserNotificationMocks.sendOrganiserPendingWarning,
+    ).not.toHaveBeenCalled();
+
+    expect(
+      organiserNotificationMocks.reconcileOrganiserPendingWarning,
+    ).not.toHaveBeenCalled();
+
+    const assignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+      warning_channel_id: string | null;
+      warning_message_id: string | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "is_current",
+          "warning_channel_id",
+          "warning_message_id"
+        FROM "event_organiser_assignments"
+        WHERE "id" = $1
+      `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toEqual([
+      {
+        status: "pending",
+
+        is_current: true,
+
+        warning_channel_id: null,
+
+        warning_message_id: null,
+      },
+    ]);
+
+    const auditResult = await pool.query<{
+      count: number;
+    }>(
+      `
+        SELECT COUNT(*)::int AS "count"
+        FROM "audit_logs"
+        WHERE
+          "action" =
+            'scheduler.organiser_warning'
+          AND "target_id" = $1
+      `,
+      [String(fixture.assignmentId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+  });
+
+  it("does not send an organiser cover request when organisers are disabled after the scheduler reads it", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserCoverRequest(pool);
+
+    const guildFetch = createBlockedGuildFetchSchedulerClient();
+
+    // Act
+    startEventScheduler(guildFetch.client);
+
+    /*
+     * The action is already processing and its initial eligibility checks have
+     * passed. Disable organisers while the executor is crossing the external
+     * guild-fetch boundary.
+     */
+    await guildFetch.waitUntilFetchStarted();
+
+    await pool.query(
+      `
+      UPDATE "guild_settings"
+      SET
+        "organisers_enabled" = false,
+        "updated_at" = NOW()
+      WHERE "guild_id" = (
+        SELECT "owner_guild_id"
+        FROM "events"
+        WHERE "id" = $1
+      )
+    `,
+      [fixture.eventId],
+    );
+
+    guildFetch.releaseFetch();
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    expect(
+      organiserNotificationMocks.sendOrganiserCoverRequest,
+    ).not.toHaveBeenCalled();
+
+    const sourceAssignmentResult = await pool.query<{
+      status: string;
+      is_current: boolean;
+    }>(
+      `
+        SELECT
+          "status",
+          "is_current"
+        FROM "event_organiser_assignments"
+        WHERE "id" = $1
+      `,
+      [fixture.assignmentId],
+    );
+
+    expect(sourceAssignmentResult.rows).toEqual([
+      {
+        status: "timed_out",
+
+        is_current: false,
+      },
+    ]);
+
+    const auditResult = await pool.query<{
+      count: number;
+    }>(
+      `
+        SELECT COUNT(*)::int AS "count"
+        FROM "audit_logs"
+        WHERE
+          "action" =
+            'scheduler.organiser_cover_request'
+          AND "target_id" = $1
+      `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
   });
 
   it("does not send an organiser warning when the event completes after the scheduler reads it", async () => {

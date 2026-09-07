@@ -4,6 +4,7 @@ import { db } from "../db/client.js";
 import {
   eventOrganiserAssignments,
   events,
+  guildSettings,
   scheduledActions,
 } from "../db/schema.js";
 import {
@@ -24,6 +25,9 @@ export type AssignEventOrganiserResult =
     }
   | {
       kind: "event_inactive";
+    }
+  | {
+      kind: "organisers_disabled";
     }
   | {
       kind: "backup_requires_primary";
@@ -57,6 +61,9 @@ export type RemoveEventOrganiserResult =
     }
   | {
       kind: "event_inactive";
+    }
+  | {
+      kind: "organisers_disabled";
     }
   | {
       kind: "assignment_not_found";
@@ -158,182 +165,209 @@ export async function assignEventOrganiser(input: {
   const shouldActivatePrimary =
     input.slot === "primary" && event.publishedAt !== null;
 
-  const { assignment, replacedAssignmentIds } = await db.transaction(
-    async (transaction) => {
-      const replacedAssignmentIds: number[] = [];
+  const transactionResult = await db.transaction(async (transaction) => {
+    /*
+     * The organiser feature row is the shared ordering boundary between
+     * organiser mutations and disabling the organiser subsystem.
+     */
+    const [featureSettings] = await transaction
+      .select({
+        organisersEnabled: guildSettings.organisersEnabled,
+      })
+      .from(guildSettings)
+      .where(eq(guildSettings.guildId, input.guildDatabaseId))
+      .limit(1)
+      .for("share");
 
-      if (existing) {
-        const replacedAssignments = await transaction
-          .update(eventOrganiserAssignments)
-          .set({
-            status: "replaced",
+    if (!featureSettings?.organisersEnabled) {
+      return {
+        kind: "organisers_disabled",
+      } as const;
+    }
 
-            isCurrent: false,
+    const replacedAssignmentIds: number[] = [];
 
-            endedAt: now,
+    if (existing) {
+      const replacedAssignments = await transaction
+        .update(eventOrganiserAssignments)
+        .set({
+          status: "replaced",
 
-            updatedAt: now,
-          })
-          .where(eq(eventOrganiserAssignments.id, existing.id))
-          .returning({
-            id: eventOrganiserAssignments.id,
-          });
+          isCurrent: false,
 
-        replacedAssignmentIds.push(
-          ...replacedAssignments.map(
-            (replacedAssignment) => replacedAssignment.id,
-          ),
-        );
-      }
-
-      /*
-       * A newly assigned primary supersedes any currently-active backup or
-       * cover organiser. Dormant backups are deliberately retained.
-       */
-      if (input.slot === "primary") {
-        const replacedActivatedAssignments = await transaction
-          .update(eventOrganiserAssignments)
-          .set({
-            status: "replaced",
-
-            isCurrent: false,
-
-            endedAt: now,
-
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(eventOrganiserAssignments.eventId, event.id),
-
-              eq(eventOrganiserAssignments.isCurrent, true),
-
-              isNotNull(eventOrganiserAssignments.activatedAt),
-
-              inArray(eventOrganiserAssignments.slot, ["backup", "cover"]),
-            ),
-          )
-          .returning({
-            id: eventOrganiserAssignments.id,
-          });
-
-        replacedAssignmentIds.push(
-          ...replacedActivatedAssignments.map(
-            (replacedAssignment) => replacedAssignment.id,
-          ),
-        );
-
-        /*
-         * A newly assigned active primary also makes any previous organiser
-         * escalation work obsolete.
-         */
-        await transaction
-          .update(scheduledActions)
-          .set({
-            status: "cancelled",
-
-            lockedAt: null,
-
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(scheduledActions.eventId, event.id),
-
-              inArray(scheduledActions.status, ["pending", "processing"]),
-
-              or(
-                like(
-                  scheduledActions.actionKey,
-                  `${ORGANISER_WARNING_ACTION_PREFIX}%`,
-                ),
-
-                like(
-                  scheduledActions.actionKey,
-                  `${ORGANISER_TIMEOUT_ACTION_PREFIX}%`,
-                ),
-
-                like(
-                  scheduledActions.actionKey,
-                  `${ORGANISER_COVER_REQUEST_ACTION_PREFIX}%`,
-                ),
-              ),
-            ),
-          );
-      }
-
-      const activatedAt = shouldActivatePrimary ? now : null;
-
-      const responseDeadlineAt = shouldActivatePrimary
-        ? calculateOrganiserResponseDeadline(now, input.primaryResponseMinutes)
-        : null;
-
-      const [created] = await transaction
-        .insert(eventOrganiserAssignments)
-        .values({
-          eventId: event.id,
-
-          slot: input.slot,
-
-          discordUserId: input.organiserUserId,
-
-          displayNameSnapshot: input.displayNameSnapshot,
-
-          status: "pending",
-
-          isCurrent: true,
-
-          assignedByUserId: input.assignedByUserId,
-
-          activatedAt,
-
-          responseDeadlineAt,
+          endedAt: now,
 
           updatedAt: now,
         })
+        .where(eq(eventOrganiserAssignments.id, existing.id))
         .returning({
           id: eventOrganiserAssignments.id,
         });
 
-      if (!created) {
+      replacedAssignmentIds.push(
+        ...replacedAssignments.map(
+          (replacedAssignment) => replacedAssignment.id,
+        ),
+      );
+    }
+
+    /*
+     * A newly assigned primary supersedes any currently-active backup or
+     * cover organiser. Dormant backups are deliberately retained.
+     */
+    if (input.slot === "primary") {
+      const replacedActivatedAssignments = await transaction
+        .update(eventOrganiserAssignments)
+        .set({
+          status: "replaced",
+
+          isCurrent: false,
+
+          endedAt: now,
+
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(eventOrganiserAssignments.eventId, event.id),
+
+            eq(eventOrganiserAssignments.isCurrent, true),
+
+            isNotNull(eventOrganiserAssignments.activatedAt),
+
+            inArray(eventOrganiserAssignments.slot, ["backup", "cover"]),
+          ),
+        )
+        .returning({
+          id: eventOrganiserAssignments.id,
+        });
+
+      replacedAssignmentIds.push(
+        ...replacedActivatedAssignments.map(
+          (replacedAssignment) => replacedAssignment.id,
+        ),
+      );
+
+      /*
+       * A newly assigned active primary also makes any previous organiser
+       * escalation work obsolete.
+       */
+      await transaction
+        .update(scheduledActions)
+        .set({
+          status: "cancelled",
+
+          lockedAt: null,
+
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(scheduledActions.eventId, event.id),
+
+            inArray(scheduledActions.status, ["pending", "processing"]),
+
+            or(
+              like(
+                scheduledActions.actionKey,
+                `${ORGANISER_WARNING_ACTION_PREFIX}%`,
+              ),
+
+              like(
+                scheduledActions.actionKey,
+                `${ORGANISER_TIMEOUT_ACTION_PREFIX}%`,
+              ),
+
+              like(
+                scheduledActions.actionKey,
+                `${ORGANISER_COVER_REQUEST_ACTION_PREFIX}%`,
+              ),
+            ),
+          ),
+        );
+    }
+
+    const activatedAt = shouldActivatePrimary ? now : null;
+
+    const responseDeadlineAt = shouldActivatePrimary
+      ? calculateOrganiserResponseDeadline(now, input.primaryResponseMinutes)
+      : null;
+
+    const [created] = await transaction
+      .insert(eventOrganiserAssignments)
+      .values({
+        eventId: event.id,
+
+        slot: input.slot,
+
+        discordUserId: input.organiserUserId,
+
+        displayNameSnapshot: input.displayNameSnapshot,
+
+        status: "pending",
+
+        isCurrent: true,
+
+        assignedByUserId: input.assignedByUserId,
+
+        activatedAt,
+
+        responseDeadlineAt,
+
+        updatedAt: now,
+      })
+      .returning({
+        id: eventOrganiserAssignments.id,
+      });
+
+    if (!created) {
+      throw new Error(
+        "The organiser assignment was not returned by the database.",
+      );
+    }
+
+    if (shouldActivatePrimary) {
+      if (!activatedAt || !responseDeadlineAt) {
         throw new Error(
-          "The organiser assignment was not returned by the database.",
+          "The primary organiser activation times were not created.",
         );
       }
 
-      if (shouldActivatePrimary) {
-        if (!activatedAt || !responseDeadlineAt) {
-          throw new Error(
-            "The primary organiser activation times were not created.",
-          );
-        }
+      const actions = buildOrganiserResponseActionValues({
+        eventId: event.id,
 
-        const actions = buildOrganiserResponseActionValues({
-          eventId: event.id,
+        assignmentId: created.id,
 
-          assignmentId: created.id,
+        activatedAt,
 
-          activatedAt,
+        responseDeadlineAt,
 
-          responseDeadlineAt,
+        warningMinutesBefore: input.warningMinutesBefore,
+      });
 
-          warningMinutesBefore: input.warningMinutesBefore,
-        });
+      await transaction.insert(scheduledActions).values(actions);
+    }
 
-        await transaction.insert(scheduledActions).values(actions);
-      }
+    return {
+      kind: "assigned",
 
-      return {
-        assignment: {
-          id: created.id,
+      assignment: {
+        id: created.id,
 
-          activatedAt,
-        },
+        activatedAt,
+      },
 
-        replacedAssignmentIds,
-      };
-    },
-  );
+      replacedAssignmentIds,
+    } as const;
+  });
+
+  if (transactionResult.kind === "organisers_disabled") {
+    return {
+      kind: "organisers_disabled",
+    };
+  }
+
+  const { assignment, replacedAssignmentIds } = transactionResult;
 
   return {
     kind: "assigned",
@@ -386,26 +420,68 @@ export async function removeEventOrganiserAssignment(input: {
     };
   }
 
-  const now = new Date();
+  const removalResult = await db.transaction(async (transaction) => {
+    const [featureSettings] = await transaction
+      .select({
+        organisersEnabled: guildSettings.organisersEnabled,
+      })
+      .from(guildSettings)
+      .where(eq(guildSettings.guildId, input.guildDatabaseId))
+      .limit(1)
+      .for("share");
 
-  await db
-    .update(eventOrganiserAssignments)
-    .set({
-      status: "removed",
+    if (!featureSettings?.organisersEnabled) {
+      return {
+        kind: "organisers_disabled",
+      } as const;
+    }
 
-      isCurrent: false,
+    const now = new Date();
 
-      endedAt: now,
+    const [removed] = await transaction
+      .update(eventOrganiserAssignments)
+      .set({
+        status: "removed",
 
-      updatedAt: now,
-    })
-    .where(
-      and(
-        eq(eventOrganiserAssignments.id, assignment.id),
+        isCurrent: false,
 
-        eq(eventOrganiserAssignments.isCurrent, true),
-      ),
-    );
+        endedAt: now,
+
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(eventOrganiserAssignments.id, assignment.id),
+
+          eq(eventOrganiserAssignments.isCurrent, true),
+        ),
+      )
+      .returning({
+        id: eventOrganiserAssignments.id,
+      });
+
+    if (!removed) {
+      return {
+        kind: "assignment_not_found",
+      } as const;
+    }
+
+    return {
+      kind: "removed",
+    } as const;
+  });
+
+  if (removalResult.kind === "organisers_disabled") {
+    return {
+      kind: "organisers_disabled",
+    };
+  }
+
+  if (removalResult.kind === "assignment_not_found") {
+    return {
+      kind: "assignment_not_found",
+    };
+  }
 
   await cancelOrganiserResponseActions(event.id, assignment.id);
 

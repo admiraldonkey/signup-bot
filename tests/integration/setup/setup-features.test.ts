@@ -330,9 +330,10 @@ describe("setup feature configuration", () => {
     ]);
   });
 
-  it("shows the organiser DM feature state in setup status", async () => {
+  it("shows the organiser feature states in setup status", async () => {
     // Arrange
     await createConfiguredGuild(pool, {
+      organisersEnabled: false,
       organiserDmsEnabled: false,
       eventAdminChannelId: EVENT_ADMIN_CHANNEL_ID,
     });
@@ -356,9 +357,15 @@ describe("setup feature configuration", () => {
         },
       }),
     );
+
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("• Organisers: Disabled"),
+      }),
+    );
   });
 
-  it("uses the enabled organiser-DM default for new guild settings", async () => {
+  it("uses enabled organiser defaults for new guild settings", async () => {
     // Arrange
     const guildResult = await pool.query<{
       id: number;
@@ -381,8 +388,8 @@ describe("setup feature configuration", () => {
     }
 
     /*
-     * Deliberately omit organiser_dms_enabled. Existing/new guilds should
-     * inherit the backwards-compatible DM-first default from PostgreSQL.
+     * Deliberately omit both organiser feature settings. Existing/new guilds
+     * should inherit the backwards-compatible enabled defaults from PostgreSQL.
      */
     await pool.query(
       `
@@ -396,10 +403,57 @@ describe("setup feature configuration", () => {
 
     // Assert
     const settingsResult = await pool.query<{
+      organisers_enabled: boolean;
       organiser_dms_enabled: boolean;
     }>(
       `
-        SELECT "organiser_dms_enabled"
+    SELECT
+      "organisers_enabled",
+      "organiser_dms_enabled"
+    FROM "guild_settings"
+    WHERE "guild_id" = $1
+  `,
+      [guildId],
+    );
+
+    expect(settingsResult.rows).toEqual([
+      {
+        organisers_enabled: true,
+        organiser_dms_enabled: true,
+      },
+    ]);
+  });
+
+  it("allows a server administrator to disable organisers", async () => {
+    // Arrange
+    const guildId = await createConfiguredGuild(pool, {
+      organisersEnabled: true,
+
+      organiserDmsEnabled: true,
+
+      eventAdminChannelId: EVENT_ADMIN_CHANNEL_ID,
+    });
+
+    const interaction = createSetupInteraction({
+      subcommand: "features",
+
+      feature: "organisers",
+
+      enabled: false,
+    });
+
+    // Act
+    await handleSetupCommand(interaction);
+
+    // Assert
+    const settingsResult = await pool.query<{
+      organisers_enabled: boolean;
+      organiser_dms_enabled: boolean;
+    }>(
+      `
+        SELECT
+          "organisers_enabled",
+          "organiser_dms_enabled"
         FROM "guild_settings"
         WHERE "guild_id" = $1
       `,
@@ -408,7 +462,102 @@ describe("setup feature configuration", () => {
 
     expect(settingsResult.rows).toEqual([
       {
+        organisers_enabled: false,
+
+        /*
+         * Disabling the parent feature must not destroy the stored child
+         * preference.
+         */
         organiser_dms_enabled: true,
+      },
+    ]);
+
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("Organisers disabled"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      }),
+    );
+
+    const auditResult = await pool.query<{
+      feature: string | null;
+      enabled: boolean | null;
+      previous_value: boolean | null;
+    }>(
+      `
+        SELECT
+          "details" ->> 'feature'
+            AS "feature",
+
+          ("details" ->> 'enabled')::boolean
+            AS "enabled",
+
+          ("details" ->> 'previousValue')::boolean
+            AS "previous_value"
+        FROM "audit_logs"
+        WHERE "action" = 'setup.feature.update'
+      `,
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        feature: "organisers",
+
+        enabled: false,
+
+        previous_value: true,
+      },
+    ]);
+  });
+
+  it("allows a server administrator to re-enable organisers", async () => {
+    // Arrange
+    const guildId = await createConfiguredGuild(pool, {
+      organisersEnabled: false,
+
+      organiserDmsEnabled: false,
+
+      eventAdminChannelId: EVENT_ADMIN_CHANNEL_ID,
+    });
+
+    const interaction = createSetupInteraction({
+      subcommand: "features",
+
+      feature: "organisers",
+
+      enabled: true,
+    });
+
+    // Act
+    await handleSetupCommand(interaction);
+
+    // Assert
+    const settingsResult = await pool.query<{
+      organisers_enabled: boolean;
+      organiser_dms_enabled: boolean;
+    }>(
+      `
+        SELECT
+          "organisers_enabled",
+          "organiser_dms_enabled"
+        FROM "guild_settings"
+        WHERE "guild_id" = $1
+      `,
+      [guildId],
+    );
+
+    expect(settingsResult.rows).toEqual([
+      {
+        organisers_enabled: true,
+
+        /*
+         * Re-enabling the parent restores availability without changing the
+         * previously selected delivery preference.
+         */
+        organiser_dms_enabled: false,
       },
     ]);
   });
@@ -417,6 +566,7 @@ describe("setup feature configuration", () => {
 async function createConfiguredGuild(
   pool: Pool,
   input: {
+    organisersEnabled?: boolean;
     organiserDmsEnabled: boolean;
     eventAdminChannelId: string | null;
   },
@@ -446,11 +596,17 @@ async function createConfiguredGuild(
       INSERT INTO "guild_settings" (
         "guild_id",
         "event_admin_channel_id",
+        "organisers_enabled",
         "organiser_dms_enabled"
       )
-      VALUES ($1, $2, $3)
+      VALUES ($1, $2, $3, $4)
     `,
-    [guildId, input.eventAdminChannelId, input.organiserDmsEnabled],
+    [
+      guildId,
+      input.eventAdminChannelId,
+      input.organisersEnabled ?? true,
+      input.organiserDmsEnabled,
+    ],
   );
 
   return guildId;
@@ -458,7 +614,7 @@ async function createConfiguredGuild(
 
 function createSetupInteraction(input: {
   subcommand: "features" | "status";
-  feature?: "organiser-dms";
+  feature?: "organisers" | "organiser-dms";
   enabled?: boolean;
   hasManageGuild?: boolean;
 }): ChatInputCommandInteraction {

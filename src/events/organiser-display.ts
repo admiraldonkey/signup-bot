@@ -1,7 +1,11 @@
 import { and, eq, inArray, isNotNull } from "drizzle-orm";
 
 import { db } from "../db/client.js";
-import { eventOrganiserAssignments } from "../db/schema.js";
+import {
+  eventOrganiserAssignments,
+  events,
+  guildSettings,
+} from "../db/schema.js";
 
 export type PublicOrganiserStatus =
   | "pending"
@@ -29,9 +33,13 @@ export async function getPublicOrganiserDisplay(
       status: eventOrganiserAssignments.status,
     })
     .from(eventOrganiserAssignments)
+    .innerJoin(events, eq(events.id, eventOrganiserAssignments.eventId))
+    .innerJoin(guildSettings, eq(guildSettings.guildId, events.ownerGuildId))
     .where(
       and(
         eq(eventOrganiserAssignments.eventId, eventId),
+
+        eq(guildSettings.organisersEnabled, true),
 
         eq(eventOrganiserAssignments.isCurrent, true),
 

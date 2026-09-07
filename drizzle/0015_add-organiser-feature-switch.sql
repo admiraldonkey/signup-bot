@@ -1,0 +1,1 @@
+ALTER TABLE "guild_settings" ADD COLUMN "organisers_enabled" boolean DEFAULT true NOT NULL;

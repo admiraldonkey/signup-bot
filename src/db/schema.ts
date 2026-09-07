@@ -104,6 +104,8 @@ export const guildSettings = pgTable("guild_settings", {
 
   eventOrganiserRoleId: text("event_organiser_role_id"),
 
+  organisersEnabled: boolean("organisers_enabled").notNull().default(true),
+
   organiserDmsEnabled: boolean("organiser_dms_enabled").notNull().default(true),
 
   organiserPrimaryResponseMinutes: integer("organiser_primary_response_minutes")

@@ -98,6 +98,13 @@ async function handleAssignmentResponse(
 
       return;
 
+    case "organisers_disabled":
+      await interaction.editReply(
+        "Event organiser responses are currently disabled for this server.",
+      );
+
+      return;
+
     case "event_inactive":
       await interaction.editReply(
         "This event is no longer accepting organiser responses.",
@@ -267,6 +274,13 @@ async function handleCoverClaim(
 
       return;
 
+    case "organisers_disabled":
+      await interaction.editReply(
+        "Event organisers are currently disabled for this server.",
+      );
+
+      return;
+
     case "event_inactive":
       await interaction.editReply(
         "This event no longer requires organiser cover.",
@@ -311,6 +325,13 @@ async function handleCoverClaim(
   });
 
   switch (claimResult.kind) {
+    case "organisers_disabled":
+      await interaction.editReply(
+        "Event organisers were disabled before your cover claim could be saved.",
+      );
+
+      return;
+
     case "event_inactive":
       await interaction.editReply(
         "This event no longer requires organiser cover.",
@@ -420,6 +441,9 @@ function formatEscalationResult(
 
     case "already_resolved":
       return "Another active organiser assignment is already in place.";
+
+    case "organisers_disabled":
+      return "Event organisers have been disabled for this server, so no further escalation was performed.";
 
     case "event_inactive":
       return "The event is no longer active, so no further escalation was performed.";
