@@ -1,9 +1,11 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 
 import {
   discordGuilds,
+  roleRequestPresetGroupOptions,
+  roleRequestPresetGroups,
   roleRequestPresetOptionQualificationRoles,
   roleRequestPresetOptions,
   roleRequestPresets,
@@ -118,6 +120,95 @@ export type AddPresetRoleOptionResult =
         | "duplicate_qualification_role"
         | "everyone_qualification_role"
         | "missing_qualification_roles";
+
+      discordRoleId?: string;
+    };
+
+export type PresetNotifyRoleInput = {
+  discordRoleId: string;
+
+  roleNameSnapshot: string;
+};
+
+export type AddPresetRequestGroupInput = {
+  guildDatabaseId: number;
+
+  presetId: number;
+
+  name: string;
+
+  description: string | null;
+
+  presetOptionIds: number[];
+
+  /*
+   * Null means "resolve the guild's current default role-request channel
+   * when this preset is applied to an event".
+   */
+  channelId: string | null;
+
+  notifyRole: PresetNotifyRoleInput | null;
+
+  requiresPositiveSignup: boolean;
+
+  openMinutesBeforeStart: number;
+
+  closeMinutesBeforeStart: number;
+};
+
+export type AddPresetRequestGroupResult =
+  | {
+      kind: "added";
+
+      group: {
+        id: number;
+
+        presetId: number;
+
+        name: string;
+
+        description: string | null;
+
+        channelId: string | null;
+
+        notifyRoleId: string | null;
+
+        notifyRoleNameSnapshot: string | null;
+
+        requiresPositiveSignup: boolean;
+
+        openMinutesBeforeStart: number;
+
+        closeMinutesBeforeStart: number;
+
+        sortOrder: number;
+
+        active: boolean;
+
+        presetOptionIds: number[];
+      };
+    }
+  | {
+      kind: "preset_not_found";
+    }
+  | {
+      kind: "invalid_input";
+
+      reason:
+        | "invalid_name"
+        | "no_options"
+        | "invalid_option_id"
+        | "duplicate_option"
+        | "option_not_found_or_inactive"
+        | "invalid_channel_id"
+        | "invalid_notify_role_id"
+        | "invalid_notify_role_name"
+        | "everyone_notify_role"
+        | "invalid_open_offset"
+        | "invalid_close_offset"
+        | "invalid_group_window";
+
+      presetOptionId?: number;
 
       discordRoleId?: string;
     };
@@ -487,6 +578,361 @@ export async function addPresetRoleOption(
   });
 }
 
+/**
+ * Adds one reusable role-request group to a preset.
+ *
+ * The caller supplies preset option IDs in presentation order. The group and
+ * every group->option mapping are persisted atomically.
+ *
+ * channelId deliberately remains nullable here:
+ *
+ * - non-null means the preset has an explicit Discord destination snapshot;
+ * - null means resolve the guild's current default role-request channel when
+ *   the preset is later applied to an event.
+ *
+ * As with every preset mutation, the preset parent is locked FOR UPDATE.
+ * Preset application takes FOR SHARE on the same row, preventing application
+ * from observing half of an administrative edit.
+ */
+export async function addPresetRequestGroup(
+  input: AddPresetRequestGroupInput,
+): Promise<AddPresetRequestGroupResult> {
+  const name = input.name.trim();
+
+  if (name.length === 0 || name.length > 100) {
+    return {
+      kind: "invalid_input",
+
+      reason: "invalid_name",
+    };
+  }
+
+  if (input.presetOptionIds.length === 0) {
+    return {
+      kind: "invalid_input",
+
+      reason: "no_options",
+    };
+  }
+
+  const seenOptionIds = new Set<number>();
+
+  for (const presetOptionId of input.presetOptionIds) {
+    if (!isPostgresPositiveInteger(presetOptionId)) {
+      return {
+        kind: "invalid_input",
+
+        reason: "invalid_option_id",
+
+        presetOptionId,
+      };
+    }
+
+    if (seenOptionIds.has(presetOptionId)) {
+      return {
+        kind: "invalid_input",
+
+        reason: "duplicate_option",
+
+        presetOptionId,
+      };
+    }
+
+    seenOptionIds.add(presetOptionId);
+  }
+
+  let channelId: string | null = null;
+
+  if (input.channelId !== null) {
+    channelId = input.channelId.trim();
+
+    if (channelId.length === 0) {
+      return {
+        kind: "invalid_input",
+
+        reason: "invalid_channel_id",
+      };
+    }
+  }
+
+  let notifyRole: {
+    discordRoleId: string;
+
+    roleNameSnapshot: string;
+  } | null = null;
+
+  if (input.notifyRole !== null) {
+    const discordRoleId = input.notifyRole.discordRoleId.trim();
+
+    if (discordRoleId.length === 0) {
+      return {
+        kind: "invalid_input",
+
+        reason: "invalid_notify_role_id",
+      };
+    }
+
+    const roleNameSnapshot = input.notifyRole.roleNameSnapshot.trim();
+
+    if (roleNameSnapshot.length === 0 || roleNameSnapshot.length > 100) {
+      return {
+        kind: "invalid_input",
+
+        reason: "invalid_notify_role_name",
+
+        discordRoleId,
+      };
+    }
+
+    notifyRole = {
+      discordRoleId,
+
+      roleNameSnapshot,
+    };
+  }
+
+  if (!isPostgresInteger(input.openMinutesBeforeStart)) {
+    return {
+      kind: "invalid_input",
+
+      reason: "invalid_open_offset",
+    };
+  }
+
+  if (!isPostgresInteger(input.closeMinutesBeforeStart)) {
+    return {
+      kind: "invalid_input",
+
+      reason: "invalid_close_offset",
+    };
+  }
+
+  /*
+   * Positive values are before event start.
+   *
+   * Therefore:
+   *
+   * open 60 / close 0   -> valid
+   * open 60 / close -10 -> valid
+   * open 0  / close 60  -> invalid
+   *
+   * A strict comparison also rejects zero-length request windows.
+   */
+  if (input.openMinutesBeforeStart <= input.closeMinutesBeforeStart) {
+    return {
+      kind: "invalid_input",
+
+      reason: "invalid_group_window",
+    };
+  }
+
+  const description = normaliseOptionalText(input.description);
+
+  return db.transaction(async (transaction) => {
+    /*
+     * Every compliant preset mutation takes this exclusive parent lock.
+     *
+     * applyRoleRequestPresetToEvent() takes FOR SHARE on the same row, so
+     * application sees either the complete old preset or the complete new
+     * preset, never a half-created group.
+     */
+    const [preset] = await transaction
+      .select({
+        id: roleRequestPresets.id,
+
+        ownerGuildId: roleRequestPresets.ownerGuildId,
+      })
+      .from(roleRequestPresets)
+      .where(
+        and(
+          eq(roleRequestPresets.id, input.presetId),
+
+          eq(roleRequestPresets.ownerGuildId, input.guildDatabaseId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    if (!preset) {
+      return {
+        kind: "preset_not_found",
+      } as const;
+    }
+
+    /*
+     * Resolve the owning Discord guild only for stable snowflake semantics,
+     * not for live Discord validation.
+     *
+     * The future command adapter remains responsible for checking whether
+     * selected roles/channels currently exist and are usable.
+     */
+    const [guild] = await transaction
+      .select({
+        discordGuildId: discordGuilds.discordGuildId,
+      })
+      .from(discordGuilds)
+      .where(eq(discordGuilds.id, preset.ownerGuildId))
+      .limit(1);
+
+    if (!guild) {
+      throw new Error(
+        `Preset #${preset.id} references missing guild #${preset.ownerGuildId}.`,
+      );
+    }
+
+    if (notifyRole?.discordRoleId === guild.discordGuildId) {
+      return {
+        kind: "invalid_input",
+
+        reason: "everyone_notify_role",
+
+        discordRoleId: notifyRole.discordRoleId,
+      } as const;
+    }
+
+    /*
+     * Only active options belonging to this exact preset may be exposed by
+     * a new reusable group.
+     */
+    const availableOptions = await transaction
+      .select({
+        id: roleRequestPresetOptions.id,
+      })
+      .from(roleRequestPresetOptions)
+      .where(
+        and(
+          eq(roleRequestPresetOptions.presetId, preset.id),
+
+          eq(roleRequestPresetOptions.active, true),
+
+          inArray(roleRequestPresetOptions.id, input.presetOptionIds),
+        ),
+      );
+
+    const availableOptionIds = new Set(
+      availableOptions.map((option) => option.id),
+    );
+
+    const unavailableOptionId = input.presetOptionIds.find(
+      (presetOptionId) => !availableOptionIds.has(presetOptionId),
+    );
+
+    if (unavailableOptionId !== undefined) {
+      return {
+        kind: "invalid_input",
+
+        reason: "option_not_found_or_inactive",
+
+        presetOptionId: unavailableOptionId,
+      } as const;
+    }
+
+    /*
+     * The parent lock serialises normal group additions, making max+1
+     * deterministic between service callers.
+     */
+    const [sortRow] = await transaction
+      .select({
+        maximum: sql<number>`coalesce(max(${roleRequestPresetGroups.sortOrder}), -1)::int`,
+      })
+      .from(roleRequestPresetGroups)
+      .where(eq(roleRequestPresetGroups.presetId, preset.id));
+
+    const sortOrder = (sortRow?.maximum ?? -1) + 1;
+
+    const [group] = await transaction
+      .insert(roleRequestPresetGroups)
+      .values({
+        presetId: preset.id,
+
+        name,
+
+        description,
+
+        channelId,
+
+        notifyRoleId: notifyRole?.discordRoleId ?? null,
+
+        notifyRoleNameSnapshot: notifyRole?.roleNameSnapshot ?? null,
+
+        requiresPositiveSignup: input.requiresPositiveSignup,
+
+        openMinutesBeforeStart: input.openMinutesBeforeStart,
+
+        closeMinutesBeforeStart: input.closeMinutesBeforeStart,
+
+        sortOrder,
+
+        active: true,
+      })
+      .returning({
+        id: roleRequestPresetGroups.id,
+
+        presetId: roleRequestPresetGroups.presetId,
+
+        name: roleRequestPresetGroups.name,
+
+        description: roleRequestPresetGroups.description,
+
+        channelId: roleRequestPresetGroups.channelId,
+
+        notifyRoleId: roleRequestPresetGroups.notifyRoleId,
+
+        notifyRoleNameSnapshot: roleRequestPresetGroups.notifyRoleNameSnapshot,
+
+        requiresPositiveSignup: roleRequestPresetGroups.requiresPositiveSignup,
+
+        openMinutesBeforeStart: roleRequestPresetGroups.openMinutesBeforeStart,
+
+        closeMinutesBeforeStart:
+          roleRequestPresetGroups.closeMinutesBeforeStart,
+
+        sortOrder: roleRequestPresetGroups.sortOrder,
+
+        active: roleRequestPresetGroups.active,
+      });
+
+    if (!group) {
+      throw new Error(
+        `Failed to create a role-request group for preset #${preset.id}.`,
+      );
+    }
+
+    /*
+     * Preserve the administrator's supplied option order rather than the
+     * unspecified order returned by PostgreSQL above.
+     */
+    await transaction.insert(roleRequestPresetGroupOptions).values(
+      input.presetOptionIds.map((presetOptionId, index) => ({
+        groupId: group.id,
+
+        presetOptionId,
+
+        sortOrder: index,
+      })),
+    );
+
+    const now = new Date();
+
+    await transaction
+      .update(roleRequestPresets)
+      .set({
+        updatedAt: now,
+      })
+      .where(eq(roleRequestPresets.id, preset.id));
+
+    return {
+      kind: "added",
+
+      group: {
+        ...group,
+
+        presetOptionIds: [...input.presetOptionIds],
+      },
+    } as const;
+  });
+}
+
 function normaliseQualificationRoles(roles: PresetQualificationRoleInput[]):
   | {
       ok: true;
@@ -596,4 +1042,20 @@ function normaliseOptionalText(value: string | null): string | null {
   const trimmed = value.trim();
 
   return trimmed || null;
+}
+
+const POSTGRES_INTEGER_MIN = -2_147_483_648;
+
+const POSTGRES_INTEGER_MAX = 2_147_483_647;
+
+function isPostgresInteger(value: number): boolean {
+  return (
+    Number.isSafeInteger(value) &&
+    value >= POSTGRES_INTEGER_MIN &&
+    value <= POSTGRES_INTEGER_MAX
+  );
+}
+
+function isPostgresPositiveInteger(value: number): boolean {
+  return isPostgresInteger(value) && value > 0;
 }

@@ -5,6 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { pool as applicationPool } from "../../../src/db/client.js";
 
 import {
+  addPresetRequestGroup,
   addPresetRoleOption,
   createRoleRequestPreset,
 } from "../../../src/role-requests/role-request-preset-admin-service.js";
@@ -23,6 +24,10 @@ const ADMIN_USER_ID = "986000000000000003";
 const QUALIFIED_ROLE_ID = "986000000000000004";
 
 const SUPERVISED_ROLE_ID = "986000000000000005";
+
+const ROLE_REQUEST_CHANNEL_ID = "986000000000000006";
+
+const NOTIFY_ROLE_ID = "986000000000000007";
 
 describe("role-request preset administration service", () => {
   let pool: Pool;
@@ -628,6 +633,618 @@ describe("role-request preset administration service", () => {
 
     await expectNoPresetOptions(pool, fixture.presetId);
   });
+
+  it("adds a preset request group with ordered option mappings and the next sort order", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    /*
+     * Leave an intentional sort-order gap.
+     *
+     * Inactive groups still occupy their existing display position, so a
+     * newly-added group should append after the current maximum rather than
+     * reusing the retired group's order.
+     */
+    await pool.query(
+      `
+        INSERT INTO
+          "role_request_preset_groups" (
+            "preset_id",
+            "name",
+            "sort_order",
+            "active"
+          )
+        VALUES (
+          $1,
+          'Retired Group',
+          4,
+          false
+        )
+      `,
+      [fixture.presetId],
+    );
+
+    // Act
+    const result = await addPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      name: "  Naval Roles  ",
+
+      description: "  General naval role requests.  ",
+
+      /*
+       * Deliberately reverse the natural option order. The mapping must
+       * preserve the administrator's requested presentation order.
+       */
+      presetOptionIds: [options.carpenterId, options.captainId],
+
+      channelId: `  ${ROLE_REQUEST_CHANNEL_ID}  `,
+
+      notifyRole: {
+        discordRoleId: `  ${NOTIFY_ROLE_ID}  `,
+
+        roleNameSnapshot: "  Naval  ",
+      },
+
+      requiresPositiveSignup: true,
+
+      openMinutesBeforeStart: 60,
+
+      closeMinutesBeforeStart: -10,
+    });
+
+    // Assert
+    expect(result.kind).toBe("added");
+
+    if (result.kind !== "added") {
+      throw new Error(
+        `Expected preset request-group creation to succeed, received "${result.kind}".`,
+      );
+    }
+
+    expect(result.group).toEqual({
+      id: expect.any(Number),
+
+      presetId: fixture.presetId,
+
+      name: "Naval Roles",
+
+      description: "General naval role requests.",
+
+      channelId: ROLE_REQUEST_CHANNEL_ID,
+
+      notifyRoleId: NOTIFY_ROLE_ID,
+
+      notifyRoleNameSnapshot: "Naval",
+
+      requiresPositiveSignup: true,
+
+      openMinutesBeforeStart: 60,
+
+      closeMinutesBeforeStart: -10,
+
+      sortOrder: 5,
+
+      active: true,
+
+      presetOptionIds: [options.carpenterId, options.captainId],
+    });
+
+    const storedGroup = await pool.query<{
+      preset_id: number;
+
+      name: string;
+
+      description: string | null;
+
+      channel_id: string | null;
+
+      notify_role_id: string | null;
+
+      notify_role_name_snapshot: string | null;
+
+      requires_positive_signup: boolean;
+
+      open_minutes_before_start: number;
+
+      close_minutes_before_start: number;
+
+      sort_order: number;
+
+      active: boolean;
+    }>(
+      `
+          SELECT
+            "preset_id",
+            "name",
+            "description",
+            "channel_id",
+            "notify_role_id",
+            "notify_role_name_snapshot",
+            "requires_positive_signup",
+            "open_minutes_before_start",
+            "close_minutes_before_start",
+            "sort_order",
+            "active"
+          FROM
+            "role_request_preset_groups"
+          WHERE
+            "id" = $1
+        `,
+      [result.group.id],
+    );
+
+    expect(storedGroup.rows).toEqual([
+      {
+        preset_id: fixture.presetId,
+
+        name: "Naval Roles",
+
+        description: "General naval role requests.",
+
+        channel_id: ROLE_REQUEST_CHANNEL_ID,
+
+        notify_role_id: NOTIFY_ROLE_ID,
+
+        notify_role_name_snapshot: "Naval",
+
+        requires_positive_signup: true,
+
+        open_minutes_before_start: 60,
+
+        close_minutes_before_start: -10,
+
+        sort_order: 5,
+
+        active: true,
+      },
+    ]);
+
+    const mappings = await pool.query<{
+      preset_option_id: number;
+
+      sort_order: number;
+    }>(
+      `
+          SELECT
+            "preset_option_id",
+            "sort_order"
+          FROM
+            "role_request_preset_group_options"
+          WHERE
+            "group_id" = $1
+          ORDER BY
+            "sort_order"
+        `,
+      [result.group.id],
+    );
+
+    expect(mappings.rows).toEqual([
+      {
+        preset_option_id: options.carpenterId,
+
+        sort_order: 0,
+      },
+
+      {
+        preset_option_id: options.captainId,
+
+        sort_order: 1,
+      },
+    ]);
+  });
+
+  it("stores a null channel as apply-time default-channel resolution rather than resolving it during preset editing", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    // Act
+    const result = await addPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      name: "Command Roles",
+
+      description: null,
+
+      presetOptionIds: [options.captainId],
+
+      channelId: null,
+
+      notifyRole: null,
+
+      requiresPositiveSignup: false,
+
+      openMinutesBeforeStart: 180,
+
+      closeMinutesBeforeStart: 60,
+    });
+
+    // Assert
+    expect(result.kind).toBe("added");
+
+    if (result.kind !== "added") {
+      throw new Error(
+        `Expected preset request-group creation to succeed, received "${result.kind}".`,
+      );
+    }
+
+    expect(result.group.channelId).toBeNull();
+
+    expect(result.group.notifyRoleId).toBeNull();
+
+    expect(result.group.notifyRoleNameSnapshot).toBeNull();
+
+    const stored = await pool.query<{
+      channel_id: string | null;
+
+      notify_role_id: string | null;
+
+      notify_role_name_snapshot: string | null;
+    }>(
+      `
+          SELECT
+            "channel_id",
+            "notify_role_id",
+            "notify_role_name_snapshot"
+          FROM
+            "role_request_preset_groups"
+          WHERE
+            "id" = $1
+        `,
+      [result.group.id],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        channel_id: null,
+
+        notify_role_id: null,
+
+        notify_role_name_snapshot: null,
+      },
+    ]);
+  });
+
+  it("rejects a preset request group with no role options", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    // Act
+    const result = await addPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      name: "Empty Group",
+
+      description: null,
+
+      presetOptionIds: [],
+
+      channelId: null,
+
+      notifyRole: null,
+
+      requiresPositiveSignup: false,
+
+      openMinutesBeforeStart: 60,
+
+      closeMinutesBeforeStart: 0,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "no_options",
+    });
+
+    await expectNoPresetGroups(pool, fixture.presetId);
+  });
+
+  it("rejects duplicate option IDs rather than silently changing the requested group definition", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    // Act
+    const result = await addPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      name: "Duplicate Captain",
+
+      description: null,
+
+      presetOptionIds: [options.captainId, options.captainId],
+
+      channelId: null,
+
+      notifyRole: null,
+
+      requiresPositiveSignup: false,
+
+      openMinutesBeforeStart: 60,
+
+      closeMinutesBeforeStart: 0,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "duplicate_option",
+
+      presetOptionId: options.captainId,
+    });
+
+    await expectNoPresetGroups(pool, fixture.presetId);
+  });
+
+  it("rejects an option belonging to another preset", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const otherPresetResult = await pool.query<{
+      id: number;
+    }>(
+      `
+          INSERT INTO
+            "role_request_presets" (
+              "owner_guild_id",
+              "name",
+              "active",
+              "created_by_user_id"
+            )
+          VALUES (
+            $1,
+            'Linebattle',
+            true,
+            $2
+          )
+          RETURNING
+            "id"
+        `,
+      [fixture.guildId, ADMIN_USER_ID],
+    );
+
+    const otherPresetId = otherPresetResult.rows[0]?.id;
+
+    if (!otherPresetId) {
+      throw new Error("The secondary integration-test preset was not created.");
+    }
+
+    const otherOptions = await createPresetOptions(pool, otherPresetId);
+
+    // Act
+    const result = await addPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      name: "Mixed Preset Group",
+
+      description: null,
+
+      presetOptionIds: [options.captainId, otherOptions.carpenterId],
+
+      channelId: null,
+
+      notifyRole: null,
+
+      requiresPositiveSignup: false,
+
+      openMinutesBeforeStart: 60,
+
+      closeMinutesBeforeStart: 0,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "option_not_found_or_inactive",
+
+      presetOptionId: otherOptions.carpenterId,
+    });
+
+    await expectNoPresetGroups(pool, fixture.presetId);
+  });
+
+  it("rejects an inactive preset option", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    await pool.query(
+      `
+        UPDATE
+          "role_request_preset_options"
+        SET
+          "active" = false
+        WHERE
+          "id" = $1
+      `,
+      [options.carpenterId],
+    );
+
+    // Act
+    const result = await addPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      name: "Inactive Option Group",
+
+      description: null,
+
+      presetOptionIds: [options.captainId, options.carpenterId],
+
+      channelId: null,
+
+      notifyRole: null,
+
+      requiresPositiveSignup: false,
+
+      openMinutesBeforeStart: 60,
+
+      closeMinutesBeforeStart: 0,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "option_not_found_or_inactive",
+
+      presetOptionId: options.carpenterId,
+    });
+
+    await expectNoPresetGroups(pool, fixture.presetId);
+  });
+
+  it("rejects a request group whose opening does not precede its closing", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    // Act
+    const result = await addPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      name: "Impossible Window",
+
+      description: null,
+
+      presetOptionIds: [options.captainId],
+
+      channelId: null,
+
+      notifyRole: null,
+
+      requiresPositiveSignup: false,
+
+      /*
+       * An offset of 0 opens at event start, while 60 closes an hour
+       * before event start. The opening would therefore be after closing.
+       */
+      openMinutesBeforeStart: 0,
+
+      closeMinutesBeforeStart: 60,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "invalid_group_window",
+    });
+
+    await expectNoPresetGroups(pool, fixture.presetId);
+  });
+
+  it("rejects @everyone as a preset request-group notification role", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    // Act
+    const result = await addPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      name: "Everyone Ping",
+
+      description: null,
+
+      presetOptionIds: [options.captainId],
+
+      channelId: null,
+
+      notifyRole: {
+        /*
+         * Discord's @everyone role uses the guild snowflake.
+         */
+        discordRoleId: DISCORD_GUILD_ID,
+
+        roleNameSnapshot: "@everyone",
+      },
+
+      requiresPositiveSignup: false,
+
+      openMinutesBeforeStart: 60,
+
+      closeMinutesBeforeStart: 0,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "everyone_notify_role",
+
+      discordRoleId: DISCORD_GUILD_ID,
+    });
+
+    await expectNoPresetGroups(pool, fixture.presetId);
+  });
+
+  it("does not allow one guild to add a request group to another guild's preset", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const otherGuildId = await createGuild(pool, OTHER_DISCORD_GUILD_ID);
+
+    // Act
+    const result = await addPresetRequestGroup({
+      guildDatabaseId: otherGuildId,
+
+      presetId: fixture.presetId,
+
+      name: "Foreign Group",
+
+      description: null,
+
+      presetOptionIds: [options.captainId],
+
+      channelId: null,
+
+      notifyRole: null,
+
+      requiresPositiveSignup: false,
+
+      openMinutesBeforeStart: 60,
+
+      closeMinutesBeforeStart: 0,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "preset_not_found",
+    });
+
+    await expectNoPresetGroups(pool, fixture.presetId);
+  });
 });
 
 async function createGuild(
@@ -728,6 +1345,116 @@ async function expectNoPresetOptions(
   expect(count.rows).toEqual([
     {
       count: 0,
+    },
+  ]);
+}
+
+async function createPresetOptions(
+  pool: Pool,
+  presetId: number,
+): Promise<{
+  captainId: number;
+
+  carpenterId: number;
+}> {
+  const result = await pool.query<{
+    id: number;
+
+    key: string;
+  }>(
+    `
+        INSERT INTO
+          "role_request_preset_options" (
+            "preset_id",
+            "key",
+            "display_name",
+            "request_restriction",
+            "sort_order",
+            "active"
+          )
+        VALUES
+          (
+            $1,
+            'captain',
+            'Captain',
+            'open',
+            0,
+            true
+          ),
+          (
+            $1,
+            'carpenter',
+            'Carpenter',
+            'open',
+            1,
+            true
+          )
+        RETURNING
+          "id",
+          "key"
+      `,
+    [presetId],
+  );
+
+  const captainId = result.rows.find((option) => option.key === "captain")?.id;
+
+  const carpenterId = result.rows.find(
+    (option) => option.key === "carpenter",
+  )?.id;
+
+  if (!captainId || !carpenterId) {
+    throw new Error("The integration-test preset options were not created.");
+  }
+
+  return {
+    captainId,
+
+    carpenterId,
+  };
+}
+
+async function expectNoPresetGroups(
+  pool: Pool,
+  presetId: number,
+): Promise<void> {
+  const result = await pool.query<{
+    groups: number;
+
+    mappings: number;
+  }>(
+    `
+        SELECT
+          (
+            SELECT
+              COUNT(*)::int
+            FROM
+              "role_request_preset_groups"
+            WHERE
+              "preset_id" = $1
+          ) AS "groups",
+
+          (
+            SELECT
+              COUNT(*)::int
+            FROM
+              "role_request_preset_group_options"
+            INNER JOIN
+              "role_request_preset_groups"
+            ON
+              "role_request_preset_groups"."id" =
+                "role_request_preset_group_options"."group_id"
+            WHERE
+              "role_request_preset_groups"."preset_id" = $1
+          ) AS "mappings"
+      `,
+    [presetId],
+  );
+
+  expect(result.rows).toEqual([
+    {
+      groups: 0,
+
+      mappings: 0,
     },
   ]);
 }
