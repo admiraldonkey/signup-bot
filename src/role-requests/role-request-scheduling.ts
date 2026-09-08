@@ -3,10 +3,16 @@ import { and, eq, inArray, isNull } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { events, roleRequestGroups, scheduledActions } from "../db/schema.js";
 
+export const ROLE_REQUEST_GROUP_OPEN_ACTION_PREFIX = "role_request_group_open:";
+
 export const ROLE_REQUEST_GROUP_CLOSE_ACTION_PREFIX =
   "role_request_group_close:";
 
-function makeRoleRequestGroupCloseActionKey(groupId: number): string {
+export function makeRoleRequestGroupOpenActionKey(groupId: number): string {
+  return `${ROLE_REQUEST_GROUP_OPEN_ACTION_PREFIX}${groupId}`;
+}
+
+export function makeRoleRequestGroupCloseActionKey(groupId: number): string {
   return `${ROLE_REQUEST_GROUP_CLOSE_ACTION_PREFIX}${groupId}`;
 }
 

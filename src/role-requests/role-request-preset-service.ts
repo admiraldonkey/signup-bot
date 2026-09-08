@@ -16,7 +16,13 @@ import {
   roleRequestPresetOptionQualificationRoles,
   roleRequestPresetOptions,
   roleRequestPresets,
+  scheduledActions,
 } from "../db/schema.js";
+
+import {
+  makeRoleRequestGroupCloseActionKey,
+  makeRoleRequestGroupOpenActionKey,
+} from "./role-request-scheduling.js";
 
 export type InvalidRoleRequestPresetReason =
   | "no_active_options"
@@ -118,9 +124,11 @@ class RoleOptionConflictError extends Error {
  * runtime role-request behaviour is driven entirely by the event-level rows
  * created here.
  *
- * Discord validation/posting belongs to calling adapters and the later
- * scheduled-opening boundary. This service owns only authoritative
- * PostgreSQL state.
+ * Discord validation and posting remain outside this service.
+ *
+ * The durable scheduler actions required to realise the copied group
+ * lifecycle are authoritative PostgreSQL state, so they are created inside
+ * the same transaction as the event-level snapshot.
  */
 export async function applyRoleRequestPresetToEvent(
   input: ApplyRoleRequestPresetInput,
@@ -802,6 +810,47 @@ export async function applyRoleRequestPresetToEvent(
             })),
           );
         }
+
+        /*
+         * Planned preset-derived groups need durable opening and closing
+         * work from the moment they become authoritative event state.
+         *
+         * Creating these actions inside this transaction prevents a process
+         * interruption from committing groups without the scheduler work
+         * needed to realise their lifecycle.
+         *
+         * Store the actual resolved timestamps, not the preset offsets.
+         * From this point onwards the event-level snapshot is authoritative.
+         */
+        await transaction.insert(scheduledActions).values(
+          resolvedGroups.flatMap((group) => {
+            const eventGroupId = requireMappedId(
+              eventGroupIdByPresetGroupId,
+
+              group.id,
+
+              "preset group",
+            );
+
+            return [
+              {
+                eventId: event.id,
+
+                actionKey: makeRoleRequestGroupOpenActionKey(eventGroupId),
+
+                dueAt: group.opensAt,
+              },
+
+              {
+                eventId: event.id,
+
+                actionKey: makeRoleRequestGroupCloseActionKey(eventGroupId),
+
+                dueAt: group.closesAt,
+              },
+            ];
+          }),
+        );
 
         return {
           kind: "applied",

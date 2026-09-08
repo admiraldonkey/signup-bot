@@ -476,6 +476,139 @@ describe("role-request preset application service", () => {
 
       applied_at: expect.any(Date),
     });
+
+    if (!commandGroup || !generalGroup) {
+      throw new Error(
+        "Expected both preset-derived role-request groups to exist.",
+      );
+    }
+
+    /*
+     * Planned preset groups must receive their durable open and close work
+     * in the same authoritative application transaction.
+     *
+     * This ensures a process interruption after preset application cannot
+     * leave a perfectly valid planned group which the scheduler knows
+     * nothing about.
+     */
+    const scheduledActions = await pool.query<{
+      action_key: string;
+
+      due_at: Date;
+
+      status: string;
+
+      attempt_count: number;
+
+      locked_at: Date | null;
+
+      completed_at: Date | null;
+
+      last_error: string | null;
+    }>(
+      `
+        SELECT
+          "action_key",
+          "due_at",
+          "status",
+          "attempt_count",
+          "locked_at",
+          "completed_at",
+          "last_error"
+        FROM
+          "scheduled_actions"
+        WHERE
+          "event_id" = $1
+          AND
+          "action_key" IN (
+            $2,
+            $3,
+            $4,
+            $5
+          )
+      `,
+      [
+        fixture.eventId,
+
+        `role_request_group_open:${commandGroup.id}`,
+
+        `role_request_group_close:${commandGroup.id}`,
+
+        `role_request_group_open:${generalGroup.id}`,
+
+        `role_request_group_close:${generalGroup.id}`,
+      ],
+    );
+
+    expect(scheduledActions.rows).toHaveLength(4);
+
+    expect(scheduledActions.rows).toEqual(
+      expect.arrayContaining([
+        {
+          action_key: `role_request_group_open:${commandGroup.id}`,
+
+          due_at: new Date(EVENT_START.getTime() - 180 * 60_000),
+
+          status: "pending",
+
+          attempt_count: 0,
+
+          locked_at: null,
+
+          completed_at: null,
+
+          last_error: null,
+        },
+
+        {
+          action_key: `role_request_group_close:${commandGroup.id}`,
+
+          due_at: new Date(EVENT_START.getTime() - 60 * 60_000),
+
+          status: "pending",
+
+          attempt_count: 0,
+
+          locked_at: null,
+
+          completed_at: null,
+
+          last_error: null,
+        },
+
+        {
+          action_key: `role_request_group_open:${generalGroup.id}`,
+
+          due_at: new Date(EVENT_START.getTime() - 60 * 60_000),
+
+          status: "pending",
+
+          attempt_count: 0,
+
+          locked_at: null,
+
+          completed_at: null,
+
+          last_error: null,
+        },
+
+        {
+          action_key: `role_request_group_close:${generalGroup.id}`,
+
+          due_at: new Date(EVENT_START.getTime() + 10 * 60_000),
+
+          status: "pending",
+
+          attempt_count: 0,
+
+          locked_at: null,
+
+          completed_at: null,
+
+          last_error: null,
+        },
+      ]),
+    );
   });
 
   it("keeps applied event state independent from later preset edits", async () => {
@@ -745,6 +878,8 @@ describe("role-request preset application service", () => {
       presetGroups: 2,
 
       groupOptions: 3,
+
+      scheduledActions: 4,
     });
   });
 
@@ -1486,6 +1621,8 @@ async function readPresetSnapshotCounts(
   presetGroups: number;
 
   groupOptions: number;
+
+  scheduledActions: number;
 }> {
   const result = await pool.query<{
     applications: number;
@@ -1497,6 +1634,8 @@ async function readPresetSnapshotCounts(
     preset_groups: number;
 
     group_options: number;
+
+    scheduled_actions: number;
   }>(
     `
       SELECT
@@ -1563,7 +1702,21 @@ async function readPresetSnapshotCounts(
             AND
             "role_request_groups"."source_role_request_preset_group_id"
               IS NOT NULL
-        ) AS "group_options"
+        ) AS "group_options",
+
+        (
+          SELECT
+            COUNT(*)::int
+          FROM
+            "scheduled_actions"
+          WHERE
+            "event_id" = $1
+            AND (
+              "action_key" LIKE 'role_request_group_open:%'
+              OR
+              "action_key" LIKE 'role_request_group_close:%'
+            )
+        ) AS "scheduled_actions"
     `,
     [eventId],
   );
@@ -1584,6 +1737,8 @@ async function readPresetSnapshotCounts(
     presetGroups: row.preset_groups,
 
     groupOptions: row.group_options,
+
+    scheduledActions: row.scheduled_actions,
   };
 }
 
@@ -1601,5 +1756,7 @@ async function assertNoPresetSnapshot(
     presetGroups: 0,
 
     groupOptions: 0,
+
+    scheduledActions: 0,
   });
 }
