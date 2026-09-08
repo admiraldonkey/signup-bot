@@ -1158,19 +1158,19 @@ export const roleRequestGroups = pgTable(
       .default(false),
 
     /*
-     * Signed offset relative to event start.
+     * Optional signed opening offset relative to event start.
      *
      *  60 = 60 minutes before start
      *   0 = at event start
      * -10 = 10 minutes after start
      *
-     * Storing the offset as well as the resolved timestamp means an
-     * individual event can be moved later without losing the timing
-     * relationship inherited from its preset.
+     * A non-null value means this group has an event-start-relative opening
+     * rule, such as one snapshotted from a reusable preset.
+     *
+     * Null means the group has no relative opening rule, for example an
+     * administrator-posted group which opened immediately.
      */
-    openMinutesBeforeStart: integer("open_minutes_before_start")
-      .notNull()
-      .default(60),
+    openMinutesBeforeStart: integer("open_minutes_before_start"),
 
     opensAt: timestamp("opens_at", {
       withTimezone: true,
