@@ -45,7 +45,13 @@ import {
   sendOrganiserPendingWarning,
 } from "../events/organiser-notification.js";
 import { reconcileOrganiserPendingWarning } from "../events/organiser-warning-reconciliation.js";
-import { ROLE_REQUEST_GROUP_CLOSE_ACTION_PREFIX } from "../role-requests/role-request-scheduling.js";
+import {
+  ROLE_REQUEST_GROUP_OPEN_ACTION_PREFIX,
+  ROLE_REQUEST_GROUP_CLOSE_ACTION_PREFIX,
+  makeRoleRequestGroupOpenActionKey,
+} from "../role-requests/role-request-scheduling.js";
+
+import { publishRoleRequestGroup } from "../role-requests/role-request-group-publication.js";
 import {
   refreshRoleRequestGroupMessage,
   refreshRoleRequestMessages,
@@ -421,6 +427,23 @@ async function executeAction(
       client,
       action.eventId,
       sourceAssignmentId,
+    );
+
+    return;
+  }
+
+  if (action.actionKey.startsWith(ROLE_REQUEST_GROUP_OPEN_ACTION_PREFIX)) {
+    const groupId = parseActionId(
+      action.actionKey,
+      ROLE_REQUEST_GROUP_OPEN_ACTION_PREFIX,
+    );
+
+    await executeRoleRequestGroupOpen(
+      client,
+      action.id,
+      action.eventId,
+      groupId,
+      action.attemptCount,
     );
 
     return;
@@ -1629,6 +1652,234 @@ async function executeOrganiserCoverRequest(
       delivery,
     },
   });
+}
+
+async function executeRoleRequestGroupOpen(
+  client: Client<true>,
+  actionId: number,
+  eventId: number,
+  groupId: number,
+  attemptCount: number,
+): Promise<void> {
+  const [group] = await db
+    .select({
+      id: roleRequestGroups.id,
+
+      name: roleRequestGroups.name,
+
+      eventId: roleRequestGroups.eventId,
+
+      eventName: events.name,
+
+      guildDatabaseId: events.ownerGuildId,
+
+      discordGuildId: discordGuilds.discordGuildId,
+    })
+    .from(roleRequestGroups)
+    .innerJoin(events, eq(events.id, roleRequestGroups.eventId))
+    .innerJoin(discordGuilds, eq(discordGuilds.id, events.ownerGuildId))
+    .where(
+      and(
+        eq(roleRequestGroups.id, groupId),
+
+        /*
+         * The durable action carries its owning event separately from the
+         * group ID embedded in the action key.
+         *
+         * Requiring both to agree treats mismatched durable state as
+         * obsolete rather than accidentally publishing another event's
+         * group.
+         */
+        eq(roleRequestGroups.eventId, eventId),
+      ),
+    )
+    .limit(1);
+
+  if (!group) {
+    return;
+  }
+
+  const guild = await client.guilds.fetch(group.discordGuildId);
+
+  const result = await publishRoleRequestGroup(guild, group.id);
+
+  if (!result.ok) {
+    /*
+     * These states mean there is no remaining opening work for this
+     * particular durable action.
+     *
+     * Another operation may already have published the group, or the parent
+     * event/group may have become terminal while this worker was active.
+     */
+    if (
+      result.reason === "not-found" ||
+      result.reason === "already-posted" ||
+      result.reason === "inactive"
+    ) {
+      return;
+    }
+
+    /*
+     * The durable action may have been claimed using an old dueAt shortly
+     * before an event edit moved the group's authoritative opening later.
+     *
+     * Restore this same action to pending at the current opensAt rather than
+     * completing it or treating the edit as a delivery failure.
+     *
+     * Reset attemptCount because an ordinary schedule edit must not consume
+     * the five-attempt failure budget.
+     */
+    if (result.reason === "not-open-yet") {
+      const now = new Date();
+
+      await db
+        .update(scheduledActions)
+        .set({
+          status: "pending",
+
+          dueAt: result.opensAt,
+
+          attemptCount: 0,
+
+          lockedAt: null,
+
+          completedAt: null,
+
+          lastError: null,
+
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(scheduledActions.id, actionId),
+
+            eq(scheduledActions.eventId, eventId),
+
+            eq(
+              scheduledActions.actionKey,
+              makeRoleRequestGroupOpenActionKey(groupId),
+            ),
+
+            /*
+             * Only the worker which still owns this exact processing attempt
+             * may reschedule it.
+             *
+             * If stale recovery or another operation has already replaced
+             * this state, this UPDATE affects zero rows and the newer state
+             * remains authoritative.
+             */
+            eq(scheduledActions.status, "processing"),
+
+            eq(scheduledActions.attemptCount, attemptCount),
+          ),
+        );
+
+      console.log(
+        `Rescheduled role-request group ${group.id} opening to ${result.opensAt.toISOString()}.`,
+      );
+
+      return;
+    }
+
+    /*
+     * Once the request window has expired, retrying cannot make the missed
+     * opening useful again.
+     *
+     * Likewise, a deleted/unavailable snapshotted destination must not be
+     * silently replaced with the guild's current default channel. The event
+     * snapshot remains authoritative.
+     *
+     * Record either condition and let the outer scheduler loop complete the
+     * action normally rather than burning through retry attempts.
+     */
+    if (
+      result.reason === "window-expired" ||
+      result.reason === "channel-unavailable"
+    ) {
+      await writeAuditLog({
+        guildId: group.guildDatabaseId,
+
+        guild,
+
+        actorUserId: null,
+
+        action: "scheduler.role_group_open",
+
+        outcome: "failure",
+
+        summary:
+          result.reason === "window-expired"
+            ? `Could not automatically open role-request group "${group.name}" (#${group.id}) for "${group.eventName}" (#${group.eventId}) because its request window had already expired.`
+            : `Could not automatically open role-request group "${group.name}" (#${group.id}) for "${group.eventName}" (#${group.eventId}) because its snapshotted Discord channel was unavailable.`,
+
+        targetType: "role_request_group",
+
+        targetId: String(group.id),
+
+        details:
+          result.reason === "channel-unavailable"
+            ? {
+                reason: result.reason,
+
+                channelId: result.channelId,
+              }
+            : {
+                reason: result.reason,
+              },
+      });
+
+      console.warn(
+        result.reason === "window-expired"
+          ? `Role-request group ${group.id} was not opened because its request window had already expired.`
+          : `Role-request group ${group.id} was not opened because its snapshotted channel ${result.channelId} was unavailable.`,
+      );
+
+      return;
+    }
+
+    /*
+     * Exhaustiveness guard.
+     *
+     * If publication gains another permanent result in future, TypeScript
+     * should force the scheduler to decide explicitly whether that result is
+     * obsolete, retryable, reschedulable or auditable.
+     */
+    const exhaustiveResult: never = result;
+
+    throw new Error(
+      `Unhandled role-request publication result: ${JSON.stringify(
+        exhaustiveResult,
+      )}`,
+    );
+  }
+
+  await writeAuditLog({
+    guildId: group.guildDatabaseId,
+
+    guild,
+
+    actorUserId: null,
+
+    action: "scheduler.role_group_open",
+
+    outcome: "success",
+
+    summary: `Automatically opened role-request group "${group.name}" (#${group.id}) for "${group.eventName}" (#${group.eventId}).`,
+
+    targetType: "role_request_group",
+
+    targetId: String(group.id),
+
+    details: {
+      messageUrl: result.messageUrl,
+
+      notification: result.notification,
+    },
+  });
+
+  console.log(
+    `Opened role-request group ${group.id} for event ${group.eventId}.`,
+  );
 }
 
 async function executeRoleRequestGroupClose(

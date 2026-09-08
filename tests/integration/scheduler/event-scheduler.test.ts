@@ -10,6 +10,15 @@ import {
   it,
   vi,
 } from "vitest";
+
+const roleRequestPublicationMocks = vi.hoisted(() => ({
+  publishRoleRequestGroup: vi.fn(),
+}));
+
+vi.mock("../../../src/role-requests/role-request-group-publication.js", () => ({
+  publishRoleRequestGroup: roleRequestPublicationMocks.publishRoleRequestGroup,
+}));
+
 const roleRequestMessageMocks = vi.hoisted(() => ({
   refreshRoleRequestGroupMessage: vi.fn().mockResolvedValue(undefined),
 
@@ -88,6 +97,8 @@ describe("event scheduler", () => {
   beforeEach(async () => {
     stopEventScheduler();
     await resetIntegrationDatabase(pool);
+
+    roleRequestPublicationMocks.publishRoleRequestGroup.mockReset();
 
     roleRequestMessageMocks.refreshRoleRequestGroupMessage.mockClear();
     roleRequestMessageMocks.refreshRoleRequestMessages.mockClear();
@@ -280,6 +291,513 @@ describe("event scheduler", () => {
       [String(eventId)],
     );
 
+    expect(auditResult.rows).toEqual([]);
+  });
+
+  it("publishes a due planned role-request group and completes its opening action", async () => {
+    // Arrange
+    const fixture = await createEventWithDueRoleGroupOpen(pool);
+
+    roleRequestPublicationMocks.publishRoleRequestGroup.mockResolvedValue({
+      ok: true,
+
+      eventId: fixture.eventId,
+
+      groupId: fixture.groupId,
+
+      messageId: "300000000000000020",
+
+      messageUrl: "https://discord.test/messages/role-request-open",
+
+      notification: {
+        kind: "pinged",
+
+        roleId: "300000000000000021",
+
+        roleNameSnapshot: "Naval",
+      },
+    });
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    expect(
+      roleRequestPublicationMocks.publishRoleRequestGroup,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      roleRequestPublicationMocks.publishRoleRequestGroup,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+      fixture.groupId,
+    );
+
+    const actionResult = await pool.query<{
+      status: string;
+
+      attempt_count: number;
+
+      locked_at: Date | null;
+
+      completed_at: Date | null;
+
+      last_error: string | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "attempt_count",
+          "locked_at",
+          "completed_at",
+          "last_error"
+        FROM
+          "scheduled_actions"
+        WHERE
+          "id" = $1
+      `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+
+      attempt_count: 1,
+
+      locked_at: null,
+
+      last_error: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    const auditResult = await pool.query<{
+      action: string;
+
+      outcome: string;
+
+      details: Record<string, unknown> | null;
+    }>(
+      `
+        SELECT
+          "action",
+          "outcome",
+          "details"
+        FROM
+          "audit_logs"
+        WHERE
+          "target_type" = 'role_request_group'
+          AND
+          "target_id" = $1
+          AND
+          "action" = 'scheduler.role_group_open'
+      `,
+      [String(fixture.groupId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "scheduler.role_group_open",
+
+        outcome: "success",
+
+        details: {
+          messageUrl: "https://discord.test/messages/role-request-open",
+
+          notification: {
+            kind: "pinged",
+
+            roleId: "300000000000000021",
+
+            roleNameSnapshot: "Naval",
+          },
+        },
+      },
+    ]);
+  });
+
+  it("reschedules a stale due role-request opening action when the group opening moved later", async () => {
+    // Arrange
+    const opensAt = new Date(Date.now() + 30 * 60_000);
+
+    const fixture = await createEventWithDueRoleGroupOpen(pool, {
+      opensAt,
+    });
+
+    roleRequestPublicationMocks.publishRoleRequestGroup.mockResolvedValue({
+      ok: false,
+
+      reason: "not-open-yet",
+
+      eventId: fixture.eventId,
+
+      groupId: fixture.groupId,
+
+      opensAt,
+    });
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionDueAt(pool, fixture.actionId, opensAt);
+
+    stopEventScheduler();
+
+    // Assert
+    expect(
+      roleRequestPublicationMocks.publishRoleRequestGroup,
+    ).toHaveBeenCalledTimes(1);
+
+    const actionResult = await pool.query<{
+      status: string;
+
+      due_at: Date;
+
+      attempt_count: number;
+
+      locked_at: Date | null;
+
+      completed_at: Date | null;
+
+      last_error: string | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "due_at",
+          "attempt_count",
+          "locked_at",
+          "completed_at",
+          "last_error"
+        FROM
+          "scheduled_actions"
+        WHERE
+          "id" = $1
+      `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toEqual([
+      {
+        status: "pending",
+
+        due_at: opensAt,
+
+        /*
+         * Moving an event is not a failed delivery attempt.
+         *
+         * Resetting the attempt counter ensures ordinary schedule edits
+         * cannot exhaust the scheduler retry budget.
+         */
+        attempt_count: 0,
+
+        locked_at: null,
+
+        completed_at: null,
+
+        last_error: null,
+      },
+    ]);
+
+    const auditResult = await pool.query<{
+      action: string;
+
+      outcome: string;
+    }>(
+      `
+        SELECT
+          "action",
+          "outcome"
+        FROM
+          "audit_logs"
+        WHERE
+          "target_type" = 'role_request_group'
+          AND
+          "target_id" = $1
+          AND
+          "action" = 'scheduler.role_group_open'
+      `,
+      [String(fixture.groupId)],
+    );
+
+    /*
+     * This was merely rescheduled to its current authoritative opening
+     * time. It was neither a successful opening nor a failure.
+     */
+    expect(auditResult.rows).toEqual([]);
+  });
+
+  it("completes a role-request opening action with a failure audit when its snapshotted channel is unavailable", async () => {
+    // Arrange
+    const fixture = await createEventWithDueRoleGroupOpen(pool);
+
+    roleRequestPublicationMocks.publishRoleRequestGroup.mockResolvedValue({
+      ok: false,
+
+      reason: "channel-unavailable",
+
+      eventId: fixture.eventId,
+
+      groupId: fixture.groupId,
+
+      channelId: "300000000000000003",
+    });
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    expect(
+      roleRequestPublicationMocks.publishRoleRequestGroup,
+    ).toHaveBeenCalledTimes(1);
+
+    const actionResult = await pool.query<{
+      status: string;
+
+      attempt_count: number;
+
+      completed_at: Date | null;
+
+      last_error: string | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "attempt_count",
+          "completed_at",
+          "last_error"
+        FROM
+          "scheduled_actions"
+        WHERE
+          "id" = $1
+      `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+
+      attempt_count: 1,
+
+      last_error: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    const auditResult = await pool.query<{
+      action: string;
+
+      outcome: string;
+
+      details: Record<string, unknown> | null;
+    }>(
+      `
+        SELECT
+          "action",
+          "outcome",
+          "details"
+        FROM
+          "audit_logs"
+        WHERE
+          "target_type" = 'role_request_group'
+          AND
+          "target_id" = $1
+          AND
+          "action" = 'scheduler.role_group_open'
+      `,
+      [String(fixture.groupId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "scheduler.role_group_open",
+
+        outcome: "failure",
+
+        details: {
+          reason: "channel-unavailable",
+
+          channelId: "300000000000000003",
+        },
+      },
+    ]);
+  });
+
+  it("completes an obsolete role-request opening action without claiming a successful opening", async () => {
+    // Arrange
+    const fixture = await createEventWithDueRoleGroupOpen(pool);
+
+    roleRequestPublicationMocks.publishRoleRequestGroup.mockResolvedValue({
+      ok: false,
+
+      reason: "already-posted",
+
+      eventId: fixture.eventId,
+
+      groupId: fixture.groupId,
+
+      messageId: "300000000000000022",
+    });
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    expect(
+      roleRequestPublicationMocks.publishRoleRequestGroup,
+    ).toHaveBeenCalledTimes(1);
+
+    const auditResult = await pool.query<{
+      action: string;
+
+      outcome: string;
+    }>(
+      `
+        SELECT
+          "action",
+          "outcome"
+        FROM
+          "audit_logs"
+        WHERE
+          "target_type" = 'role_request_group'
+          AND
+          "target_id" = $1
+          AND
+          "action" = 'scheduler.role_group_open'
+      `,
+      [String(fixture.groupId)],
+    );
+
+    expect(auditResult.rows).toEqual([]);
+  });
+
+  it("retries a role-request opening action after a transient publication failure", async () => {
+    // Arrange
+    const fixture = await createEventWithDueRoleGroupOpen(pool);
+
+    roleRequestPublicationMocks.publishRoleRequestGroup.mockRejectedValue(
+      new Error("Temporary Discord publication failure."),
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionAttemptCount(pool, fixture.actionId, 1);
+
+    /*
+     * The first retry is one minute into the future, so once the action has
+     * returned to pending the scheduler cannot immediately claim it again.
+     */
+    await waitForScheduledActionStatus(pool, fixture.actionId, "pending");
+
+    stopEventScheduler();
+
+    // Assert
+    expect(
+      roleRequestPublicationMocks.publishRoleRequestGroup,
+    ).toHaveBeenCalledTimes(1);
+
+    const actionResult = await pool.query<{
+      status: string;
+
+      due_at: Date;
+
+      attempt_count: number;
+
+      locked_at: Date | null;
+
+      completed_at: Date | null;
+
+      last_error: string | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "due_at",
+          "attempt_count",
+          "locked_at",
+          "completed_at",
+          "last_error"
+        FROM
+          "scheduled_actions"
+        WHERE
+          "id" = $1
+      `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect(actionResult.rows[0]).toMatchObject({
+      status: "pending",
+
+      attempt_count: 1,
+
+      locked_at: null,
+
+      completed_at: null,
+    });
+
+    expect(actionResult.rows[0]?.last_error).toContain(
+      "Temporary Discord publication failure.",
+    );
+
+    expect(actionResult.rows[0]?.due_at.getTime()).toBeGreaterThan(Date.now());
+
+    const auditResult = await pool.query<{
+      action: string;
+
+      outcome: string;
+    }>(
+      `
+        SELECT
+          "action",
+          "outcome"
+        FROM
+          "audit_logs"
+        WHERE
+          "target_type" = 'role_request_group'
+          AND
+          "target_id" = $1
+          AND
+          "action" = 'scheduler.role_group_open'
+      `,
+      [String(fixture.groupId)],
+    );
+
+    /*
+     * Scheduler retry state already records the transient error. Do not add
+     * a persistent failure audit until the operation is known to be
+     * permanently undeliverable.
+     */
     expect(auditResult.rows).toEqual([]);
   });
 
@@ -3793,6 +4311,78 @@ async function waitForBlockedSchedulerOrganiserAssignmentUpdate(
   );
 }
 
+async function waitForScheduledActionDueAt(
+  pool: Pool,
+  actionId: number,
+  expectedDueAt: Date,
+): Promise<void> {
+  const timeoutAt = Date.now() + 3_000;
+
+  while (Date.now() < timeoutAt) {
+    const result = await pool.query<{
+      due_at: Date;
+    }>(
+      `
+          SELECT
+            "due_at"
+          FROM
+            "scheduled_actions"
+          WHERE
+            "id" = $1
+        `,
+      [actionId],
+    );
+
+    if (result.rows[0]?.due_at.getTime() === expectedDueAt.getTime()) {
+      return;
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+
+  throw new Error(
+    `Timed out waiting for scheduled action #${actionId} to move to ${expectedDueAt.toISOString()}.`,
+  );
+}
+
+async function waitForScheduledActionAttemptCount(
+  pool: Pool,
+  actionId: number,
+  expectedAttemptCount: number,
+): Promise<void> {
+  const timeoutAt = Date.now() + 3_000;
+
+  while (Date.now() < timeoutAt) {
+    const result = await pool.query<{
+      attempt_count: number;
+    }>(
+      `
+          SELECT
+            "attempt_count"
+          FROM
+            "scheduled_actions"
+          WHERE
+            "id" = $1
+        `,
+      [actionId],
+    );
+
+    if (result.rows[0]?.attempt_count === expectedAttemptCount) {
+      return;
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+
+  throw new Error(
+    `Timed out waiting for scheduled action #${actionId} to reach attempt count ${expectedAttemptCount}.`,
+  );
+}
+
 async function waitForScheduledActionStatus(
   pool: Pool,
   actionId: number,
@@ -3865,6 +4455,221 @@ async function waitForScheduledActionAttemptSettled(
   throw new Error(
     `Timed out waiting for scheduled action #${actionId} attempt ${expectedAttemptCount} to settle.`,
   );
+}
+
+async function createEventWithDueRoleGroupOpen(
+  pool: Pool,
+  options: {
+    opensAt?: Date;
+  } = {},
+): Promise<{
+  eventId: number;
+
+  groupId: number;
+
+  actionId: number;
+
+  opensAt: Date;
+}> {
+  const opensAt = options.opensAt ?? new Date(Date.now() - 60_000);
+
+  const guildResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO
+        "discord_guilds" (
+          "discord_guild_id",
+          "name"
+        )
+      VALUES (
+        $1,
+        'Scheduler Role Request Opening Test Guild'
+      )
+      RETURNING
+        "id"
+    `,
+    [DISCORD_GUILD_ID],
+  );
+
+  const guildId = guildResult.rows[0]?.id;
+
+  if (!guildId) {
+    throw new Error(
+      "The role-request opening integration-test guild was not created.",
+    );
+  }
+
+  /*
+   * Keep bot-log delivery disabled so scheduler audit assertions remain
+   * entirely database-backed.
+   */
+  await pool.query(
+    `
+      INSERT INTO
+        "guild_settings" (
+          "guild_id"
+        )
+      VALUES (
+        $1
+      )
+    `,
+    [guildId],
+  );
+
+  const eventTypeResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO
+          "event_types" (
+            "owner_guild_id",
+            "code",
+            "name",
+            "role_requests_enabled"
+          )
+        VALUES (
+          $1,
+          'naval',
+          'Naval Event',
+          true
+        )
+        RETURNING
+          "id"
+      `,
+    [guildId],
+  );
+
+  const eventTypeId = eventTypeResult.rows[0]?.id;
+
+  if (!eventTypeId) {
+    throw new Error(
+      "The role-request opening integration-test event type was not created.",
+    );
+  }
+
+  const eventResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO
+        "events" (
+          "owner_guild_id",
+          "event_type_id",
+          "name",
+          "starts_at",
+          "signups_enabled",
+          "published_at",
+          "status",
+          "created_by_user_id"
+        )
+      VALUES (
+        $1,
+        $2,
+        'Role Request Opening Scheduler Test Event',
+        NOW() + INTERVAL '2 hours',
+        true,
+        NOW() - INTERVAL '1 hour',
+        'open',
+        $3
+      )
+      RETURNING
+        "id"
+    `,
+    [guildId, eventTypeId, ADMIN_USER_ID],
+  );
+
+  const eventId = eventResult.rows[0]?.id;
+
+  if (!eventId) {
+    throw new Error(
+      "The role-request opening integration-test event was not created.",
+    );
+  }
+
+  const groupResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO
+        "role_request_groups" (
+          "event_id",
+          "name",
+          "channel_id",
+          "message_id",
+          "requires_positive_signup",
+          "open_minutes_before_start",
+          "opens_at",
+          "close_minutes_before_start",
+          "closes_at",
+          "closed_at",
+          "created_by_user_id"
+        )
+      VALUES (
+        $1,
+        'Scheduled Naval Roles',
+        '300000000000000003',
+        NULL,
+        false,
+        60,
+        $2,
+        0,
+        NOW() + INTERVAL '2 hours',
+        NULL,
+        $3
+      )
+      RETURNING
+        "id"
+    `,
+    [eventId, opensAt, ADMIN_USER_ID],
+  );
+
+  const groupId = groupResult.rows[0]?.id;
+
+  if (!groupId) {
+    throw new Error(
+      "The scheduled role-request opening test group was not created.",
+    );
+  }
+
+  const actionResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO
+        "scheduled_actions" (
+          "event_id",
+          "action_key",
+          "due_at",
+          "status"
+        )
+      VALUES (
+        $1,
+        $2,
+        NOW() - INTERVAL '1 minute',
+        'pending'
+      )
+      RETURNING
+        "id"
+    `,
+    [eventId, `role_request_group_open:${groupId}`],
+  );
+
+  const actionId = actionResult.rows[0]?.id;
+
+  if (!actionId) {
+    throw new Error("The role-request group opening action was not created.");
+  }
+
+  return {
+    eventId,
+
+    groupId,
+
+    actionId,
+
+    opensAt,
+  };
 }
 
 async function createEventWithDueRoleGroupClose(
