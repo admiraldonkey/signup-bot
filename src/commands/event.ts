@@ -15,7 +15,6 @@ import { db } from "../db/client.js";
 import {
   attendanceResponses,
   eventAudiences,
-  eventPingRoles,
   events,
   eventTypes,
   scheduledActions,
@@ -38,6 +37,7 @@ import {
   publishStoredEvent,
   type EventPublicationResult,
 } from "../events/event-publication.js";
+import { createStoredEvent } from "../events/event-creation-service.js";
 import { publishEvent } from "./event-publish.js";
 import {
   addEventReminder,
@@ -611,201 +611,66 @@ async function createEvent(
     return;
   }
 
-  const creationResult = await db.transaction(async (transaction) => {
-    const [event] = await transaction
-      .insert(events)
-      .values({
-        templateId: null,
+  const creationResult = await createStoredEvent({
+    guildDatabaseId: configuration.guildId,
 
-        ownerGuildId: configuration.guildId,
+    /*
+     * /event create produces a one-off event.
+     *
+     * Template-generated occurrences will pass their source template ID
+     * through the same service later.
+     */
+    templateId: null,
 
-        eventTypeId: eventType.id,
+    eventTypeId: eventType.id,
 
-        audienceId: audience.id,
+    audienceId: audience.id,
 
-        timezone: eventTimezone,
+    timezone: eventTimezone,
 
-        showDetailedDeadline,
+    showDetailedDeadline,
 
-        name,
+    name,
 
-        description,
+    description,
 
-        startsAt: parsedStart.value.toJSDate(),
+    startsAt: parsedStart.value.toJSDate(),
 
-        endsAt: endsAt.toJSDate(),
+    endsAt: endsAt.toJSDate(),
 
-        /*
-         * An unpublished event exists internally but attendance has
-         * not yet opened to members.
-         */
-        attendanceOpensAt: null,
+    signupsEnabled,
 
-        signupsEnabled,
+    attendanceClosesAt: attendanceClosesAt?.toJSDate() ?? null,
 
-        attendanceClosesAt: attendanceClosesAt?.toJSDate() ?? null,
+    publishMinutesBeforeStart,
 
-        roleRequestsOpenAt: null,
+    publicationChannelId: configuration.attendanceChannelId,
 
-        publishedAt: null,
+    scheduledPublicationAt,
 
-        publishMinutesBeforeStart,
+    createdByUserId: interaction.user.id,
 
-        publicationChannelId: configuration.attendanceChannelId,
+    pingRoles: pingRoles.map((role) => ({
+      discordRoleId: role.id,
 
-        status: "scheduled",
+      roleName: role.name,
+    })),
 
-        createdByUserId: interaction.user.id,
-
-        updatedAt: new Date(),
-      })
-      .returning({
-        id: events.id,
-
-        timezone: events.timezone,
-
-        showDetailedDeadline: events.showDetailedDeadline,
-
-        name: events.name,
-
-        startsAt: events.startsAt,
-
-        signupsEnabled: events.signupsEnabled,
-
-        attendanceClosesAt: events.attendanceClosesAt,
-      });
-
-    if (!event) {
-      throw new Error("The database did not return the created event.");
-    }
-
-    await transaction.insert(eventPingRoles).values(
-      pingRoles.map((role, index) => ({
-        eventId: event.id,
-
-        discordRoleId: role.id,
-
-        roleName: role.name,
-
-        sortOrder: index,
-      })),
-    );
-
-    if (primaryOrganiserMember) {
-      const [assignment] = await transaction
-        .insert(eventOrganiserAssignments)
-        .values({
-          eventId: event.id,
-
-          slot: "primary",
-
+    primaryOrganiser: primaryOrganiserMember
+      ? {
           discordUserId: primaryOrganiserMember.id,
 
           displayNameSnapshot: primaryOrganiserMember.displayName,
+        }
+      : null,
 
-          status: "pending",
+    backupOrganiser: backupOrganiserMember
+      ? {
+          discordUserId: backupOrganiserMember.id,
 
-          isCurrent: true,
-
-          assignedByUserId: interaction.user.id,
-
-          /*
-           * Organiser responsibility begins when the event becomes public,
-           * not merely when its internal event record is created.
-           *
-           * publishStoredEvent() activates this assignment and creates the
-           * warning/timeout actions.
-           */
-          activatedAt: null,
-
-          responseDeadlineAt: null,
-
-          updatedAt: new Date(),
-        })
-        .returning({
-          id: eventOrganiserAssignments.id,
-        });
-
-      if (!assignment) {
-        throw new Error(
-          "The database did not return the primary organiser assignment.",
-        );
-      }
-    }
-
-    if (backupOrganiserMember) {
-      await transaction.insert(eventOrganiserAssignments).values({
-        eventId: event.id,
-
-        slot: "backup",
-
-        discordUserId: backupOrganiserMember.id,
-
-        displayNameSnapshot: backupOrganiserMember.displayName,
-
-        status: "pending",
-
-        isCurrent: true,
-
-        assignedByUserId: interaction.user.id,
-
-        activatedAt: null,
-
-        responseDeadlineAt: null,
-
-        updatedAt: new Date(),
-      });
-    }
-
-    if (scheduledPublicationAt) {
-      await transaction.insert(scheduledActions).values({
-        eventId: event.id,
-
-        actionKey: "publish_event",
-
-        dueAt: scheduledPublicationAt,
-
-        status: "pending",
-
-        attemptCount: 0,
-
-        updatedAt: new Date(),
-      });
-    }
-
-    if (signupsEnabled && attendanceClosesAt) {
-      await transaction.insert(scheduledActions).values({
-        eventId: event.id,
-
-        actionKey: "close_attendance",
-
-        dueAt: attendanceClosesAt.toJSDate(),
-
-        status: "pending",
-
-        attemptCount: 0,
-
-        updatedAt: new Date(),
-      });
-    }
-
-    await transaction.insert(scheduledActions).values({
-      eventId: event.id,
-
-      actionKey: "complete_event",
-
-      dueAt: endsAt.toJSDate(),
-
-      status: "pending",
-
-      attemptCount: 0,
-
-      updatedAt: new Date(),
-    });
-
-    return {
-      event,
-    };
+          displayNameSnapshot: backupOrganiserMember.displayName,
+        }
+      : null,
   });
 
   const createdEvent = creationResult.event;
