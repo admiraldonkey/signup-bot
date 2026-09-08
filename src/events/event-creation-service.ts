@@ -1,9 +1,11 @@
+import { eq } from "drizzle-orm";
 import { db } from "../db/client.js";
 
 import {
   eventOrganiserAssignments,
   eventPingRoles,
   events,
+  guildSettings,
   scheduledActions,
 } from "../db/schema.js";
 
@@ -59,23 +61,31 @@ export type CreateStoredEventInput = {
   backupOrganiser: EventOrganiserSnapshot | null;
 };
 
-export type CreateStoredEventResult = {
-  event: {
-    id: number;
+type CreatedStoredEvent = {
+  id: number;
 
-    timezone: string;
+  timezone: string;
 
-    showDetailedDeadline: boolean;
+  showDetailedDeadline: boolean;
 
-    name: string;
+  name: string;
 
-    startsAt: Date;
+  startsAt: Date;
 
-    signupsEnabled: boolean;
+  signupsEnabled: boolean;
 
-    attendanceClosesAt: Date | null;
-  };
+  attendanceClosesAt: Date | null;
 };
+
+export type CreateStoredEventResult =
+  | {
+      kind: "created";
+
+      event: CreatedStoredEvent;
+    }
+  | {
+      kind: "organisers_disabled";
+    };
 
 /**
  * Creates the authoritative unpublished database representation of an event.
@@ -115,6 +125,34 @@ export async function createStoredEvent(
   }
 
   return db.transaction(async (transaction) => {
+    /*
+     * Creating dormant organiser assignments is still an organiser-domain
+     * mutation.
+     *
+     * Participate in the same shared/exclusive feature-lock contract as the
+     * other organiser services so a concurrent parent-feature disable cannot
+     * be overtaken.
+     *
+     * Events without organiser defaults do not need this lock and remain
+     * creatable while the organiser subsystem is disabled.
+     */
+    if (input.primaryOrganiser || input.backupOrganiser) {
+      const [featureSettings] = await transaction
+        .select({
+          organisersEnabled: guildSettings.organisersEnabled,
+        })
+        .from(guildSettings)
+        .where(eq(guildSettings.guildId, input.guildDatabaseId))
+        .limit(1)
+        .for("share");
+
+      if (!featureSettings?.organisersEnabled) {
+        return {
+          kind: "organisers_disabled",
+        } as const;
+      }
+    }
+
     const now = new Date();
 
     const [event] = await transaction
@@ -312,7 +350,9 @@ export async function createStoredEvent(
     });
 
     return {
+      kind: "created",
+
       event,
-    };
+    } as const;
   });
 }

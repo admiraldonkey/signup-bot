@@ -247,11 +247,7 @@ async function createEvent(
     return;
   }
 
-  if (
-    !configuration.eventAdminRoleId ||
-    !configuration.attendanceChannelId ||
-    !configuration.roleRequestChannelId
-  ) {
+  if (!configuration.eventAdminRoleId || !configuration.attendanceChannelId) {
     await interaction.editReply(
       "This server's event defaults are incomplete. " +
         "Run `/setup configure` first.",
@@ -672,6 +668,18 @@ async function createEvent(
         }
       : null,
   });
+
+  if (creationResult.kind === "organisers_disabled") {
+    await interaction.editReply(
+      [
+        "Event organisers are currently disabled for this server.",
+        "",
+        "Remove the organiser selections or enable `Organisers` through `/setup features` first.",
+      ].join("\n"),
+    );
+
+    return;
+  }
 
   const createdEvent = creationResult.event;
 
