@@ -1176,6 +1176,56 @@ export const commandDefinitions = [
     ),
 
   new SlashCommandBuilder()
+    .setName("role-preset")
+    .setDescription("Creates and inspects reusable event role-request presets.")
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("create")
+        .setDescription("Creates an empty reusable role-request preset.")
+        .addStringOption((option) =>
+          option
+            .setName("name")
+            .setDescription("Preset name, such as Naval or Linebattle.")
+            .setMinLength(1)
+            .setMaxLength(100)
+            .setRequired(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("description")
+            .setDescription("Optional description of this preset.")
+            .setMaxLength(1000),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("list")
+        .setDescription("Lists reusable role-request presets for this server.")
+        .addBooleanOption((option) =>
+          option
+            .setName("include-inactive")
+            .setDescription("Also show inactive presets."),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("show")
+        .setDescription(
+          "Shows the complete definition of one role-request preset.",
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("preset-id")
+            .setDescription("Preset ID shown by /role-preset list.")
+            .setMinValue(1)
+            .setRequired(true),
+        ),
+    ),
+
+  new SlashCommandBuilder()
     .setName("attendance")
     .setDescription("Records and audits actual event attendance.")
 
