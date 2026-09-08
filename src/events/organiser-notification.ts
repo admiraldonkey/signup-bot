@@ -311,7 +311,7 @@ export async function sendOrganiserPendingWarning(input: {
 
 export type CoverRequestDelivery = "pinged" | "posted_without_ping" | "failed";
 
-export async function sendOrganiserCoverRequest(input: {
+type OrganiserCoverMessageInput = {
   guild: Guild;
 
   eventId: number;
@@ -321,7 +321,15 @@ export async function sendOrganiserCoverRequest(input: {
   eventAdminChannelId: string | null;
 
   eventOrganiserRoleId: string | null;
-}): Promise<CoverRequestDelivery> {
+
+  heading: string;
+
+  description: string;
+};
+
+async function sendOrganiserCoverMessage(
+  input: OrganiserCoverMessageInput,
+): Promise<CoverRequestDelivery> {
   if (!input.eventAdminChannelId || !input.eventOrganiserRoleId) {
     return "failed";
   }
@@ -356,11 +364,11 @@ export async function sendOrganiserCoverRequest(input: {
 
         "",
 
-        "🚨 **Event organiser cover required**",
+        input.heading,
 
         "",
 
-        `**${input.eventName}** (#${input.eventId}) no longer has an available assigned organiser.`,
+        input.description,
 
         "An eligible Event Organiser can claim responsibility below.",
       ].join("\n"),
@@ -389,20 +397,56 @@ export async function sendOrganiserCoverRequest(input: {
     return canPingRole ? "pinged" : "posted_without_ping";
   } catch (error: unknown) {
     /*
-     * The configured Event Administration channel may have been deleted
-     * before it was fetched or while the cover request send was in flight.
-     *
-     * Discord has explicitly told us that the destination no longer exists,
-     * so retrying against the same configured channel is not useful.
+     * A deleted Event Administration channel is a permanently unusable
+     * destination rather than a transient scheduler failure.
      */
     if (isDiscordErrorCode(error, 10003)) {
       return "failed";
     }
 
     /*
-     * Unexpected Discord/network failures may be temporary. Preserve them so
-     * the scheduler can apply its normal retry/backoff behaviour.
+     * Unexpected Discord/network failures may be temporary.
      */
     throw error;
   }
+}
+
+export async function sendOrganiserCoverRequest(input: {
+  guild: Guild;
+
+  eventId: number;
+
+  eventName: string;
+
+  eventAdminChannelId: string | null;
+
+  eventOrganiserRoleId: string | null;
+}): Promise<CoverRequestDelivery> {
+  return sendOrganiserCoverMessage({
+    ...input,
+
+    heading: "🚨 **Event organiser cover required**",
+
+    description: `**${input.eventName}** (#${input.eventId}) no longer has an available assigned organiser.`,
+  });
+}
+
+export async function sendOrganiserMissingAtStartAlert(input: {
+  guild: Guild;
+
+  eventId: number;
+
+  eventName: string;
+
+  eventAdminChannelId: string | null;
+
+  eventOrganiserRoleId: string | null;
+}): Promise<CoverRequestDelivery> {
+  return sendOrganiserCoverMessage({
+    ...input,
+
+    heading: "🚨 **Event has started without an organiser**",
+
+    description: `**${input.eventName}** (#${input.eventId}) has started and still has no confirmed organiser.`,
+  });
 }

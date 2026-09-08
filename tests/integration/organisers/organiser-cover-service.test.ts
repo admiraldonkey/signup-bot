@@ -236,40 +236,65 @@ describe("organiser cover service", () => {
     ]);
   });
 
-  it("does not claim cover after the event has started", async () => {
+  it("allows organiser cover to be claimed after the event has started", async () => {
     // Arrange
     const fixture = await createCoverFixture(pool, {
       started: true,
     });
 
     // Act
+    const context = await getOrganiserCoverClaimContext({
+      eventId: fixture.eventId,
+
+      discordGuildId: DISCORD_GUILD_ID,
+    });
+
+    expect(context.kind).toBe("eligible");
+
     const result = await claimEventOrganiserCover({
       eventId: fixture.eventId,
 
       organiserUserId: COVER_USER_ID,
 
-      displayNameSnapshot: "Cover Organiser",
+      displayNameSnapshot: "Late Cover Organiser",
     });
 
     // Assert
-    expect(result).toEqual({
-      kind: "event_started",
-    });
+    expect(result.kind).toBe("claimed");
+
+    if (result.kind !== "claimed") {
+      throw new Error(
+        `Expected the post-start cover claim to succeed, received "${result.kind}".`,
+      );
+    }
 
     const assignmentResult = await pool.query<{
-      count: number;
+      slot: string;
+      status: string;
+      is_current: boolean;
+      discord_user_id: string;
     }>(
       `
-        SELECT COUNT(*)::int AS "count"
+        SELECT
+          "slot",
+          "status",
+          "is_current",
+          "discord_user_id"
         FROM "event_organiser_assignments"
-        WHERE "event_id" = $1
+        WHERE "id" = $1
       `,
-      [fixture.eventId],
+      [result.assignmentId],
     );
 
     expect(assignmentResult.rows).toEqual([
       {
-        count: 0,
+        slot: "cover",
+
+        status: "confirmed",
+
+        is_current: true,
+
+        discord_user_id: COVER_USER_ID,
       },
     ]);
   });

@@ -54,10 +54,10 @@ export async function getGuildConfiguration(discordGuildId: string) {
     organiserDmsEnabled: configuration.organiserDmsEnabled ?? true,
 
     organiserPrimaryResponseMinutes:
-      configuration.organiserPrimaryResponseMinutes ?? 80,
+      configuration.organiserPrimaryResponseMinutes ?? 70,
 
     organiserBackupResponseMinutes:
-      configuration.organiserBackupResponseMinutes ?? 40,
+      configuration.organiserBackupResponseMinutes ?? 35,
 
     organiserWarningMinutesBefore:
       configuration.organiserWarningMinutesBefore ?? 15,

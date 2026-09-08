@@ -32,6 +32,8 @@ import {
 import {
   buildOrganiserResponseActionValues,
   calculateOrganiserResponseDeadline,
+  buildOrganiserEventSafetyActionValues,
+  calculateOrganiserCoverDeadline,
 } from "../organisers/organiser-scheduling.js";
 
 export type EventPublicationFailureReason =
@@ -110,6 +112,9 @@ export async function publishStoredEvent(
 
       organiserWarningMinutesBefore:
         guildSettings.organiserWarningMinutesBefore,
+
+      organiserCoverBeforeStartMinutes:
+        guildSettings.organiserCoverBeforeStartMinutes,
     })
     .from(events)
     .innerJoin(discordGuilds, eq(discordGuilds.id, events.ownerGuildId))
@@ -180,6 +185,12 @@ export async function publishStoredEvent(
       eventName: event.name,
     };
   }
+
+  const organiserCoverDeadline = calculateOrganiserCoverDeadline(
+    event.startsAt,
+
+    event.organiserCoverBeforeStartMinutes ?? 15,
+  );
 
   /*
    * Prefer the event's snapshotted publication destination.
@@ -287,6 +298,9 @@ export async function publishStoredEvent(
     )
     .limit(1);
 
+  const mayActivateDormantPrimary =
+    (event.organisersEnabled ?? true) && now < organiserCoverDeadline;
+
   /*
    * We want the newly-published message to show the primary
    * organiser immediately, even though activation is not committed
@@ -295,7 +309,7 @@ export async function publishStoredEvent(
   const organiser =
     (event.organisersEnabled ?? true)
       ? (activeOrganiser ??
-        (dormantPrimary
+        (mayActivateDormantPrimary && dormantPrimary
           ? {
               discordUserId: dormantPrimary.discordUserId,
 
@@ -435,13 +449,34 @@ export async function publishStoredEvent(
 
       let activatedPrimaryAssignmentId: number | null = null;
 
-      if (organisersEnabled && dormantPrimary) {
+      if (organisersEnabled) {
+        const organiserSafetyActions = buildOrganiserEventSafetyActionValues({
+          eventId: event.id,
+
+          startsAt: event.startsAt,
+
+          coverMinutesBeforeStart: event.organiserCoverBeforeStartMinutes ?? 15,
+
+          updatedAt: publicationTime,
+        });
+
+        await transaction
+          .insert(scheduledActions)
+          .values(organiserSafetyActions)
+          .onConflictDoNothing();
+      }
+
+      if (
+        organisersEnabled &&
+        dormantPrimary &&
+        publicationTime < organiserCoverDeadline
+      ) {
         const activatedAt = publicationTime;
 
         const responseDeadlineAt = calculateOrganiserResponseDeadline(
           activatedAt,
 
-          event.organiserPrimaryResponseMinutes ?? 80,
+          event.organiserPrimaryResponseMinutes ?? 70,
         );
 
         const [activatedAssignment] = await transaction

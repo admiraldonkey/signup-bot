@@ -45,6 +45,8 @@ const organiserNotificationMocks = vi.hoisted(() => ({
   reconcileOrganiserPendingWarning: vi.fn().mockResolvedValue(true),
 
   sendOrganiserCoverRequest: vi.fn().mockResolvedValue("pinged"),
+
+  sendOrganiserMissingAtStartAlert: vi.fn().mockResolvedValue("pinged"),
 }));
 
 vi.mock("../../../src/events/organiser-notification.js", () => ({
@@ -53,6 +55,9 @@ vi.mock("../../../src/events/organiser-notification.js", () => ({
 
   sendOrganiserCoverRequest:
     organiserNotificationMocks.sendOrganiserCoverRequest,
+
+  sendOrganiserMissingAtStartAlert:
+    organiserNotificationMocks.sendOrganiserMissingAtStartAlert,
 }));
 
 vi.mock("../../../src/events/organiser-warning-reconciliation.js", () => ({
@@ -90,6 +95,7 @@ describe("event scheduler", () => {
     organiserNotificationMocks.sendOrganiserPendingWarning.mockClear();
     organiserNotificationMocks.reconcileOrganiserPendingWarning.mockClear();
     organiserNotificationMocks.sendOrganiserCoverRequest.mockClear();
+    organiserNotificationMocks.sendOrganiserMissingAtStartAlert.mockClear();
   });
 
   afterEach(() => {
@@ -1261,6 +1267,530 @@ describe("event scheduler", () => {
 
       assignmentId: fixture.assignmentId,
     });
+  });
+
+  it("opens general organiser cover when the event reaches its cover safety deadline", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserCoverDeadline(pool);
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    expect(
+      organiserNotificationMocks.sendOrganiserCoverRequest,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      organiserNotificationMocks.sendOrganiserCoverRequest,
+    ).toHaveBeenCalledWith({
+      guild: expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+
+      eventId: fixture.eventId,
+
+      eventName: "Organiser Safety Deadline Event",
+
+      eventAdminChannelId: "300000000000000005",
+
+      eventOrganiserRoleId: "300000000000000006",
+    });
+
+    const reconciledAssignmentIds =
+      organiserNotificationMocks.reconcileOrganiserPendingWarning.mock.calls
+        .map(
+          ([input]) =>
+            (
+              input as {
+                assignmentId: number;
+              }
+            ).assignmentId,
+        )
+        .sort((a, b) => a - b);
+
+    expect(reconciledAssignmentIds).toEqual(
+      [fixture.primaryAssignmentId, fixture.backupAssignmentId].sort(
+        (a, b) => a - b,
+      ),
+    );
+
+    expect(
+      attendanceRefreshMocks.refreshAttendanceMessage,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      attendanceRefreshMocks.refreshAttendanceMessage,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+
+      fixture.eventId,
+    );
+
+    const assignments = await pool.query<{
+      id: number;
+
+      status: string;
+
+      is_current: boolean;
+
+      ended_at: Date | null;
+    }>(
+      `
+        SELECT
+          "id",
+          "status",
+          "is_current",
+          "ended_at"
+        FROM
+          "event_organiser_assignments"
+        WHERE
+          "event_id" = $1
+        ORDER BY
+          "id"
+      `,
+      [fixture.eventId],
+    );
+
+    expect(assignments.rows).toHaveLength(2);
+
+    for (const assignment of assignments.rows) {
+      expect(assignment).toMatchObject({
+        status: "removed",
+
+        is_current: false,
+      });
+
+      expect(assignment.ended_at).toBeInstanceOf(Date);
+    }
+
+    const escalationActions = await pool.query<{
+      action_key: string;
+
+      status: string;
+    }>(
+      `
+        SELECT
+          "action_key",
+          "status"
+        FROM
+          "scheduled_actions"
+        WHERE
+          "event_id" = $1
+        ORDER BY
+          "action_key"
+      `,
+      [fixture.eventId],
+    );
+
+    expect(escalationActions.rows).toEqual([
+      {
+        action_key: `organiser_cover_deadline:${fixture.eventId}`,
+
+        status: "completed",
+      },
+
+      {
+        action_key: `organiser_timeout:${fixture.primaryAssignmentId}`,
+
+        status: "cancelled",
+      },
+
+      {
+        action_key: `organiser_warning:${fixture.primaryAssignmentId}`,
+
+        status: "cancelled",
+      },
+    ]);
+
+    const auditResult = await pool.query<{
+      action: string;
+
+      outcome: string;
+
+      delivery: string | null;
+    }>(
+      `
+        SELECT
+          "action",
+          "outcome",
+          "details" ->> 'delivery'
+            AS "delivery"
+        FROM
+          "audit_logs"
+        WHERE
+          "target_type" = 'event'
+          AND
+          "target_id" = $1
+          AND
+          "action" =
+            'scheduler.organiser_cover_deadline'
+      `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "scheduler.organiser_cover_deadline",
+
+        outcome: "success",
+
+        delivery: "pinged",
+      },
+    ]);
+  });
+
+  it("does not send stale general cover when an organiser becomes confirmed during the cover-deadline guild fetch", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserCoverDeadline(pool);
+
+    const guildFetch = createBlockedGuildFetchSchedulerClient();
+
+    // Act
+    startEventScheduler(guildFetch.client);
+
+    /*
+     * By the time guilds.fetch() starts, the safety service has already
+     * committed:
+     *
+     * - primary/backup retirement;
+     * - warning/timeout cancellation;
+     * - the decision that general cover appears necessary.
+     *
+     * Pause here and let a newer confirmed organiser win before Discord
+     * delivery.
+     */
+    await guildFetch.waitUntilFetchStarted();
+
+    await pool.query(
+      `
+      INSERT INTO
+        "event_organiser_assignments" (
+          "event_id",
+          "slot",
+          "discord_user_id",
+          "display_name_snapshot",
+          "status",
+          "is_current",
+          "assigned_by_user_id",
+          "activated_at",
+          "response_deadline_at"
+        )
+      VALUES (
+        $1,
+        'cover',
+        $2,
+        'Race-Winning Cover Organiser',
+        'confirmed',
+        true,
+        $3,
+        NOW(),
+        NULL
+      )
+    `,
+      [fixture.eventId, "300000000000000008", ADMIN_USER_ID],
+    );
+
+    guildFetch.releaseFetch();
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    expect(
+      organiserNotificationMocks.sendOrganiserCoverRequest,
+    ).not.toHaveBeenCalled();
+
+    const currentAssignment = await pool.query<{
+      slot: string;
+
+      status: string;
+
+      is_current: boolean;
+    }>(
+      `
+        SELECT
+          "slot",
+          "status",
+          "is_current"
+        FROM
+          "event_organiser_assignments"
+        WHERE
+          "event_id" = $1
+          AND
+          "is_current" = true
+      `,
+      [fixture.eventId],
+    );
+
+    expect(currentAssignment.rows).toEqual([
+      {
+        slot: "cover",
+
+        status: "confirmed",
+
+        is_current: true,
+      },
+    ]);
+
+    const auditResult = await pool.query<{
+      count: number;
+    }>(
+      `
+        SELECT
+          COUNT(*)::int AS
+            "count"
+        FROM
+          "audit_logs"
+        WHERE
+          "action" =
+            'scheduler.organiser_cover_deadline'
+          AND
+          "target_id" = $1
+      `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+  });
+
+  it("posts an urgent organiser alert when an event starts without confirmed cover", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserMissingAtStart(pool);
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    expect(
+      organiserNotificationMocks.sendOrganiserMissingAtStartAlert,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      organiserNotificationMocks.sendOrganiserMissingAtStartAlert,
+    ).toHaveBeenCalledWith({
+      guild: expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+
+      eventId: fixture.eventId,
+
+      eventName: "Missing Organiser At Start Event",
+
+      eventAdminChannelId: "300000000000000005",
+
+      eventOrganiserRoleId: "300000000000000006",
+    });
+
+    /*
+     * A previous general-cover request is deliberately allowed to exist.
+     * T+0 is a new escalation, not a replacement for that message.
+     */
+    expect(
+      organiserNotificationMocks.sendOrganiserCoverRequest,
+    ).not.toHaveBeenCalled();
+
+    const actionResult = await pool.query<{
+      status: string;
+
+      completed_at: Date | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "completed_at"
+        FROM
+          "scheduled_actions"
+        WHERE
+          "id" = $1
+      `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    const auditResult = await pool.query<{
+      action: string;
+
+      outcome: string;
+
+      delivery: string | null;
+
+      prior_cover_state: string | null;
+    }>(
+      `
+        SELECT
+          "action",
+          "outcome",
+          "details" ->>
+            'delivery'
+            AS "delivery",
+          "details" ->>
+            'priorCoverState'
+            AS
+              "prior_cover_state"
+        FROM
+          "audit_logs"
+        WHERE
+          "target_type" =
+            'event'
+          AND
+          "target_id" = $1
+          AND
+          "action" =
+            'scheduler.organiser_missing_at_start'
+      `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "scheduler.organiser_missing_at_start",
+
+        outcome: "success",
+
+        delivery: "pinged",
+
+        prior_cover_state: "cover_already_requested",
+      },
+    ]);
+  });
+
+  it("does not post a stale missing-organiser alert when cover is claimed during the guild fetch", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserMissingAtStart(pool);
+
+    const guildFetch = createBlockedGuildFetchSchedulerClient();
+
+    // Act
+    startEventScheduler(guildFetch.client);
+
+    await guildFetch.waitUntilFetchStarted();
+
+    /*
+     * A cover organiser wins while Discord guild resolution is in flight.
+     */
+    await pool.query(
+      `
+      INSERT INTO
+        "event_organiser_assignments" (
+          "event_id",
+          "slot",
+          "discord_user_id",
+          "display_name_snapshot",
+          "status",
+          "is_current",
+          "assigned_by_user_id",
+          "activated_at",
+          "response_deadline_at"
+        )
+      VALUES (
+        $1,
+        'cover',
+        $2,
+        'Start-Race Cover Organiser',
+        'confirmed',
+        true,
+        $3,
+        NOW(),
+        NULL
+      )
+    `,
+      [fixture.eventId, "300000000000000009", ADMIN_USER_ID],
+    );
+
+    guildFetch.releaseFetch();
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    expect(
+      organiserNotificationMocks.sendOrganiserMissingAtStartAlert,
+    ).not.toHaveBeenCalled();
+
+    const currentAssignment = await pool.query<{
+      slot: string;
+
+      status: string;
+
+      is_current: boolean;
+    }>(
+      `
+        SELECT
+          "slot",
+          "status",
+          "is_current"
+        FROM
+          "event_organiser_assignments"
+        WHERE
+          "event_id" = $1
+          AND
+          "is_current" =
+            true
+      `,
+      [fixture.eventId],
+    );
+
+    expect(currentAssignment.rows).toEqual([
+      {
+        slot: "cover",
+
+        status: "confirmed",
+
+        is_current: true,
+      },
+    ]);
+
+    const auditResult = await pool.query<{
+      count: number;
+    }>(
+      `
+        SELECT
+          COUNT(*)::int
+            AS "count"
+        FROM
+          "audit_logs"
+        WHERE
+          "action" =
+            'scheduler.organiser_missing_at_start'
+          AND
+          "target_id" = $1
+      `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
   });
 
   it("does not send an organiser warning when organisers are disabled after the scheduler reads it", async () => {
@@ -3842,6 +4372,562 @@ async function createOpenEventWithDueOrganiserWarning(pool: Pool): Promise<{
   return {
     eventId,
     assignmentId,
+    actionId,
+  };
+}
+
+async function createOpenEventWithDueOrganiserCoverDeadline(
+  pool: Pool,
+): Promise<{
+  eventId: number;
+
+  primaryAssignmentId: number;
+
+  backupAssignmentId: number;
+
+  actionId: number;
+}> {
+  const guildResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO
+          "discord_guilds" (
+            "discord_guild_id",
+            "name"
+          )
+        VALUES (
+          $1,
+          $2
+        )
+        RETURNING
+          "id"
+      `,
+    [DISCORD_GUILD_ID, "Scheduler Organiser Safety Test Guild"],
+  );
+
+  const guildId = guildResult.rows[0]?.id;
+
+  if (!guildId) {
+    throw new Error(
+      "The organiser-safety integration-test guild was not created.",
+    );
+  }
+
+  await pool.query(
+    `
+      INSERT INTO
+        "guild_settings" (
+          "guild_id",
+          "organisers_enabled",
+          "event_admin_channel_id",
+          "event_organiser_role_id"
+        )
+      VALUES (
+        $1,
+        true,
+        $2,
+        $3
+      )
+    `,
+    [guildId, "300000000000000005", "300000000000000006"],
+  );
+
+  const eventTypeResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO
+          "event_types" (
+            "owner_guild_id",
+            "code",
+            "name"
+          )
+        VALUES (
+          $1,
+          $2,
+          $3
+        )
+        RETURNING
+          "id"
+      `,
+    [guildId, "naval", "Naval Event"],
+  );
+
+  const eventTypeId = eventTypeResult.rows[0]?.id;
+
+  if (!eventTypeId) {
+    throw new Error(
+      "The organiser-safety integration-test event type was not created.",
+    );
+  }
+
+  const eventResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO
+          "events" (
+            "owner_guild_id",
+            "event_type_id",
+            "name",
+            "starts_at",
+            "signups_enabled",
+            "published_at",
+            "status",
+            "created_by_user_id"
+          )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          NOW() +
+            INTERVAL '15 minutes',
+          true,
+          NOW() -
+            INTERVAL '2 hours',
+          'open',
+          $4
+        )
+        RETURNING
+          "id"
+      `,
+    [guildId, eventTypeId, "Organiser Safety Deadline Event", ADMIN_USER_ID],
+  );
+
+  const eventId = eventResult.rows[0]?.id;
+
+  if (!eventId) {
+    throw new Error(
+      "The organiser-safety integration-test event was not created.",
+    );
+  }
+
+  const primaryResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO
+          "event_organiser_assignments" (
+            "event_id",
+            "slot",
+            "discord_user_id",
+            "display_name_snapshot",
+            "status",
+            "is_current",
+            "assigned_by_user_id",
+            "activated_at",
+            "response_deadline_at"
+          )
+        VALUES (
+          $1,
+          'primary',
+          $2,
+          'Safety Test Primary',
+          'pending',
+          true,
+          $3,
+          NOW() -
+            INTERVAL '70 minutes',
+          NOW() +
+            INTERVAL '5 minutes'
+        )
+        RETURNING
+          "id"
+      `,
+    [eventId, "300000000000000004", ADMIN_USER_ID],
+  );
+
+  const primaryAssignmentId = primaryResult.rows[0]?.id;
+
+  if (!primaryAssignmentId) {
+    throw new Error("The organiser-safety primary assignment was not created.");
+  }
+
+  const backupResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO
+          "event_organiser_assignments" (
+            "event_id",
+            "slot",
+            "discord_user_id",
+            "display_name_snapshot",
+            "status",
+            "is_current",
+            "assigned_by_user_id",
+            "activated_at",
+            "response_deadline_at"
+          )
+        VALUES (
+          $1,
+          'backup',
+          $2,
+          'Safety Test Backup',
+          'pending',
+          true,
+          $3,
+          NULL,
+          NULL
+        )
+        RETURNING
+          "id"
+      `,
+    [eventId, "300000000000000007", ADMIN_USER_ID],
+  );
+
+  const backupAssignmentId = backupResult.rows[0]?.id;
+
+  if (!backupAssignmentId) {
+    throw new Error("The organiser-safety backup assignment was not created.");
+  }
+
+  /*
+   * These are still live when the hard safety deadline wins. The safety
+   * transition should cancel them.
+   */
+  await pool.query(
+    `
+      INSERT INTO
+        "scheduled_actions" (
+          "event_id",
+          "action_key",
+          "due_at",
+          "status"
+        )
+      VALUES
+        (
+          $1,
+          $2,
+          NOW() +
+            INTERVAL '5 minutes',
+          'pending'
+        ),
+        (
+          $1,
+          $3,
+          NOW() +
+            INTERVAL '10 minutes',
+          'pending'
+        )
+    `,
+    [
+      eventId,
+
+      `organiser_warning:${primaryAssignmentId}`,
+
+      `organiser_timeout:${primaryAssignmentId}`,
+    ],
+  );
+
+  const actionResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO
+          "scheduled_actions" (
+            "event_id",
+            "action_key",
+            "due_at",
+            "status"
+          )
+        VALUES (
+          $1,
+          $2,
+          NOW() -
+            INTERVAL '1 minute',
+          'pending'
+        )
+        RETURNING
+          "id"
+      `,
+    [eventId, `organiser_cover_deadline:${eventId}`],
+  );
+
+  const actionId = actionResult.rows[0]?.id;
+
+  if (!actionId) {
+    throw new Error("The organiser cover-deadline action was not created.");
+  }
+
+  return {
+    eventId,
+
+    primaryAssignmentId,
+
+    backupAssignmentId,
+
+    actionId,
+  };
+}
+
+async function createOpenEventWithDueOrganiserMissingAtStart(
+  pool: Pool,
+): Promise<{
+  eventId: number;
+
+  sourceAssignmentId: number;
+
+  actionId: number;
+}> {
+  const guildResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO
+          "discord_guilds" (
+            "discord_guild_id",
+            "name"
+          )
+        VALUES (
+          $1,
+          $2
+        )
+        RETURNING
+          "id"
+      `,
+    [DISCORD_GUILD_ID, "Missing Organiser Start Test Guild"],
+  );
+
+  const guildId = guildResult.rows[0]?.id;
+
+  if (!guildId) {
+    throw new Error(
+      "The missing-organiser integration-test guild was not created.",
+    );
+  }
+
+  await pool.query(
+    `
+      INSERT INTO
+        "guild_settings" (
+          "guild_id",
+          "organisers_enabled",
+          "event_admin_channel_id",
+          "event_organiser_role_id"
+        )
+      VALUES (
+        $1,
+        true,
+        $2,
+        $3
+      )
+    `,
+    [guildId, "300000000000000005", "300000000000000006"],
+  );
+
+  const eventTypeResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO
+          "event_types" (
+            "owner_guild_id",
+            "code",
+            "name"
+          )
+        VALUES (
+          $1,
+          $2,
+          $3
+        )
+        RETURNING
+          "id"
+      `,
+    [guildId, "naval", "Naval Event"],
+  );
+
+  const eventTypeId = eventTypeResult.rows[0]?.id;
+
+  if (!eventTypeId) {
+    throw new Error(
+      "The missing-organiser integration-test event type was not created.",
+    );
+  }
+
+  const eventResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO
+          "events" (
+            "owner_guild_id",
+            "event_type_id",
+            "name",
+            "starts_at",
+            "published_at",
+            "status",
+            "created_by_user_id"
+          )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          NOW() -
+            INTERVAL '1 minute',
+          NOW() -
+            INTERVAL '2 hours',
+          'open',
+          $4
+        )
+        RETURNING
+          "id"
+      `,
+    [guildId, eventTypeId, "Missing Organiser At Start Event", ADMIN_USER_ID],
+  );
+
+  const eventId = eventResult.rows[0]?.id;
+
+  if (!eventId) {
+    throw new Error(
+      "The missing-organiser integration-test event was not created.",
+    );
+  }
+
+  /*
+   * Historical failed nominee which previously caused ordinary general
+   * cover to be requested.
+   *
+   * There is deliberately no current organiser.
+   */
+  const sourceResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO
+          "event_organiser_assignments" (
+            "event_id",
+            "slot",
+            "discord_user_id",
+            "display_name_snapshot",
+            "status",
+            "is_current",
+            "assigned_by_user_id",
+            "activated_at",
+            "response_deadline_at",
+            "ended_at"
+          )
+        VALUES (
+          $1,
+          'backup',
+          $2,
+          'Timed-Out Backup',
+          'timed_out',
+          false,
+          $3,
+          NOW() -
+            INTERVAL '50 minutes',
+          NOW() -
+            INTERVAL '15 minutes',
+          NOW() -
+            INTERVAL '15 minutes'
+        )
+        RETURNING
+          "id"
+      `,
+    [eventId, "300000000000000004", ADMIN_USER_ID],
+  );
+
+  const sourceAssignmentId = sourceResult.rows[0]?.id;
+
+  if (!sourceAssignmentId) {
+    throw new Error("The missing-organiser source assignment was not created.");
+  }
+
+  /*
+   * Model an earlier general-cover request which was already delivered.
+   *
+   * T+0 must still send its new urgent escalation.
+   */
+  await pool.query(
+    `
+      INSERT INTO
+        "scheduled_actions" (
+          "event_id",
+          "action_key",
+          "due_at",
+          "status",
+          "attempt_count",
+          "completed_at"
+        )
+      VALUES (
+        $1,
+        $2,
+        NOW() -
+          INTERVAL '15 minutes',
+        'completed',
+        1,
+        NOW() -
+          INTERVAL '14 minutes'
+      )
+    `,
+    [eventId, `organiser_cover_request:${sourceAssignmentId}`],
+  );
+
+  /*
+   * Model the event-level T-15 safety action as already completed too.
+   */
+  await pool.query(
+    `
+      INSERT INTO
+        "scheduled_actions" (
+          "event_id",
+          "action_key",
+          "due_at",
+          "status",
+          "attempt_count",
+          "completed_at"
+        )
+      VALUES (
+        $1,
+        $2,
+        NOW() -
+          INTERVAL '15 minutes',
+        'completed',
+        1,
+        NOW() -
+          INTERVAL '14 minutes'
+      )
+    `,
+    [eventId, `organiser_cover_deadline:${eventId}`],
+  );
+
+  const actionResult = await pool.query<{
+    id: number;
+  }>(
+    `
+        INSERT INTO
+          "scheduled_actions" (
+            "event_id",
+            "action_key",
+            "due_at",
+            "status"
+          )
+        VALUES (
+          $1,
+          $2,
+          NOW() -
+            INTERVAL '1 minute',
+          'pending'
+        )
+        RETURNING
+          "id"
+      `,
+    [eventId, `organiser_missing_at_start:${eventId}`],
+  );
+
+  const actionId = actionResult.rows[0]?.id;
+
+  if (!actionId) {
+    throw new Error("The missing-organiser-at-start action was not created.");
+  }
+
+  return {
+    eventId,
+
+    sourceAssignmentId,
+
     actionId,
   };
 }

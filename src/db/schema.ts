@@ -110,11 +110,17 @@ export const guildSettings = pgTable("guild_settings", {
 
   organiserPrimaryResponseMinutes: integer("organiser_primary_response_minutes")
     .notNull()
-    .default(80),
+    .default(70),
 
   organiserBackupResponseMinutes: integer("organiser_backup_response_minutes")
     .notNull()
-    .default(40),
+    .default(35),
+
+  organiserCoverBeforeStartMinutes: integer(
+    "organiser_cover_before_start_minutes",
+  )
+    .notNull()
+    .default(15),
 
   organiserWarningMinutesBefore: integer("organiser_warning_minutes_before")
     .notNull()

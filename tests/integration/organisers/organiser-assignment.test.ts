@@ -329,13 +329,13 @@ describe("primary organiser assignment", () => {
     );
 
     /*
-     * The guild fixture uses the normal 80-minute primary response
+     * The guild fixture uses the normal 70-minute primary response
      * deadline default.
      */
     expect(
       assignmentAfterPublication!.response_deadline_at!.getTime() -
         assignmentAfterPublication!.activated_at!.getTime(),
-    ).toBe(80 * 60 * 1000);
+    ).toBe(70 * 60 * 1000);
 
     const scheduledActionsResult = await pool.query<{
       action_key: string;
