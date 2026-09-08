@@ -352,6 +352,284 @@ export const templateRoleOptions = pgTable(
 );
 
 /*
+ * Reusable guild-level role-request configurations.
+ *
+ * A preset describes the logical roles and request groups commonly reused
+ * across events, for example "Naval" or "Linebattle".
+ *
+ * Applying a preset snapshots its configuration into an actual event.
+ * Existing events therefore remain independent of later preset edits.
+ */
+
+export const roleRequestPresets = pgTable(
+  "role_request_presets",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+
+    ownerGuildId: integer("owner_guild_id")
+      .notNull()
+      .references(() => discordGuilds.id, {
+        onDelete: "cascade",
+      }),
+
+    name: varchar("name", {
+      length: 100,
+    }).notNull(),
+
+    description: text("description"),
+
+    active: boolean("active").notNull().default(true),
+
+    createdByUserId: text("created_by_user_id").notNull(),
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("role_request_presets_owner_name_unique").on(
+      table.ownerGuildId,
+      table.name,
+    ),
+
+    index("role_request_presets_owner_guild_idx").on(table.ownerGuildId),
+  ],
+);
+
+/*
+ * Logical requestable roles belonging to a reusable preset.
+ *
+ * These mirror event_role_options closely because application is intended to
+ * be a straightforward snapshot rather than an interpretation layer.
+ */
+export const roleRequestPresetOptions = pgTable(
+  "role_request_preset_options",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+
+    presetId: integer("preset_id")
+      .notNull()
+      .references(() => roleRequestPresets.id, {
+        onDelete: "cascade",
+      }),
+
+    key: varchar("key", {
+      length: 64,
+    }).notNull(),
+
+    displayName: varchar("display_name", {
+      length: 100,
+    }).notNull(),
+
+    description: text("description"),
+
+    /*
+     * Supported by the application:
+     * - open
+     * - qualified_only
+     */
+    requestRestriction: varchar("request_restriction", {
+      length: 32,
+    })
+      .notNull()
+      .default("open"),
+
+    capacity: integer("capacity"),
+
+    sortOrder: integer("sort_order").notNull().default(0),
+
+    active: boolean("active").notNull().default(true),
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("role_request_preset_options_preset_key_unique").on(
+      table.presetId,
+      table.key,
+    ),
+
+    index("role_request_preset_options_preset_idx").on(table.presetId),
+  ],
+);
+
+/*
+ * Discord roles which indicate qualification for a reusable preset option.
+ *
+ * These are copied to event_role_option_qualification_roles when the preset
+ * is applied to an event.
+ */
+export const roleRequestPresetOptionQualificationRoles = pgTable(
+  "role_request_preset_option_qualification_roles",
+  {
+    presetOptionId: integer("preset_option_id")
+      .notNull()
+      .references(() => roleRequestPresetOptions.id, {
+        onDelete: "cascade",
+      }),
+
+    discordRoleId: text("discord_role_id").notNull(),
+
+    roleNameSnapshot: varchar("role_name_snapshot", {
+      length: 100,
+    }).notNull(),
+
+    /*
+     * Currently supported:
+     * - qualified
+     * - supervision_required
+     */
+    qualificationLevel: varchar("qualification_level", {
+      length: 32,
+    }).notNull(),
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "role_request_preset_option_qual_roles_pk",
+
+      columns: [table.presetOptionId, table.discordRoleId],
+    }),
+
+    index("role_request_preset_option_qualification_idx").on(
+      table.presetOptionId,
+    ),
+  ],
+);
+
+/*
+ * One reusable Discord-facing request-group definition.
+ *
+ * channelId is nullable deliberately. Null means "resolve the guild's current
+ * default role-request channel when this preset is applied".
+ *
+ * Once applied, the resolved channel is snapshotted into role_request_groups.
+ */
+export const roleRequestPresetGroups = pgTable(
+  "role_request_preset_groups",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+
+    presetId: integer("preset_id")
+      .notNull()
+      .references(() => roleRequestPresets.id, {
+        onDelete: "cascade",
+      }),
+
+    name: varchar("name", {
+      length: 100,
+    }).notNull(),
+
+    description: text("description"),
+
+    channelId: text("channel_id"),
+
+    notifyRoleId: text("notify_role_id"),
+
+    notifyRoleNameSnapshot: varchar("notify_role_name_snapshot", {
+      length: 100,
+    }),
+
+    requiresPositiveSignup: boolean("requires_positive_signup")
+      .notNull()
+      .default(false),
+
+    /*
+     * Signed offsets relative to event start.
+     *
+     *  60 = 60 minutes before start
+     *   0 = at event start
+     * -10 = 10 minutes after start
+     */
+    openMinutesBeforeStart: integer("open_minutes_before_start")
+      .notNull()
+      .default(60),
+
+    closeMinutesBeforeStart: integer("close_minutes_before_start")
+      .notNull()
+      .default(0),
+
+    sortOrder: integer("sort_order").notNull().default(0),
+
+    active: boolean("active").notNull().default(true),
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("role_request_preset_groups_preset_idx").on(table.presetId),
+  ],
+);
+
+/*
+ * Which preset role options are displayed by each reusable request group.
+ *
+ * The same preset option may deliberately be exposed by several groups.
+ */
+export const roleRequestPresetGroupOptions = pgTable(
+  "role_request_preset_group_options",
+  {
+    groupId: integer("group_id")
+      .notNull()
+      .references(() => roleRequestPresetGroups.id, {
+        onDelete: "cascade",
+      }),
+
+    presetOptionId: integer("preset_option_id")
+      .notNull()
+      .references(() => roleRequestPresetOptions.id, {
+        onDelete: "cascade",
+      }),
+
+    sortOrder: integer("sort_order").notNull().default(0),
+  },
+  (table) => [
+    primaryKey({
+      name: "role_request_preset_group_options_pk",
+
+      columns: [table.groupId, table.presetOptionId],
+    }),
+
+    index("role_request_preset_group_options_group_idx").on(table.groupId),
+
+    index("role_request_preset_group_options_option_idx").on(
+      table.presetOptionId,
+    ),
+  ],
+);
+
+/*
  * One actual event occurrence.
  *
  * This may have been created from a template or created as a one-off event.
@@ -496,6 +774,49 @@ export const eventPingRoles = pgTable(
     }),
 
     index("event_ping_roles_event_idx").on(table.eventId),
+  ],
+);
+
+/*
+ * Records which reusable role-request presets have been snapshotted into
+ * which events.
+ *
+ * This gives application an idempotency boundary and prevents accidentally
+ * applying the same preset twice to one occurrence.
+ */
+export const eventRoleRequestPresetApplications = pgTable(
+  "event_role_request_preset_applications",
+  {
+    eventId: integer("event_id")
+      .notNull()
+      .references(() => events.id, {
+        onDelete: "cascade",
+      }),
+
+    presetId: integer("preset_id")
+      .notNull()
+      .references(() => roleRequestPresets.id, {
+        onDelete: "restrict",
+      }),
+
+    appliedByUserId: text("applied_by_user_id").notNull(),
+
+    appliedAt: timestamp("applied_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "event_role_request_preset_applications_pk",
+
+      columns: [table.eventId, table.presetId],
+    }),
+
+    index("event_role_request_preset_applications_preset_idx").on(
+      table.presetId,
+    ),
   ],
 );
 
@@ -687,6 +1008,12 @@ export const eventRoleOptions = pgTable(
       onDelete: "set null",
     }),
 
+    sourceRoleRequestPresetOptionId: integer(
+      "source_role_request_preset_option_id",
+    ).references(() => roleRequestPresetOptions.id, {
+      onDelete: "set null",
+    }),
+
     key: varchar("key", { length: 64 }).notNull(),
 
     displayName: varchar("display_name", { length: 100 }).notNull(),
@@ -793,6 +1120,12 @@ export const roleRequestGroups = pgTable(
         onDelete: "cascade",
       }),
 
+    sourceRoleRequestPresetGroupId: integer(
+      "source_role_request_preset_group_id",
+    ).references(() => roleRequestPresetGroups.id, {
+      onDelete: "set null",
+    }),
+
     name: varchar("name", {
       length: 100,
     }).notNull(),
@@ -804,6 +1137,16 @@ export const roleRequestGroups = pgTable(
     messageId: text("message_id").unique(),
 
     /*
+     * Persist notification metadata so a request group which was configured
+     * before its opening time can later be posted by the scheduler.
+     */
+    notifyRoleId: text("notify_role_id"),
+
+    notifyRoleNameSnapshot: varchar("notify_role_name_snapshot", {
+      length: 100,
+    }),
+
+    /*
      * If true, only Attending or Tentative members may add new
      * requests through this group.
      *
@@ -813,6 +1156,21 @@ export const roleRequestGroups = pgTable(
     requiresPositiveSignup: boolean("requires_positive_signup")
       .notNull()
       .default(false),
+
+    /*
+     * Signed offset relative to event start.
+     *
+     *  60 = 60 minutes before start
+     *   0 = at event start
+     * -10 = 10 minutes after start
+     *
+     * Storing the offset as well as the resolved timestamp means an
+     * individual event can be moved later without losing the timing
+     * relationship inherited from its preset.
+     */
+    openMinutesBeforeStart: integer("open_minutes_before_start")
+      .notNull()
+      .default(60),
 
     opensAt: timestamp("opens_at", {
       withTimezone: true,
