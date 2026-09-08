@@ -332,6 +332,194 @@ describe("event lifecycle", () => {
     expect.soft(auditResult.rows).toEqual([]);
   });
 
+  it("reschedules organiser safety actions when a published event start time changes", async () => {
+    // Arrange
+    const event = await createPublishedSignupEvent(pool, "open");
+
+    /*
+     * The existing lifecycle fixture predates required event durations.
+     * Give this event a one-hour duration so /event edit can preserve it while
+     * moving the start time.
+     */
+    await pool.query(
+      `
+      UPDATE "events"
+      SET
+        "timezone" = 'UTC',
+        "ends_at" =
+          "starts_at" +
+            INTERVAL '1 hour'
+      WHERE
+        "id" = $1
+    `,
+      [event.id],
+    );
+
+    /*
+     * Deliberately use terminal/in-flight states.
+     *
+     * Editing the event to a new time should establish a fresh operational
+     * schedule regardless of what happened against the old start time.
+     */
+    await pool.query(
+      `
+      INSERT INTO
+        "scheduled_actions" (
+          "event_id",
+          "action_key",
+          "due_at",
+          "status",
+          "attempt_count",
+          "locked_at",
+          "completed_at",
+          "last_error"
+        )
+      VALUES
+        (
+          $1,
+          $2,
+          NOW() -
+            INTERVAL '10 minutes',
+          'completed',
+          3,
+          NULL,
+          NOW() -
+            INTERVAL '9 minutes',
+          NULL
+        ),
+        (
+          $1,
+          $3,
+          NOW() -
+            INTERVAL '1 minute',
+          'processing',
+          2,
+          NOW(),
+          NULL,
+          'Old processing attempt'
+        )
+    `,
+      [
+        event.id,
+
+        `organiser_cover_deadline:${event.id}`,
+
+        `organiser_missing_at_start:${event.id}`,
+      ],
+    );
+
+    /*
+     * Use minute precision because /event edit accepts HH:mm rather than
+     * seconds.
+     */
+    const newStartsAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
+
+    newStartsAt.setUTCSeconds(0, 0);
+
+    const interaction = createEventStartEditInteraction(event.id, newStartsAt);
+
+    // Act
+    await editEvent(interaction);
+
+    // Assert
+    const storedEvent = await pool.query<{
+      starts_at: Date;
+    }>(
+      `
+        SELECT
+          "starts_at"
+        FROM
+          "events"
+        WHERE
+          "id" = $1
+      `,
+      [event.id],
+    );
+
+    expect(storedEvent.rows[0]?.starts_at.getTime()).toBe(
+      newStartsAt.getTime(),
+    );
+
+    const safetyActions = await pool.query<{
+      action_key: string;
+
+      due_at: Date;
+
+      status: string;
+
+      attempt_count: number;
+
+      locked_at: Date | null;
+
+      completed_at: Date | null;
+
+      last_error: string | null;
+    }>(
+      `
+        SELECT
+          "action_key",
+          "due_at",
+          "status",
+          "attempt_count",
+          "locked_at",
+          "completed_at",
+          "last_error"
+        FROM
+          "scheduled_actions"
+        WHERE
+          "event_id" = $1
+          AND
+          "action_key" IN (
+            $2,
+            $3
+          )
+        ORDER BY
+          "due_at"
+      `,
+      [
+        event.id,
+
+        `organiser_cover_deadline:${event.id}`,
+
+        `organiser_missing_at_start:${event.id}`,
+      ],
+    );
+
+    expect(safetyActions.rows).toHaveLength(2);
+
+    expect(safetyActions.rows[0]).toEqual({
+      action_key: `organiser_cover_deadline:${event.id}`,
+
+      due_at: new Date(newStartsAt.getTime() - 15 * 60_000),
+
+      status: "pending",
+
+      attempt_count: 0,
+
+      locked_at: null,
+
+      completed_at: null,
+
+      last_error: null,
+    });
+
+    expect(safetyActions.rows[1]).toEqual({
+      action_key: `organiser_missing_at_start:${event.id}`,
+
+      due_at: newStartsAt,
+
+      status: "pending",
+
+      attempt_count: 0,
+
+      locked_at: null,
+
+      completed_at: null,
+
+      last_error: null,
+    });
+  });
+
   it("does not allow a stale event edit to overwrite cancellation or resurrect scheduler actions", async () => {
     // Arrange
     const event = await createPublishedSignupEvent(pool, "open");
@@ -1099,6 +1287,77 @@ function createEventEditInteraction(
       },
 
       getString: () => null,
+
+      getBoolean: () => null,
+
+      getRole: () => null,
+    },
+
+    editReply: vi.fn().mockResolvedValue(undefined),
+  };
+
+  return interaction as unknown as ChatInputCommandInteraction<"cached">;
+}
+
+function createEventStartEditInteraction(
+  eventId: number,
+  startsAt: Date,
+): ChatInputCommandInteraction<"cached"> {
+  const date = startsAt.toISOString().slice(0, 10);
+
+  const time = startsAt.toISOString().slice(11, 16);
+
+  const interaction = {
+    guildId: DISCORD_GUILD_ID,
+
+    guild: {
+      id: DISCORD_GUILD_ID,
+    },
+
+    user: {
+      id: ADMIN_USER_ID,
+    },
+
+    member: {
+      permissions: {
+        has: () => true,
+      },
+
+      roles: {
+        cache: {
+          has: () => false,
+        },
+      },
+    },
+
+    options: {
+      getInteger: (name: string): number | null => {
+        if (name === "event-id") {
+          return eventId;
+        }
+
+        /*
+         * The fixture has a stored one-hour duration, but being explicit
+         * keeps this helper independent of that implementation detail.
+         */
+        if (name === "duration-minutes") {
+          return 60;
+        }
+
+        return null;
+      },
+
+      getString: (name: string): string | null => {
+        if (name === "date") {
+          return date;
+        }
+
+        if (name === "time") {
+          return time;
+        }
+
+        return null;
+      },
 
       getBoolean: () => null,
 

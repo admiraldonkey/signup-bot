@@ -585,10 +585,10 @@ describe("organiser button interactions", () => {
     }
 
     /*
-     * The fixture uses the guild default of 40 minutes for backup response.
+     * The fixture uses the guild default of 35 minutes for backup response.
      */
     expect(backupDeadline.getTime() - backupActivatedAt.getTime()).toBe(
-      40 * 60 * 1000,
+      35 * 60 * 1000,
     );
 
     /*
@@ -1845,7 +1845,7 @@ async function createActivePendingOrganiserAssignment(
 
   const activatedAt = new Date();
 
-  const responseDeadlineAt = new Date(activatedAt.getTime() + 80 * 60 * 1000);
+  const responseDeadlineAt = new Date(activatedAt.getTime() + 70 * 60 * 1000);
 
   const assignmentResult = await pool.query<{
     id: number;

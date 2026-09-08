@@ -82,7 +82,7 @@ export const commandDefinitions = [
           option
             .setName("organiser-primary-minutes")
             .setDescription(
-              "Minutes a primary organiser has to confirm. Defaults to 80.",
+              "Minutes a primary organiser has to confirm. Defaults to 70.",
             )
             .setMinValue(1)
             .setMaxValue(10080),
@@ -92,7 +92,7 @@ export const commandDefinitions = [
           option
             .setName("organiser-backup-minutes")
             .setDescription(
-              "Minutes an activated backup has to confirm. Defaults to 40.",
+              "Minutes an activated backup has to confirm. Defaults to 35.",
             )
             .setMinValue(1)
             .setMaxValue(10080),
@@ -103,6 +103,16 @@ export const commandDefinitions = [
             .setName("organiser-warning-minutes")
             .setDescription(
               "Minutes before organiser timeout to warn admins. 0 disables warnings.",
+            )
+            .setMinValue(0)
+            .setMaxValue(1440),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("organiser-cover-before-start")
+            .setDescription(
+              "Request general organiser cover this many minutes before event start. Defaults to 15.",
             )
             .setMinValue(0)
             .setMaxValue(1440),

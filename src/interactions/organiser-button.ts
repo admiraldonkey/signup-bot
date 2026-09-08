@@ -288,13 +288,6 @@ async function handleCoverClaim(
 
       return;
 
-    case "event_started":
-      await interaction.editReply(
-        "This event has already started and can no longer be claimed through organiser cover.",
-      );
-
-      return;
-
     case "role_not_configured":
       await interaction.editReply(
         "This server does not currently have an Event Organiser role configured.",
@@ -335,13 +328,6 @@ async function handleCoverClaim(
     case "event_inactive":
       await interaction.editReply(
         "This event no longer requires organiser cover.",
-      );
-
-      return;
-
-    case "event_started":
-      await interaction.editReply(
-        "This event has already started and can no longer be claimed through organiser cover.",
       );
 
       return;

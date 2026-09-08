@@ -4,6 +4,7 @@ import {
   eq,
   gte,
   inArray,
+  like,
   lt,
   lte,
   sql,
@@ -30,13 +31,17 @@ import { REMINDER_ACTION_PREFIX } from "../reminders/reminder-scheduling.js";
 import { reschedulePendingEventReminders } from "../reminders/reminder-scheduling.js";
 import { escalateAfterFailedOrganiserAssignment } from "../organisers/organiser-escalation.js";
 import {
+  ORGANISER_COVER_DEADLINE_ACTION_PREFIX,
+  ORGANISER_MISSING_AT_START_ACTION_PREFIX,
   ORGANISER_COVER_REQUEST_ACTION_PREFIX,
   ORGANISER_TIMEOUT_ACTION_PREFIX,
   ORGANISER_WARNING_ACTION_PREFIX,
   cancelAllOrganiserEscalationActions,
 } from "../organisers/organiser-scheduling.js";
+import { openOrganiserCoverAtSafetyDeadline } from "../organisers/organiser-safety-service.js";
 import {
   sendOrganiserCoverRequest,
+  sendOrganiserMissingAtStartAlert,
   sendOrganiserPendingWarning,
 } from "../events/organiser-notification.js";
 import { reconcileOrganiserPendingWarning } from "../events/organiser-warning-reconciliation.js";
@@ -363,6 +368,45 @@ async function executeAction(
     );
 
     await executeOrganiserTimeout(client, action.eventId, assignmentId);
+
+    return;
+  }
+
+  if (action.actionKey.startsWith(ORGANISER_COVER_DEADLINE_ACTION_PREFIX)) {
+    const actionEventId = parseActionId(
+      action.actionKey,
+      ORGANISER_COVER_DEADLINE_ACTION_PREFIX,
+    );
+
+    /*
+     * The event ID is stored both in scheduled_actions.event_id and the
+     * stable action key. Treat a disagreement as corrupt durable state rather
+     * than silently executing the action against one of the two events.
+     */
+    if (actionEventId !== action.eventId) {
+      throw new Error(
+        `Organiser cover-deadline action "${action.actionKey}" belongs to event ${action.eventId}, but its action key refers to event ${actionEventId}.`,
+      );
+    }
+
+    await executeOrganiserCoverDeadline(client, action.eventId);
+
+    return;
+  }
+
+  if (action.actionKey.startsWith(ORGANISER_MISSING_AT_START_ACTION_PREFIX)) {
+    const actionEventId = parseActionId(
+      action.actionKey,
+      ORGANISER_MISSING_AT_START_ACTION_PREFIX,
+    );
+
+    if (actionEventId !== action.eventId) {
+      throw new Error(
+        `Organiser missing-at-start action "${action.actionKey}" belongs to event ${action.eventId}, but its action key refers to event ${actionEventId}.`,
+      );
+    }
+
+    await executeOrganiserMissingAtStart(client, action.eventId);
 
     return;
   }
@@ -870,6 +914,488 @@ async function executeOrganiserTimeout(
   });
 }
 
+async function executeOrganiserCoverDeadline(
+  client: Client<true>,
+  eventId: number,
+): Promise<void> {
+  /*
+   * Perform the authoritative PostgreSQL transition first.
+   *
+   * The service is responsible for:
+   *
+   * - feature/lifecycle locking;
+   * - detecting already-confirmed ownership;
+   * - retiring unresolved primary/backup assignments;
+   * - cancelling their warning/timeout actions; and
+   * - detecting an already-existing general-cover request.
+   *
+   * Discord remains a secondary side effect.
+   */
+  const transition = await openOrganiserCoverAtSafetyDeadline({
+    eventId,
+  });
+
+  if (
+    transition.kind === "not_due" ||
+    transition.kind === "already_resolved" ||
+    transition.kind === "organisers_disabled" ||
+    transition.kind === "event_inactive"
+  ) {
+    return;
+  }
+
+  /*
+   * From this point onwards the database transition, where applicable, has
+   * already committed.
+   *
+   * A transient Discord guild-fetch failure should therefore retry this
+   * scheduler action. The safety service is idempotent and will re-read the
+   * authoritative state on the next attempt.
+   */
+  const guild = await client.guilds.fetch(transition.event.discordGuildId);
+
+  /*
+   * Retired assignments may have an outstanding administration warning.
+   * Reconcile each warning independently so presentation cleanup cannot
+   * prevent the more important general-cover escalation.
+   */
+  await Promise.all(
+    transition.retiredAssignmentIds.map(async (assignmentId) => {
+      await reconcileOrganiserPendingWarning({
+        guild,
+
+        assignmentId,
+      }).catch((error: unknown) => {
+        console.error(
+          `Failed to reconcile organiser warning for assignment ${assignmentId} after event ${eventId} reached its organiser cover deadline:`,
+          error,
+        );
+      });
+    }),
+  );
+
+  /*
+   * The public event message should immediately stop showing the retired
+   * nominated organiser.
+   *
+   * As elsewhere in the scheduler, PostgreSQL state remains authoritative if
+   * Discord presentation refresh fails.
+   */
+  await refreshAttendanceMessage(guild, eventId)
+    .then((result) => {
+      if (!result.ok) {
+        console.warn(
+          `Event ${eventId} reached its organiser cover deadline, but its attendance message could not be refreshed: ${result.reason}.`,
+        );
+      }
+    })
+    .catch((error: unknown) => {
+      console.error(
+        `Failed to refresh event ${eventId} after its organiser cover deadline:`,
+        error,
+      );
+    });
+
+  /*
+   * Ordinary primary/backup escalation may already have opened general
+   * cover before the hard T-15 safety deadline.
+   *
+   * In that case the safety transition may still have retired another
+   * unresolved nominee, but another Discord cover request would be noise.
+   */
+  if (transition.kind === "cover_already_requested") {
+    await writeAuditLog({
+      guildId: transition.event.guildDatabaseId,
+
+      guild,
+
+      actorUserId: null,
+
+      action: "scheduler.organiser_cover_deadline",
+
+      outcome: "success",
+
+      summary: `Reached the organiser cover safety deadline for "${transition.event.name}" (#${transition.event.id}); unresolved nominated organisers were retired and general cover had already been requested.`,
+
+      targetType: "event",
+
+      targetId: String(transition.event.id),
+
+      details: {
+        retiredAssignmentIds: transition.retiredAssignmentIds,
+
+        coverRequest: "already_requested",
+      },
+    });
+
+    return;
+  }
+
+  /*
+   * Fetching the Discord guild crossed an external boundary.
+   *
+   * The event, organiser feature or ownership state may have changed while
+   * that request was in flight, so revalidate immediately before sending a
+   * new general-cover request.
+   */
+  const [currentEvent] = await db
+    .select({
+      status: events.status,
+
+      publishedAt: events.publishedAt,
+
+      startsAt: events.startsAt,
+
+      organisersEnabled: guildSettings.organisersEnabled,
+    })
+    .from(events)
+    .innerJoin(guildSettings, eq(guildSettings.guildId, events.ownerGuildId))
+    .where(eq(events.id, eventId))
+    .limit(1);
+
+  if (
+    !currentEvent ||
+    !currentEvent.organisersEnabled ||
+    !currentEvent.publishedAt ||
+    currentEvent.startsAt <= new Date() ||
+    currentEvent.status === "cancelled" ||
+    currentEvent.status === "completed"
+  ) {
+    return;
+  }
+
+  /*
+   * A confirmed organiser may have been assigned or may have claimed cover
+   * while guilds.fetch() was in flight.
+   *
+   * Confirmation wins over the stale safety-deadline delivery decision.
+   */
+  const [confirmedAssignment] = await db
+    .select({
+      id: eventOrganiserAssignments.id,
+    })
+    .from(eventOrganiserAssignments)
+    .where(
+      and(
+        eq(eventOrganiserAssignments.eventId, eventId),
+
+        eq(eventOrganiserAssignments.isCurrent, true),
+
+        eq(eventOrganiserAssignments.status, "confirmed"),
+      ),
+    )
+    .limit(1);
+
+  if (confirmedAssignment) {
+    return;
+  }
+
+  /*
+   * Ordinary organiser escalation could also have queued or delivered a
+   * cover request while the guild fetch was in flight.
+   *
+   * Re-check that separately so the two escalation paths cannot race into
+   * duplicate Discord requests.
+   */
+  const [existingCoverRequest] = await db
+    .select({
+      id: scheduledActions.id,
+    })
+    .from(scheduledActions)
+    .where(
+      and(
+        eq(scheduledActions.eventId, eventId),
+
+        like(
+          scheduledActions.actionKey,
+          `${ORGANISER_COVER_REQUEST_ACTION_PREFIX}%`,
+        ),
+
+        inArray(scheduledActions.status, [
+          "pending",
+          "processing",
+          "completed",
+        ]),
+      ),
+    )
+    .limit(1);
+
+  if (existingCoverRequest) {
+    return;
+  }
+
+  const delivery = await sendOrganiserCoverRequest({
+    guild,
+
+    eventId: transition.event.id,
+
+    eventName: transition.event.name,
+
+    eventAdminChannelId: transition.event.eventAdminChannelId,
+
+    eventOrganiserRoleId: transition.event.eventOrganiserRoleId,
+  });
+
+  if (delivery === "failed") {
+    /*
+     * This matches the existing source-assignment cover-request executor:
+     * a definitively missing/unusable Discord destination is not helped by
+     * scheduler retries against unchanged configuration.
+     */
+    await writeAuditLog({
+      guildId: transition.event.guildDatabaseId,
+
+      guild,
+
+      actorUserId: null,
+
+      action: "scheduler.organiser_cover_deadline",
+
+      outcome: "failure",
+
+      summary: `Could not request organiser cover for "${transition.event.name}" (#${transition.event.id}) at its safety deadline because the configured Event Administration channel or Event Organiser role is unavailable.`,
+
+      targetType: "event",
+
+      targetId: String(transition.event.id),
+
+      details: {
+        retiredAssignmentIds: transition.retiredAssignmentIds,
+
+        delivery,
+      },
+    });
+
+    console.warn(
+      `Organiser cover request for event ${transition.event.id} could not be delivered at its safety deadline because the configured Event Administration channel or Event Organiser role is unavailable.`,
+    );
+
+    return;
+  }
+
+  await writeAuditLog({
+    guildId: transition.event.guildDatabaseId,
+
+    guild,
+
+    actorUserId: null,
+
+    action: "scheduler.organiser_cover_deadline",
+
+    outcome: "success",
+
+    summary: `Reached the organiser cover safety deadline for "${transition.event.name}" (#${transition.event.id}) and requested general organiser cover.`,
+
+    targetType: "event",
+
+    targetId: String(transition.event.id),
+
+    details: {
+      retiredAssignmentIds: transition.retiredAssignmentIds,
+
+      delivery,
+    },
+  });
+}
+
+async function executeOrganiserMissingAtStart(
+  client: Client<true>,
+  eventId: number,
+): Promise<void> {
+  /*
+   * Reuse the authoritative safety transition.
+   *
+   * Normally T-15 has already retired unresolved nominated organisers.
+   * Calling it again makes T+0 robust if the earlier action never reached
+   * its database transition.
+   */
+  const transition = await openOrganiserCoverAtSafetyDeadline({
+    eventId,
+  });
+
+  if (
+    transition.kind === "not_due" ||
+    transition.kind === "already_resolved" ||
+    transition.kind === "organisers_disabled" ||
+    transition.kind === "event_inactive"
+  ) {
+    return;
+  }
+
+  const guild = await client.guilds.fetch(transition.event.discordGuildId);
+
+  /*
+   * T+0 may itself have performed the retirement if T-15 never got that
+   * far. Clean up any warnings and public presentation in that case.
+   */
+  if (transition.retiredAssignmentIds.length > 0) {
+    await Promise.all(
+      transition.retiredAssignmentIds.map(async (assignmentId) => {
+        await reconcileOrganiserPendingWarning({
+          guild,
+
+          assignmentId,
+        }).catch((error: unknown) => {
+          console.error(
+            `Failed to reconcile organiser warning for assignment ${assignmentId} after event ${eventId} started without an organiser:`,
+            error,
+          );
+        });
+      }),
+    );
+
+    await refreshAttendanceMessage(guild, eventId)
+      .then((result) => {
+        if (!result.ok) {
+          console.warn(
+            `Event ${eventId} started without an organiser, but its attendance message could not be refreshed: ${result.reason}.`,
+          );
+        }
+      })
+      .catch((error: unknown) => {
+        console.error(
+          `Failed to refresh event ${eventId} after it started without an organiser:`,
+          error,
+        );
+      });
+  }
+
+  /*
+   * guilds.fetch() is an external race boundary.
+   *
+   * Revalidate the feature, lifecycle, start time and organiser ownership
+   * immediately before creating a new urgent Discord notification.
+   */
+  const [currentEvent] = await db
+    .select({
+      status: events.status,
+
+      publishedAt: events.publishedAt,
+
+      startsAt: events.startsAt,
+
+      organisersEnabled: guildSettings.organisersEnabled,
+    })
+    .from(events)
+    .innerJoin(guildSettings, eq(guildSettings.guildId, events.ownerGuildId))
+    .where(eq(events.id, eventId))
+    .limit(1);
+
+  if (
+    !currentEvent ||
+    !currentEvent.organisersEnabled ||
+    !currentEvent.publishedAt ||
+    currentEvent.startsAt > new Date() ||
+    currentEvent.status === "cancelled" ||
+    currentEvent.status === "completed"
+  ) {
+    return;
+  }
+
+  /*
+   * An organiser may have claimed cover or been manually confirmed while
+   * the guild fetch was in flight.
+   */
+  const [confirmedAssignment] = await db
+    .select({
+      id: eventOrganiserAssignments.id,
+    })
+    .from(eventOrganiserAssignments)
+    .where(
+      and(
+        eq(eventOrganiserAssignments.eventId, eventId),
+
+        eq(eventOrganiserAssignments.isCurrent, true),
+
+        eq(eventOrganiserAssignments.status, "confirmed"),
+      ),
+    )
+    .limit(1);
+
+  if (confirmedAssignment) {
+    return;
+  }
+
+  /*
+   * Unlike the T-15 executor, deliberately DO NOT reject this send merely
+   * because an earlier cover request exists.
+   *
+   * This message is the escalation that the event has actually started
+   * without anybody taking responsibility.
+   */
+  const delivery = await sendOrganiserMissingAtStartAlert({
+    guild,
+
+    eventId: transition.event.id,
+
+    eventName: transition.event.name,
+
+    eventAdminChannelId: transition.event.eventAdminChannelId,
+
+    eventOrganiserRoleId: transition.event.eventOrganiserRoleId,
+  });
+
+  if (delivery === "failed") {
+    await writeAuditLog({
+      guildId: transition.event.guildDatabaseId,
+
+      guild,
+
+      actorUserId: null,
+
+      action: "scheduler.organiser_missing_at_start",
+
+      outcome: "failure",
+
+      summary: `Could not alert administrators that "${transition.event.name}" (#${transition.event.id}) started without an organiser because the configured Event Administration channel or Event Organiser role is unavailable.`,
+
+      targetType: "event",
+
+      targetId: String(transition.event.id),
+
+      details: {
+        retiredAssignmentIds: transition.retiredAssignmentIds,
+
+        priorCoverState: transition.kind,
+
+        delivery,
+      },
+    });
+
+    console.warn(
+      `Missing-organiser start alert for event ${transition.event.id} could not be delivered because the configured Event Administration channel or Event Organiser role is unavailable.`,
+    );
+
+    return;
+  }
+
+  await writeAuditLog({
+    guildId: transition.event.guildDatabaseId,
+
+    guild,
+
+    actorUserId: null,
+
+    action: "scheduler.organiser_missing_at_start",
+
+    outcome: "success",
+
+    summary: `Alerted that "${transition.event.name}" (#${transition.event.id}) started without a confirmed organiser.`,
+
+    targetType: "event",
+
+    targetId: String(transition.event.id),
+
+    details: {
+      retiredAssignmentIds: transition.retiredAssignmentIds,
+
+      priorCoverState: transition.kind,
+
+      delivery,
+    },
+  });
+}
+
 async function executeOrganiserCoverRequest(
   client: Client<true>,
   eventId: number,
@@ -882,6 +1408,8 @@ async function executeOrganiserCoverRequest(
       name: events.name,
 
       status: events.status,
+
+      startsAt: events.startsAt,
 
       guildDatabaseId: events.ownerGuildId,
 
@@ -905,6 +1433,7 @@ async function executeOrganiserCoverRequest(
 
   if (
     !event.organisersEnabled ||
+    event.startsAt <= new Date() ||
     event.status === "cancelled" ||
     event.status === "completed"
   ) {
@@ -967,6 +1496,8 @@ async function executeOrganiserCoverRequest(
   const [currentSourceAssignment] = await db
     .select({
       status: eventOrganiserAssignments.status,
+
+      startsAt: events.startsAt,
     })
     .from(eventOrganiserAssignments)
     .innerJoin(events, eq(events.id, eventOrganiserAssignments.eventId))
@@ -988,7 +1519,10 @@ async function executeOrganiserCoverRequest(
     )
     .limit(1);
 
-  if (!currentSourceAssignment) {
+  if (
+    !currentSourceAssignment ||
+    currentSourceAssignment.startsAt <= new Date()
+  ) {
     return;
   }
 

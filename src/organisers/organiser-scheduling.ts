@@ -1,13 +1,19 @@
 import { and, eq, inArray, like, or } from "drizzle-orm";
 
 import { db } from "../db/client.js";
-import { scheduledActions } from "../db/schema.js";
+import { events, guildSettings, scheduledActions } from "../db/schema.js";
 
 export const ORGANISER_WARNING_ACTION_PREFIX = "organiser_warning:";
 
 export const ORGANISER_TIMEOUT_ACTION_PREFIX = "organiser_timeout:";
 
 export const ORGANISER_COVER_REQUEST_ACTION_PREFIX = "organiser_cover_request:";
+
+export const ORGANISER_COVER_DEADLINE_ACTION_PREFIX =
+  "organiser_cover_deadline:";
+
+export const ORGANISER_MISSING_AT_START_ACTION_PREFIX =
+  "organiser_missing_at_start:";
 
 export function buildOrganiserWarningActionKey(assignmentId: number): string {
   return `${ORGANISER_WARNING_ACTION_PREFIX}${assignmentId}`;
@@ -23,11 +29,26 @@ export function buildOrganiserCoverRequestActionKey(
   return `${ORGANISER_COVER_REQUEST_ACTION_PREFIX}${sourceAssignmentId}`;
 }
 
+export function buildOrganiserCoverDeadlineActionKey(eventId: number): string {
+  return `${ORGANISER_COVER_DEADLINE_ACTION_PREFIX}${eventId}`;
+}
+
+export function buildOrganiserMissingAtStartActionKey(eventId: number): string {
+  return `${ORGANISER_MISSING_AT_START_ACTION_PREFIX}${eventId}`;
+}
+
 export function calculateOrganiserResponseDeadline(
   activatedAt: Date,
   responseMinutes: number,
 ): Date {
   return new Date(activatedAt.getTime() + responseMinutes * 60_000);
+}
+
+export function calculateOrganiserCoverDeadline(
+  startsAt: Date,
+  minutesBeforeStart: number,
+): Date {
+  return new Date(startsAt.getTime() - minutesBeforeStart * 60_000);
 }
 
 export function buildOrganiserResponseActionValues(input: {
@@ -98,6 +119,191 @@ export function buildOrganiserResponseActionValues(input: {
   return actions;
 }
 
+export function buildOrganiserEventSafetyActionValues(input: {
+  eventId: number;
+
+  startsAt: Date;
+
+  coverMinutesBeforeStart: number;
+
+  updatedAt: Date;
+}) {
+  return [
+    {
+      eventId: input.eventId,
+
+      actionKey: buildOrganiserCoverDeadlineActionKey(input.eventId),
+
+      dueAt: calculateOrganiserCoverDeadline(
+        input.startsAt,
+        input.coverMinutesBeforeStart,
+      ),
+
+      status: "pending" as const,
+
+      attemptCount: 0,
+
+      lockedAt: null,
+
+      completedAt: null,
+
+      lastError: null,
+
+      updatedAt: input.updatedAt,
+    },
+
+    {
+      eventId: input.eventId,
+
+      actionKey: buildOrganiserMissingAtStartActionKey(input.eventId),
+
+      dueAt: input.startsAt,
+
+      status: "pending" as const,
+
+      attemptCount: 0,
+
+      lockedAt: null,
+
+      completedAt: null,
+
+      lastError: null,
+
+      updatedAt: input.updatedAt,
+    },
+  ];
+}
+
+export async function rescheduleOrganiserEventSafetyActions(
+  eventId: number,
+): Promise<void> {
+  /*
+   * Resolve immutable event ownership before taking the feature/lifecycle
+   * locks used by the authoritative reschedule transaction.
+   */
+  const [eventIdentity] = await db
+    .select({
+      guildDatabaseId: events.ownerGuildId,
+    })
+    .from(events)
+    .where(eq(events.id, eventId))
+    .limit(1);
+
+  if (!eventIdentity) {
+    return;
+  }
+
+  await db.transaction(async (transaction) => {
+    /*
+     * Follow the same organiser feature-lock contract as the rest of the
+     * subsystem.
+     *
+     * Disabling organisers takes FOR UPDATE on this row, so scheduling and
+     * feature disable cannot overtake one another.
+     */
+    const [settings] = await transaction
+      .select({
+        organisersEnabled: guildSettings.organisersEnabled,
+
+        organiserCoverBeforeStartMinutes:
+          guildSettings.organiserCoverBeforeStartMinutes,
+      })
+      .from(guildSettings)
+      .where(eq(guildSettings.guildId, eventIdentity.guildDatabaseId))
+      .limit(1)
+      .for("share");
+
+    if (!settings?.organisersEnabled) {
+      return;
+    }
+
+    /*
+     * Serialise against lifecycle changes such as cancellation/completion.
+     *
+     * If a terminal transition wins first, no organiser actions are
+     * resurrected. If this reschedule wins first, that later terminal
+     * transition will subsequently cancel them.
+     */
+    const [event] = await transaction
+      .select({
+        startsAt: events.startsAt,
+
+        publishedAt: events.publishedAt,
+
+        status: events.status,
+      })
+      .from(events)
+      .where(
+        and(
+          eq(events.id, eventId),
+
+          eq(events.ownerGuildId, eventIdentity.guildDatabaseId),
+        ),
+      )
+      .limit(1)
+      .for("share");
+
+    if (
+      !event ||
+      !event.publishedAt ||
+      event.status === "cancelled" ||
+      event.status === "completed"
+    ) {
+      return;
+    }
+
+    const now = new Date();
+
+    const actions = buildOrganiserEventSafetyActionValues({
+      eventId,
+
+      startsAt: event.startsAt,
+
+      coverMinutesBeforeStart: settings.organiserCoverBeforeStartMinutes,
+
+      updatedAt: now,
+    });
+
+    /*
+     * Reset both stable event-level actions to the newly-calculated
+     * schedule.
+     *
+     * This deliberately also revives completed/failed/cancelled instances:
+     * moving an event creates a new operational deadline which must be
+     * evaluated again.
+     *
+     * A worker already executing an older attempt is fenced by status /
+     * attemptCount ownership in the scheduler, while the safety service
+     * itself now rejects a stale action whose recalculated deadline is not
+     * yet due.
+     */
+    for (const action of actions) {
+      await transaction
+        .insert(scheduledActions)
+        .values(action)
+        .onConflictDoUpdate({
+          target: [scheduledActions.eventId, scheduledActions.actionKey],
+
+          set: {
+            dueAt: action.dueAt,
+
+            status: "pending",
+
+            attemptCount: 0,
+
+            lockedAt: null,
+
+            completedAt: null,
+
+            lastError: null,
+
+            updatedAt: now,
+          },
+        });
+    }
+  });
+}
+
 export async function cancelOrganiserResponseActions(
   eventId: number,
   assignmentId: number,
@@ -162,6 +368,16 @@ export async function cancelAllOrganiserEscalationActions(
           like(
             scheduledActions.actionKey,
             `${ORGANISER_COVER_REQUEST_ACTION_PREFIX}%`,
+          ),
+
+          like(
+            scheduledActions.actionKey,
+            `${ORGANISER_COVER_DEADLINE_ACTION_PREFIX}%`,
+          ),
+
+          like(
+            scheduledActions.actionKey,
+            `${ORGANISER_MISSING_AT_START_ACTION_PREFIX}%`,
           ),
         ),
       ),

@@ -19,9 +19,6 @@ export type OrganiserCoverClaimContextResult =
       kind: "event_inactive";
     }
   | {
-      kind: "event_started";
-    }
-  | {
       kind: "role_not_configured";
     }
   | {
@@ -44,9 +41,6 @@ export type ClaimEventOrganiserCoverResult =
     }
   | {
       kind: "event_inactive";
-    }
-  | {
-      kind: "event_started";
     }
   | {
       kind: "active_assignment";
@@ -84,8 +78,6 @@ export async function getOrganiserCoverClaimContext(input: {
 
       status: events.status,
 
-      startsAt: events.startsAt,
-
       guildDatabaseId: events.ownerGuildId,
 
       discordGuildId: discordGuilds.discordGuildId,
@@ -115,12 +107,6 @@ export async function getOrganiserCoverClaimContext(input: {
   if (event.status === "cancelled" || event.status === "completed") {
     return {
       kind: "event_inactive",
-    };
-  }
-
-  if (event.startsAt <= new Date()) {
-    return {
-      kind: "event_started",
     };
   }
 
@@ -202,8 +188,6 @@ export async function claimEventOrganiserCover(input: {
     const [lockedEvent] = await transaction
       .select({
         status: events.status,
-
-        startsAt: events.startsAt,
       })
       .from(events)
       .where(eq(events.id, input.eventId))
@@ -217,16 +201,6 @@ export async function claimEventOrganiserCover(input: {
     ) {
       return {
         kind: "event_inactive",
-      } as const;
-    }
-
-    /*
-     * The interaction may have waited for another transaction, so the
-     * event start time must be checked again after obtaining the lock.
-     */
-    if (lockedEvent.startsAt <= new Date()) {
-      return {
-        kind: "event_started",
       } as const;
     }
 
@@ -308,7 +282,6 @@ export async function claimEventOrganiserCover(input: {
   if (
     claimResult.kind === "organisers_disabled" ||
     claimResult.kind === "event_inactive" ||
-    claimResult.kind === "event_started" ||
     claimResult.kind === "active_assignment" ||
     claimResult.kind === "cover_taken"
   ) {

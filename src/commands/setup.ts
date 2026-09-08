@@ -262,6 +262,9 @@ async function configureGuild(
 
       organiserWarningMinutesBefore:
         guildSettings.organiserWarningMinutesBefore,
+
+      organiserCoverBeforeStartMinutes:
+        guildSettings.organiserCoverBeforeStartMinutes,
     })
     .from(guildSettings)
     .where(eq(guildSettings.guildId, configuredGuild.id))
@@ -311,19 +314,28 @@ async function configureGuild(
     "organiser-warning-minutes",
   );
 
+  const coverBeforeStartMinutesOption = interaction.options.getInteger(
+    "organiser-cover-before-start",
+  );
+
   const organiserPrimaryResponseMinutes =
     primaryResponseMinutesOption ??
     existingSettings?.organiserPrimaryResponseMinutes ??
-    80;
+    70;
 
   const organiserBackupResponseMinutes =
     backupResponseMinutesOption ??
     existingSettings?.organiserBackupResponseMinutes ??
-    40;
+    35;
 
   const organiserWarningMinutesBefore =
     warningMinutesBeforeOption ??
     existingSettings?.organiserWarningMinutesBefore ??
+    15;
+
+  const organiserCoverBeforeStartMinutes =
+    coverBeforeStartMinutesOption ??
+    existingSettings?.organiserCoverBeforeStartMinutes ??
     15;
 
   /*
@@ -575,6 +587,8 @@ async function configureGuild(
 
       organiserWarningMinutesBefore,
 
+      organiserCoverBeforeStartMinutes,
+
       ...(eventAdminChannel
         ? {
             eventAdminChannelId: eventAdminChannel.id,
@@ -604,6 +618,8 @@ async function configureGuild(
         organiserBackupResponseMinutes,
 
         organiserWarningMinutesBefore,
+
+        organiserCoverBeforeStartMinutes,
 
         ...(eventAdminChannel
           ? {
@@ -648,13 +664,18 @@ async function configureGuild(
   responseLines.push(
     "",
     "**Organiser escalation:**",
-    `• Primary response time: ${organiserPrimaryResponseMinutes} minute(s)`,
-    `• Backup response time: ${organiserBackupResponseMinutes} minute(s)`,
+
+    `• Primary confirmation window: ${organiserPrimaryResponseMinutes} minute(s)`,
+
+    `• Backup confirmation window: ${organiserBackupResponseMinutes} minute(s)`,
+
     `• Admin warning: ${
       organiserWarningMinutesBefore === 0
         ? "Disabled"
         : `${organiserWarningMinutesBefore} minute(s) before timeout`
     }`,
+
+    `• General cover safety deadline: ${organiserCoverBeforeStartMinutes} minute(s) before event start`,
   );
 
   if (!eventAdminChannel || !eventOrganiserRole) {
@@ -711,6 +732,8 @@ async function configureGuild(
       organiserBackupResponseMinutes,
 
       organiserWarningMinutesBefore,
+
+      organiserCoverBeforeStartMinutes,
     },
   });
 }
@@ -1109,6 +1132,8 @@ async function showSetupStatus(
         guildSettings.organiserBackupResponseMinutes,
       organiserWarningMinutesBefore:
         guildSettings.organiserWarningMinutesBefore,
+      organiserCoverBeforeStartMinutes:
+        guildSettings.organiserCoverBeforeStartMinutes,
       botLogChannelId: guildSettings.botLogChannelId,
     })
     .from(guildSettings)
@@ -1197,17 +1222,21 @@ async function showSetupStatus(
           ? `<#${settings.attendanceChannelId}>`
           : "Not set"
       }`,
-      `• Primary organiser response: ${
-        settings?.organiserPrimaryResponseMinutes ?? 80
+      `• Primary confirmation window: ${
+        settings?.organiserPrimaryResponseMinutes ?? 70
       } minute(s)`,
-      `• Backup organiser response: ${
-        settings?.organiserBackupResponseMinutes ?? 40
+
+      `• Backup confirmation window: ${
+        settings?.organiserBackupResponseMinutes ?? 35
       } minute(s)`,
       `• Organiser warning: ${
         (settings?.organiserWarningMinutesBefore ?? 15) === 0
           ? "Disabled"
           : `${settings?.organiserWarningMinutesBefore ?? 15} minute(s) before timeout`
       }`,
+      `• General cover safety deadline: ${
+        settings?.organiserCoverBeforeStartMinutes ?? 15
+      } minute(s) before event start`,
       `• Role-request channel: ${
         settings?.roleRequestChannelId
           ? `<#${settings.roleRequestChannelId}>`

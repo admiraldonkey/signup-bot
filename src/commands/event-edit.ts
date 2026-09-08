@@ -15,6 +15,7 @@ import {
 import { db } from "../db/client.js";
 import { eventMessages, eventPingRoles, events } from "../db/schema.js";
 import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
+import { rescheduleOrganiserEventSafetyActions } from "../organisers/organiser-scheduling.js";
 import { reschedulePendingEventReminders } from "../reminders/reminder-scheduling.js";
 import {
   cancelEventPublication,
@@ -718,6 +719,10 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
 
   if (hasStartChange) {
     await rescheduleOpenRoleRequestGroupCloses(event.id);
+
+    if (event.publishedAt) {
+      await rescheduleOrganiserEventSafetyActions(event.id);
+    }
   }
 
   const refreshResult = event.publishedAt
