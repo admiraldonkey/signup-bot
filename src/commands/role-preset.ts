@@ -17,6 +17,7 @@ import {
   addPresetRequestGroup,
   addPresetRoleOption,
   createRoleRequestPreset,
+  setRoleRequestPresetActive,
 } from "../role-requests/role-request-preset-admin-service.js";
 
 import {
@@ -87,6 +88,11 @@ export async function handleRolePresetCommand(
 
     case "apply":
       await applyPreset(interaction, configuration.guildId);
+
+      return;
+
+    case "set-active":
+      await setPresetActive(interaction, configuration.guildId);
 
       return;
 
@@ -1132,6 +1138,101 @@ async function applyPreset(
 
           result.presetGroupId,
         ),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
+}
+
+async function setPresetActive(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const presetId = interaction.options.getInteger("preset-id", true);
+
+  const active = interaction.options.getBoolean("active", true);
+
+  const result = await setRoleRequestPresetActive({
+    guildDatabaseId,
+
+    presetId,
+
+    active,
+  });
+
+  switch (result.kind) {
+    case "updated": {
+      await interaction.editReply({
+        content: result.preset.active
+          ? [
+              `✅ Role-request preset **${result.preset.name}** (#${result.preset.id}) is now active.`,
+
+              "",
+
+              "It can now be applied to new events.",
+
+              "Individual role options and request groups keep their existing active/inactive states.",
+            ].join("\n")
+          : [
+              `✅ Role-request preset **${result.preset.name}** (#${result.preset.id}) is now inactive.`,
+
+              "",
+
+              "It can no longer be applied to new events.",
+
+              "Existing event snapshots and the preset's child option/group states are unchanged.",
+            ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: guildDatabaseId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "role_preset.active.set",
+
+        outcome: "success",
+
+        summary: `Set role-request preset "${result.preset.name}" (#${result.preset.id}) active=${result.preset.active}.`,
+
+        targetType: "role_request_preset",
+
+        targetId: String(result.preset.id),
+
+        details: {
+          active: result.preset.active,
+        },
+      });
+
+      return;
+    }
+
+    case "unchanged":
+      await interaction.editReply({
+        content: `Role-request preset **${result.preset.name}** (#${result.preset.id}) is already ${
+          result.preset.active ? "active" : "inactive"
+        }. No changes were made.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "preset_not_found":
+      await interaction.editReply({
+        content: `Role-request preset #${presetId} was not found in this server.`,
 
         allowedMentions: {
           parse: [],

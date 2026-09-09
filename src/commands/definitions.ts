@@ -1514,7 +1514,6 @@ export const commandDefinitions = [
         .setDescription(
           "Snapshots a reusable role-request preset onto an existing event.",
         )
-
         .addIntegerOption((option) =>
           option
             .setName("preset-id")
@@ -1530,6 +1529,31 @@ export const commandDefinitions = [
               "Existing event that should receive the preset snapshot.",
             )
             .setMinValue(1)
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("set-active")
+        .setDescription(
+          "Activates or deactivates a reusable role-request preset.",
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("preset-id")
+            .setDescription("Preset ID shown by /role-preset list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addBooleanOption((option) =>
+          option
+            .setName("active")
+            .setDescription(
+              "Whether the preset should be available for future applications.",
+            )
             .setRequired(true),
         ),
     ),
