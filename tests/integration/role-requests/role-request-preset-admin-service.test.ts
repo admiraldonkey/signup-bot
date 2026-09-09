@@ -9,6 +9,7 @@ import {
   addPresetRoleOption,
   createRoleRequestPreset,
   setRoleRequestPresetActive,
+  setRoleRequestPresetGroupActive,
   setRoleRequestPresetOptionActive,
 } from "../../../src/role-requests/role-request-preset-admin-service.js";
 
@@ -1211,6 +1212,601 @@ describe("role-request preset administration service", () => {
           "id" = $1
       `,
       [otherOptions.captainId],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        active: true,
+      },
+    ]);
+  });
+
+  it("deactivates a preset request group while preserving its option mappings", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const groupResult = await pool.query<{
+      id: number;
+    }>(
+      `
+        INSERT INTO
+          "role_request_preset_groups" (
+            "preset_id",
+            "name",
+            "requires_positive_signup",
+            "open_minutes_before_start",
+            "close_minutes_before_start",
+            "sort_order",
+            "active"
+          )
+        VALUES (
+          $1,
+          'Naval Roles',
+          true,
+          60,
+          -10,
+          0,
+          true
+        )
+        RETURNING
+          "id"
+      `,
+      [fixture.presetId],
+    );
+
+    const groupId = groupResult.rows[0]?.id;
+
+    if (!groupId) {
+      throw new Error(
+        "The group-lifecycle integration-test group was not created.",
+      );
+    }
+
+    await pool.query(
+      `
+      INSERT INTO
+        "role_request_preset_group_options" (
+          "group_id",
+          "preset_option_id",
+          "sort_order"
+        )
+      VALUES
+        (
+          $1,
+          $2,
+          0
+        ),
+        (
+          $1,
+          $3,
+          1
+        )
+    `,
+      [groupId, options.captainId, options.carpenterId],
+    );
+
+    // Act
+    const result = await setRoleRequestPresetGroupActive({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: groupId,
+
+      active: false,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "updated",
+
+      group: {
+        id: groupId,
+
+        presetId: fixture.presetId,
+
+        name: "Naval Roles",
+
+        active: false,
+      },
+    });
+
+    const stored = await pool.query<{
+      group_active: boolean;
+
+      captain_active: boolean;
+
+      carpenter_active: boolean;
+
+      mappings: number;
+    }>(
+      `
+        SELECT
+          (
+            SELECT
+              "active"
+            FROM
+              "role_request_preset_groups"
+            WHERE
+              "id" = $1
+          ) AS "group_active",
+
+          (
+            SELECT
+              "active"
+            FROM
+              "role_request_preset_options"
+            WHERE
+              "id" = $2
+          ) AS "captain_active",
+
+          (
+            SELECT
+              "active"
+            FROM
+              "role_request_preset_options"
+            WHERE
+              "id" = $3
+          ) AS "carpenter_active",
+
+          (
+            SELECT
+              COUNT(*)::int
+            FROM
+              "role_request_preset_group_options"
+            WHERE
+              "group_id" = $1
+          ) AS "mappings"
+      `,
+      [groupId, options.captainId, options.carpenterId],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        group_active: false,
+
+        captain_active: true,
+
+        carpenter_active: true,
+
+        mappings: 2,
+      },
+    ]);
+  });
+
+  it("reactivates an inactive preset request group without rewriting its mappings", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const groupResult = await pool.query<{
+      id: number;
+    }>(
+      `
+        INSERT INTO
+          "role_request_preset_groups" (
+            "preset_id",
+            "name",
+            "requires_positive_signup",
+            "open_minutes_before_start",
+            "close_minutes_before_start",
+            "sort_order",
+            "active"
+          )
+        VALUES (
+          $1,
+          'Command Roles',
+          false,
+          180,
+          60,
+          0,
+          false
+        )
+        RETURNING
+          "id"
+      `,
+      [fixture.presetId],
+    );
+
+    const groupId = groupResult.rows[0]?.id;
+
+    if (!groupId) {
+      throw new Error(
+        "The group-reactivation integration-test group was not created.",
+      );
+    }
+
+    await pool.query(
+      `
+      INSERT INTO
+        "role_request_preset_group_options" (
+          "group_id",
+          "preset_option_id",
+          "sort_order"
+        )
+      VALUES (
+        $1,
+        $2,
+        0
+      )
+    `,
+      [groupId, options.captainId],
+    );
+
+    // Act
+    const result = await setRoleRequestPresetGroupActive({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: groupId,
+
+      active: true,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "updated",
+
+      group: {
+        id: groupId,
+
+        presetId: fixture.presetId,
+
+        name: "Command Roles",
+
+        active: true,
+      },
+    });
+
+    const stored = await pool.query<{
+      active: boolean;
+
+      mappings: number;
+    }>(
+      `
+        SELECT
+          (
+            SELECT
+              "active"
+            FROM
+              "role_request_preset_groups"
+            WHERE
+              "id" = $1
+          ) AS "active",
+
+          (
+            SELECT
+              COUNT(*)::int
+            FROM
+              "role_request_preset_group_options"
+            WHERE
+              "group_id" = $1
+          ) AS "mappings"
+      `,
+      [groupId],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        active: true,
+
+        mappings: 1,
+      },
+    ]);
+  });
+
+  it("treats setting a preset request group to its existing state as an idempotent no-op", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const groupResult = await pool.query<{
+      id: number;
+    }>(
+      `
+        INSERT INTO
+          "role_request_preset_groups" (
+            "preset_id",
+            "name",
+            "requires_positive_signup",
+            "open_minutes_before_start",
+            "close_minutes_before_start",
+            "sort_order",
+            "active"
+          )
+        VALUES (
+          $1,
+          'Naval Roles',
+          false,
+          60,
+          0,
+          0,
+          true
+        )
+        RETURNING
+          "id"
+      `,
+      [fixture.presetId],
+    );
+
+    const groupId = groupResult.rows[0]?.id;
+
+    if (!groupId) {
+      throw new Error(
+        "The idempotency integration-test group was not created.",
+      );
+    }
+
+    const fixedGroupUpdatedAt = new Date("2026-01-01T00:00:00Z");
+
+    const fixedPresetUpdatedAt = new Date("2026-01-02T00:00:00Z");
+
+    await pool.query(
+      `
+      UPDATE
+        "role_request_preset_groups"
+      SET
+        "updated_at" = $2
+      WHERE
+        "id" = $1
+    `,
+      [groupId, fixedGroupUpdatedAt],
+    );
+
+    await pool.query(
+      `
+      UPDATE
+        "role_request_presets"
+      SET
+        "updated_at" = $2
+      WHERE
+        "id" = $1
+    `,
+      [fixture.presetId, fixedPresetUpdatedAt],
+    );
+
+    // Act
+    const result = await setRoleRequestPresetGroupActive({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: groupId,
+
+      active: true,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "unchanged",
+
+      group: {
+        id: groupId,
+
+        presetId: fixture.presetId,
+
+        name: "Naval Roles",
+
+        active: true,
+      },
+    });
+
+    const stored = await pool.query<{
+      group_updated_at: Date;
+
+      preset_updated_at: Date;
+    }>(
+      `
+        SELECT
+          (
+            SELECT
+              "updated_at"
+            FROM
+              "role_request_preset_groups"
+            WHERE
+              "id" = $2
+          ) AS "group_updated_at",
+
+          (
+            SELECT
+              "updated_at"
+            FROM
+              "role_request_presets"
+            WHERE
+              "id" = $1
+          ) AS "preset_updated_at"
+      `,
+      [fixture.presetId, groupId],
+    );
+
+    expect(stored.rows[0]?.group_updated_at.getTime()).toBe(
+      fixedGroupUpdatedAt.getTime(),
+    );
+
+    expect(stored.rows[0]?.preset_updated_at.getTime()).toBe(
+      fixedPresetUpdatedAt.getTime(),
+    );
+  });
+
+  it("does not allow one guild to change a request group belonging to another guild's preset", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const groupResult = await pool.query<{
+      id: number;
+    }>(
+      `
+        INSERT INTO
+          "role_request_preset_groups" (
+            "preset_id",
+            "name",
+            "requires_positive_signup",
+            "open_minutes_before_start",
+            "close_minutes_before_start",
+            "sort_order",
+            "active"
+          )
+        VALUES (
+          $1,
+          'Naval Roles',
+          false,
+          60,
+          0,
+          0,
+          true
+        )
+        RETURNING
+          "id"
+      `,
+      [fixture.presetId],
+    );
+
+    const groupId = groupResult.rows[0]?.id;
+
+    if (!groupId) {
+      throw new Error(
+        "The foreign-guild integration-test group was not created.",
+      );
+    }
+
+    const otherGuildId = await createGuild(pool, OTHER_DISCORD_GUILD_ID);
+
+    // Act
+    const result = await setRoleRequestPresetGroupActive({
+      guildDatabaseId: otherGuildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: groupId,
+
+      active: false,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "preset_not_found",
+    });
+
+    const stored = await pool.query<{
+      active: boolean;
+    }>(
+      `
+        SELECT
+          "active"
+        FROM
+          "role_request_preset_groups"
+        WHERE
+          "id" = $1
+      `,
+      [groupId],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        active: true,
+      },
+    ]);
+  });
+
+  it("does not allow a request group from a different preset to be changed through the selected preset", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const otherPresetResult = await pool.query<{
+      id: number;
+    }>(
+      `
+        INSERT INTO
+          "role_request_presets" (
+            "owner_guild_id",
+            "name",
+            "active",
+            "created_by_user_id"
+          )
+        VALUES (
+          $1,
+          'Linebattle',
+          true,
+          $2
+        )
+        RETURNING
+          "id"
+      `,
+      [fixture.guildId, ADMIN_USER_ID],
+    );
+
+    const otherPresetId = otherPresetResult.rows[0]?.id;
+
+    if (!otherPresetId) {
+      throw new Error("The secondary lifecycle-test preset was not created.");
+    }
+
+    const groupResult = await pool.query<{
+      id: number;
+    }>(
+      `
+        INSERT INTO
+          "role_request_preset_groups" (
+            "preset_id",
+            "name",
+            "requires_positive_signup",
+            "open_minutes_before_start",
+            "close_minutes_before_start",
+            "sort_order",
+            "active"
+          )
+        VALUES (
+          $1,
+          'Linebattle Roles',
+          false,
+          60,
+          0,
+          0,
+          true
+        )
+        RETURNING
+          "id"
+      `,
+      [otherPresetId],
+    );
+
+    const otherGroupId = groupResult.rows[0]?.id;
+
+    if (!otherGroupId) {
+      throw new Error("The secondary lifecycle-test group was not created.");
+    }
+
+    // Act
+    const result = await setRoleRequestPresetGroupActive({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: otherGroupId,
+
+      active: false,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "group_not_found",
+    });
+
+    const stored = await pool.query<{
+      active: boolean;
+    }>(
+      `
+        SELECT
+          "active"
+        FROM
+          "role_request_preset_groups"
+        WHERE
+          "id" = $1
+      `,
+      [otherGroupId],
     );
 
     expect(stored.rows).toEqual([
