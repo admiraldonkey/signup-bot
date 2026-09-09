@@ -63,24 +63,24 @@ import { commandDefinitions } from "../../../src/commands/definitions.js";
 
 import { handleRolePresetCommand } from "../../../src/commands/role-preset.js";
 
-const DISCORD_GUILD_ID = "991000000000000001";
+const DISCORD_GUILD_ID = "992000000000000001";
 
-const ADMIN_USER_ID = "991000000000000002";
+const ADMIN_USER_ID = "992000000000000002";
 
-const EVENT_ADMIN_ROLE_ID = "991000000000000003";
+const EVENT_ADMIN_ROLE_ID = "992000000000000003";
 
 const PRESET_ID = 7;
 
-const OPTION_ID = 11;
+const GROUP_ID = 21;
 
-describe("/role-preset option-set-active", () => {
+describe("/role-preset group-set-active", () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
     authMocks.getGuildConfiguration.mockResolvedValue({
       guildId: 42,
 
-      guildName: "Preset Option Lifecycle Test Guild",
+      guildName: "Preset Group Lifecycle Test Guild",
 
       timezone: "Europe/London",
 
@@ -114,7 +114,7 @@ describe("/role-preset option-set-active", () => {
     auditMocks.writeAuditLog.mockResolvedValue(undefined);
   });
 
-  it("registers option-set-active with required preset, option and active values", () => {
+  it("registers group-set-active with required preset, group and active values", () => {
     const definition = commandDefinitions.find(
       (command) => command.name === "role-preset",
     );
@@ -124,7 +124,7 @@ describe("/role-preset option-set-active", () => {
     const setActive = definition?.options?.find(
       (option) =>
         option.type === ApplicationCommandOptionType.Subcommand &&
-        option.name === "option-set-active",
+        option.name === "group-set-active",
     );
 
     expect(setActive).toBeDefined();
@@ -134,7 +134,7 @@ describe("/role-preset option-set-active", () => {
       setActive.type !== ApplicationCommandOptionType.Subcommand
     ) {
       throw new Error(
-        "Expected /role-preset option-set-active to be registered as a subcommand.",
+        "Expected /role-preset group-set-active to be registered as a subcommand.",
       );
     }
 
@@ -152,7 +152,7 @@ describe("/role-preset option-set-active", () => {
       },
 
       {
-        name: "option-id",
+        name: "group-id",
 
         required: true,
       },
@@ -165,22 +165,20 @@ describe("/role-preset option-set-active", () => {
     ]);
   });
 
-  it("deactivates a preset role option without rewriting neighbouring configuration", async () => {
+  it("deactivates a preset request group and audits the mutation", async () => {
     // Arrange
-    adminServiceMocks.setRoleRequestPresetOptionActive.mockResolvedValue({
+    adminServiceMocks.setRoleRequestPresetGroupActive.mockResolvedValue({
       kind: "updated",
 
-      option: {
-        id: OPTION_ID,
+      group: {
+        id: GROUP_ID,
 
         presetId: PRESET_ID,
 
-        displayName: "Captain",
+        name: "Naval Roles",
 
         active: false,
       },
-
-      newlyInvalidActiveGroups: [],
     });
 
     const interaction = createInteraction(false);
@@ -194,25 +192,26 @@ describe("/role-preset option-set-active", () => {
     });
 
     expect(
-      adminServiceMocks.setRoleRequestPresetOptionActive,
+      adminServiceMocks.setRoleRequestPresetGroupActive,
     ).toHaveBeenCalledWith({
       guildDatabaseId: 42,
 
       presetId: PRESET_ID,
 
-      presetOptionId: OPTION_ID,
+      presetGroupId: GROUP_ID,
 
       active: false,
     });
 
     expect(interaction.editReply).toHaveBeenCalledWith({
       content: [
-        "✅ Preset role option **Captain** (#11) is now inactive.",
+        "✅ Preset request group **Naval Roles** (#21) is now inactive.",
 
         "",
+
         "It will be excluded from future event snapshots.",
 
-        "Its qualification rules and request-group mappings are unchanged.",
+        "Its role-option mappings and configuration are unchanged.",
       ].join("\n"),
 
       allowedMentions: {
@@ -226,114 +225,37 @@ describe("/role-preset option-set-active", () => {
 
         actorUserId: ADMIN_USER_ID,
 
-        action: "role_preset.option.active.set",
+        action: "role_preset.group.active.set",
 
         outcome: "success",
 
-        targetType: "role_request_preset_option",
+        targetType: "role_request_preset_group",
 
-        targetId: String(OPTION_ID),
+        targetId: String(GROUP_ID),
 
         details: {
           presetId: PRESET_ID,
 
           active: false,
-
-          newlyInvalidActiveGroupIds: [],
         },
       }),
     );
   });
 
-  it("warns when deactivation leaves active request groups with no active role options", async () => {
+  it("reactivates a preset request group without claiming its mappings were rebuilt", async () => {
     // Arrange
-    adminServiceMocks.setRoleRequestPresetOptionActive.mockResolvedValue({
+    adminServiceMocks.setRoleRequestPresetGroupActive.mockResolvedValue({
       kind: "updated",
 
-      option: {
-        id: OPTION_ID,
+      group: {
+        id: GROUP_ID,
 
         presetId: PRESET_ID,
 
-        displayName: "Captain",
-
-        active: false,
-      },
-
-      newlyInvalidActiveGroups: [
-        {
-          id: 21,
-
-          name: "Captain Only",
-        },
-
-        {
-          id: 23,
-
-          name: "Command Cover",
-        },
-      ],
-    });
-
-    const interaction = createInteraction(false);
-
-    // Act
-    await handleRolePresetCommand(interaction.interaction);
-
-    // Assert
-    const content = readFirstReplyContent(interaction.editReply);
-
-    expect(content).toContain(
-      "Preset role option **Captain** (#11) is now inactive.",
-    );
-
-    expect(content).toContain("⚠️ **Preset configuration warning**");
-
-    expect(content).toContain("**Captain Only** (#21)");
-
-    expect(content).toContain("**Command Cover** (#23)");
-
-    expect(content).toContain(
-      "These groups remain active, but now have no active role options.",
-    );
-
-    expect(content).toContain(
-      "The preset cannot be applied successfully while an active group has no active role options.",
-    );
-
-    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
-      expect.objectContaining({
-        action: "role_preset.option.active.set",
-
-        targetId: "11",
-
-        details: {
-          presetId: 7,
-
-          active: false,
-
-          newlyInvalidActiveGroupIds: [21, 23],
-        },
-      }),
-    );
-  });
-
-  it("reactivates a preset role option and preserves its existing mappings", async () => {
-    // Arrange
-    adminServiceMocks.setRoleRequestPresetOptionActive.mockResolvedValue({
-      kind: "updated",
-
-      option: {
-        id: OPTION_ID,
-
-        presetId: PRESET_ID,
-
-        displayName: "Captain",
+        name: "Naval Roles",
 
         active: true,
       },
-
-      newlyInvalidActiveGroups: [],
     });
 
     const interaction = createInteraction(true);
@@ -344,12 +266,13 @@ describe("/role-preset option-set-active", () => {
     // Assert
     expect(interaction.editReply).toHaveBeenCalledWith({
       content: [
-        "✅ Preset role option **Captain** (#11) is now active.",
+        "✅ Preset request group **Naval Roles** (#21) is now active.",
 
         "",
+
         "It is available for future event snapshots again.",
 
-        "Existing qualification rules and request-group mappings are unchanged.",
+        "Its existing role-option mappings and configuration are unchanged.",
       ].join("\n"),
 
       allowedMentions: {
@@ -359,32 +282,30 @@ describe("/role-preset option-set-active", () => {
 
     expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
       expect.objectContaining({
-        action: "role_preset.option.active.set",
+        action: "role_preset.group.active.set",
 
-        targetId: "11",
+        targetId: "21",
 
         details: {
           presetId: 7,
 
           active: true,
-
-          newlyInvalidActiveGroupIds: [],
         },
       }),
     );
   });
 
-  it("treats an already-matching option lifecycle state as an idempotent no-op", async () => {
+  it("treats an already-matching group lifecycle state as an idempotent no-op", async () => {
     // Arrange
-    adminServiceMocks.setRoleRequestPresetOptionActive.mockResolvedValue({
+    adminServiceMocks.setRoleRequestPresetGroupActive.mockResolvedValue({
       kind: "unchanged",
 
-      option: {
-        id: OPTION_ID,
+      group: {
+        id: GROUP_ID,
 
         presetId: PRESET_ID,
 
-        displayName: "Captain",
+        name: "Naval Roles",
 
         active: false,
       },
@@ -398,7 +319,7 @@ describe("/role-preset option-set-active", () => {
     // Assert
     expect(interaction.editReply).toHaveBeenCalledWith({
       content:
-        "Preset role option **Captain** (#11) is already inactive. No changes were made.",
+        "Preset request group **Naval Roles** (#21) is already inactive. No changes were made.",
 
       allowedMentions: {
         parse: [],
@@ -410,7 +331,7 @@ describe("/role-preset option-set-active", () => {
 
   it("reports a missing or foreign-guild preset as not found", async () => {
     // Arrange
-    adminServiceMocks.setRoleRequestPresetOptionActive.mockResolvedValue({
+    adminServiceMocks.setRoleRequestPresetGroupActive.mockResolvedValue({
       kind: "preset_not_found",
     });
 
@@ -431,10 +352,10 @@ describe("/role-preset option-set-active", () => {
     expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
   });
 
-  it("reports an option that does not belong to the selected preset as not found", async () => {
+  it("reports a group that does not belong to the selected preset as not found", async () => {
     // Arrange
-    adminServiceMocks.setRoleRequestPresetOptionActive.mockResolvedValue({
-      kind: "option_not_found",
+    adminServiceMocks.setRoleRequestPresetGroupActive.mockResolvedValue({
+      kind: "group_not_found",
     });
 
     const interaction = createInteraction(false);
@@ -444,7 +365,7 @@ describe("/role-preset option-set-active", () => {
 
     // Assert
     expect(interaction.editReply).toHaveBeenCalledWith({
-      content: "Role option #11 was not found in role-request preset #7.",
+      content: "Request group #21 was not found in role-request preset #7.",
 
       allowedMentions: {
         parse: [],
@@ -474,7 +395,7 @@ function createInteraction(active: boolean): {
     guild: {
       id: DISCORD_GUILD_ID,
 
-      name: "Preset Option Lifecycle Test Guild",
+      name: "Preset Group Lifecycle Test Guild",
     },
 
     member: {
@@ -494,7 +415,7 @@ function createInteraction(active: boolean): {
     editReply,
 
     options: {
-      getSubcommand: () => "option-set-active",
+      getSubcommand: () => "group-set-active",
 
       getInteger: (name: string, required?: boolean) => {
         let value: number | null = null;
@@ -505,8 +426,8 @@ function createInteraction(active: boolean): {
 
             break;
 
-          case "option-id":
-            value = OPTION_ID;
+          case "group-id":
+            value = GROUP_ID;
 
             break;
         }
@@ -537,25 +458,4 @@ function createInteraction(active: boolean): {
 
     editReply,
   };
-}
-
-function readFirstReplyContent(editReply: ReturnType<typeof vi.fn>): string {
-  const firstCall = editReply.mock.calls[0];
-
-  if (!firstCall) {
-    throw new Error("Expected the command to edit its deferred reply.");
-  }
-
-  const payload = firstCall[0];
-
-  if (
-    typeof payload !== "object" ||
-    payload === null ||
-    !("content" in payload) ||
-    typeof payload.content !== "string"
-  ) {
-    throw new Error("Expected an object reply containing text content.");
-  }
-
-  return payload.content;
 }

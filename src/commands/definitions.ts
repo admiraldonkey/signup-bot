@@ -1563,7 +1563,6 @@ export const commandDefinitions = [
         .setDescription(
           "Activates or deactivates one reusable preset role option.",
         )
-
         .addIntegerOption((option) =>
           option
             .setName("preset-id")
@@ -1585,6 +1584,39 @@ export const commandDefinitions = [
             .setName("active")
             .setDescription(
               "Whether this role option should be included in future snapshots.",
+            )
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("group-set-active")
+        .setDescription(
+          "Activates or deactivates one reusable preset request group.",
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("preset-id")
+            .setDescription("Preset ID shown by /role-preset list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("group-id")
+            .setDescription("Request-group ID shown by /role-preset show.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addBooleanOption((option) =>
+          option
+            .setName("active")
+            .setDescription(
+              "Whether this request group should be included in future snapshots.",
             )
             .setRequired(true),
         ),

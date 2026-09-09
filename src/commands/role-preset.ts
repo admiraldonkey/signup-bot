@@ -18,6 +18,7 @@ import {
   addPresetRoleOption,
   createRoleRequestPreset,
   setRoleRequestPresetActive,
+  setRoleRequestPresetGroupActive,
   setRoleRequestPresetOptionActive,
 } from "../role-requests/role-request-preset-admin-service.js";
 
@@ -99,6 +100,11 @@ export async function handleRolePresetCommand(
 
     case "option-set-active":
       await setPresetOptionActive(interaction, configuration.guildId);
+
+      return;
+
+    case "group-set-active":
+      await setPresetGroupActive(interaction, configuration.guildId);
 
       return;
 
@@ -1372,6 +1378,118 @@ async function setPresetOptionActive(
     case "option_not_found":
       await interaction.editReply({
         content: `Role option #${presetOptionId} was not found in role-request preset #${presetId}.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
+}
+
+async function setPresetGroupActive(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const presetId = interaction.options.getInteger("preset-id", true);
+
+  const presetGroupId = interaction.options.getInteger("group-id", true);
+
+  const active = interaction.options.getBoolean("active", true);
+
+  const result = await setRoleRequestPresetGroupActive({
+    guildDatabaseId,
+
+    presetId,
+
+    presetGroupId,
+
+    active,
+  });
+
+  switch (result.kind) {
+    case "updated": {
+      await interaction.editReply({
+        content: result.group.active
+          ? [
+              `✅ Preset request group **${result.group.name}** (#${result.group.id}) is now active.`,
+
+              "",
+
+              "It is available for future event snapshots again.",
+
+              "Its existing role-option mappings and configuration are unchanged.",
+            ].join("\n")
+          : [
+              `✅ Preset request group **${result.group.name}** (#${result.group.id}) is now inactive.`,
+
+              "",
+
+              "It will be excluded from future event snapshots.",
+
+              "Its role-option mappings and configuration are unchanged.",
+            ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: guildDatabaseId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "role_preset.group.active.set",
+
+        outcome: "success",
+
+        summary: `Set preset request group "${result.group.name}" (#${result.group.id}) active=${result.group.active} in role-request preset #${result.group.presetId}.`,
+
+        targetType: "role_request_preset_group",
+
+        targetId: String(result.group.id),
+
+        details: {
+          presetId: result.group.presetId,
+
+          active: result.group.active,
+        },
+      });
+
+      return;
+    }
+
+    case "unchanged":
+      await interaction.editReply({
+        content: `Preset request group **${result.group.name}** (#${result.group.id}) is already ${
+          result.group.active ? "active" : "inactive"
+        }. No changes were made.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "preset_not_found":
+      await interaction.editReply({
+        content: `Role-request preset #${presetId} was not found in this server.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "group_not_found":
+      await interaction.editReply({
+        content: `Request group #${presetGroupId} was not found in role-request preset #${presetId}.`,
 
         allowedMentions: {
           parse: [],
