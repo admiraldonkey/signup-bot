@@ -86,6 +86,62 @@ export type SetRoleRequestPresetActiveResult =
       kind: "preset_not_found";
     };
 
+export type SetRoleRequestPresetOptionActiveInput = {
+  guildDatabaseId: number;
+
+  presetId: number;
+
+  presetOptionId: number;
+
+  active: boolean;
+};
+
+export type SetRoleRequestPresetOptionActiveResult =
+  | {
+      kind: "updated";
+
+      option: {
+        id: number;
+
+        presetId: number;
+
+        displayName: string;
+
+        active: boolean;
+      };
+
+      /*
+       * Active groups which became unusable because this deactivation removed
+       * their final active mapped role option.
+       *
+       * The groups themselves remain active and their mappings are preserved.
+       */
+      newlyInvalidActiveGroups: {
+        id: number;
+
+        name: string;
+      }[];
+    }
+  | {
+      kind: "unchanged";
+
+      option: {
+        id: number;
+
+        presetId: number;
+
+        displayName: string;
+
+        active: boolean;
+      };
+    }
+  | {
+      kind: "preset_not_found";
+    }
+  | {
+      kind: "option_not_found";
+    };
+
 export type PresetQualificationRoleInput = {
   discordRoleId: string;
 
@@ -424,6 +480,218 @@ export async function setRoleRequestPresetActive(
       kind: "updated",
 
       preset: updatedPreset,
+    } as const;
+  });
+}
+
+/**
+ * Activates or deactivates one logical role option belonging to a reusable
+ * role-request preset.
+ *
+ * The option's qualification rows and group mappings are deliberately
+ * preserved. Application filters inactive options from future snapshots.
+ *
+ * Deactivating an option may therefore leave an otherwise-active group with
+ * no active mapped options. Those groups are reported to the caller but are
+ * not silently deactivated or rewritten.
+ *
+ * As with other preset mutations, the preset parent is locked FOR UPDATE so
+ * application cannot observe the source graph halfway through this change.
+ */
+export async function setRoleRequestPresetOptionActive(
+  input: SetRoleRequestPresetOptionActiveInput,
+): Promise<SetRoleRequestPresetOptionActiveResult> {
+  return db.transaction(async (transaction) => {
+    const [preset] = await transaction
+      .select({
+        id: roleRequestPresets.id,
+      })
+      .from(roleRequestPresets)
+      .where(
+        and(
+          eq(roleRequestPresets.id, input.presetId),
+
+          eq(roleRequestPresets.ownerGuildId, input.guildDatabaseId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    if (!preset) {
+      return {
+        kind: "preset_not_found",
+      } as const;
+    }
+
+    const [option] = await transaction
+      .select({
+        id: roleRequestPresetOptions.id,
+
+        presetId: roleRequestPresetOptions.presetId,
+
+        displayName: roleRequestPresetOptions.displayName,
+
+        active: roleRequestPresetOptions.active,
+      })
+      .from(roleRequestPresetOptions)
+      .where(
+        and(
+          eq(roleRequestPresetOptions.id, input.presetOptionId),
+
+          eq(roleRequestPresetOptions.presetId, preset.id),
+        ),
+      )
+      .limit(1);
+
+    if (!option) {
+      return {
+        kind: "option_not_found",
+      } as const;
+    }
+
+    if (option.active === input.active) {
+      return {
+        kind: "unchanged",
+
+        option,
+      } as const;
+    }
+
+    const newlyInvalidActiveGroups: {
+      id: number;
+
+      name: string;
+    }[] = [];
+
+    if (!input.active) {
+      /*
+       * Work out which active groups currently depend on this option as
+       * their final active mapped option.
+       *
+       * This is calculated while the target option is still active, under
+       * the preset parent's mutation lock.
+       */
+      const activeGroups = await transaction
+        .select({
+          id: roleRequestPresetGroups.id,
+
+          name: roleRequestPresetGroups.name,
+        })
+        .from(roleRequestPresetGroups)
+        .where(
+          and(
+            eq(roleRequestPresetGroups.presetId, preset.id),
+
+            eq(roleRequestPresetGroups.active, true),
+          ),
+        );
+
+      if (activeGroups.length > 0) {
+        const activeGroupIds = activeGroups.map((group) => group.id);
+
+        const mappings = await transaction
+          .select({
+            groupId: roleRequestPresetGroupOptions.groupId,
+
+            presetOptionId: roleRequestPresetGroupOptions.presetOptionId,
+          })
+          .from(roleRequestPresetGroupOptions)
+          .where(
+            inArray(roleRequestPresetGroupOptions.groupId, activeGroupIds),
+          );
+
+        const activeOptions = await transaction
+          .select({
+            id: roleRequestPresetOptions.id,
+          })
+          .from(roleRequestPresetOptions)
+          .where(
+            and(
+              eq(roleRequestPresetOptions.presetId, preset.id),
+
+              eq(roleRequestPresetOptions.active, true),
+            ),
+          );
+
+        const activeOptionIds = new Set(
+          activeOptions.map((activeOption) => activeOption.id),
+        );
+
+        /*
+         * Evaluate the state that will exist after this option is retired.
+         */
+        activeOptionIds.delete(option.id);
+
+        for (const group of activeGroups) {
+          const groupMappings = mappings.filter(
+            (mapping) => mapping.groupId === group.id,
+          );
+
+          const mapsTargetOption = groupMappings.some(
+            (mapping) => mapping.presetOptionId === option.id,
+          );
+
+          if (!mapsTargetOption) {
+            continue;
+          }
+
+          const keepsActiveOption = groupMappings.some((mapping) =>
+            activeOptionIds.has(mapping.presetOptionId),
+          );
+
+          if (!keepsActiveOption) {
+            newlyInvalidActiveGroups.push({
+              id: group.id,
+
+              name: group.name,
+            });
+          }
+        }
+      }
+    }
+
+    const now = new Date();
+
+    const [updatedOption] = await transaction
+      .update(roleRequestPresetOptions)
+      .set({
+        active: input.active,
+
+        updatedAt: now,
+      })
+      .where(eq(roleRequestPresetOptions.id, option.id))
+      .returning({
+        id: roleRequestPresetOptions.id,
+
+        presetId: roleRequestPresetOptions.presetId,
+
+        displayName: roleRequestPresetOptions.displayName,
+
+        active: roleRequestPresetOptions.active,
+      });
+
+    if (!updatedOption) {
+      throw new Error(
+        `Preset role option #${option.id} disappeared while its lifecycle state was being changed.`,
+      );
+    }
+
+    /*
+     * Child mutation also changes the reusable preset as a whole.
+     */
+    await transaction
+      .update(roleRequestPresets)
+      .set({
+        updatedAt: now,
+      })
+      .where(eq(roleRequestPresets.id, preset.id));
+
+    return {
+      kind: "updated",
+
+      option: updatedOption,
+
+      newlyInvalidActiveGroups,
     } as const;
   });
 }
