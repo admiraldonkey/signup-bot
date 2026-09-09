@@ -18,6 +18,10 @@ const adminServiceMocks = vi.hoisted(() => ({
   addPresetRoleOption: vi.fn(),
 
   addPresetRequestGroup: vi.fn(),
+
+  setRoleRequestPresetActive: vi.fn(),
+
+  setRoleRequestPresetOptionActive: vi.fn(),
 }));
 
 const queryServiceMocks = vi.hoisted(() => ({
