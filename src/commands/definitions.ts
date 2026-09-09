@@ -1506,6 +1506,32 @@ export const commandDefinitions = [
             .setDescription("Additional preset role-option ID.")
             .setMinValue(1),
         ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("apply")
+        .setDescription(
+          "Snapshots a reusable role-request preset onto an existing event.",
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("preset-id")
+            .setDescription("Preset ID shown by /role-preset list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("event-id")
+            .setDescription(
+              "Existing event that should receive the preset snapshot.",
+            )
+            .setMinValue(1)
+            .setRequired(true),
+        ),
     ),
 
   new SlashCommandBuilder()

@@ -24,6 +24,10 @@ import {
   listRoleRequestPresets,
   type RoleRequestPresetDetails,
 } from "../role-requests/role-request-preset-query-service.js";
+import {
+  applyRoleRequestPresetToEvent,
+  type InvalidRoleRequestPresetReason,
+} from "../role-requests/role-request-preset-service.js";
 
 type CachedCommandInteraction = ChatInputCommandInteraction<"cached">;
 
@@ -78,6 +82,11 @@ export async function handleRolePresetCommand(
 
     case "group-add":
       await addPresetGroup(interaction, configuration.guildId);
+
+      return;
+
+    case "apply":
+      await applyPreset(interaction, configuration.guildId);
 
       return;
 
@@ -917,6 +926,222 @@ async function addPresetGroup(
   }
 }
 
+async function applyPreset(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const presetId = interaction.options.getInteger("preset-id", true);
+
+  const eventId = interaction.options.getInteger("event-id", true);
+
+  /*
+   * All race-sensitive validation belongs to the application service.
+   *
+   * It locks the target event, reads the preset under its shared mutation
+   * fence and atomically creates the complete event-level snapshot together
+   * with its durable scheduler actions.
+   */
+  const result = await applyRoleRequestPresetToEvent({
+    guildDatabaseId,
+
+    eventId,
+
+    presetId,
+
+    appliedByUserId: interaction.user.id,
+  });
+
+  switch (result.kind) {
+    case "applied": {
+      await interaction.editReply({
+        content: [
+          `✅ Applied role-request preset #${result.presetId} to event #${result.eventId}.`,
+
+          "",
+
+          `**Snapshotted role options:** ${formatCount(
+            result.eventRoleOptionIds.length,
+            "role option",
+          )}`,
+
+          result.eventRoleOptionIds
+            .map((optionId) => `#${optionId}`)
+            .join(", "),
+
+          "",
+
+          `**Request groups created:** ${formatCount(
+            result.roleRequestGroupIds.length,
+            "request group",
+          )}`,
+
+          result.roleRequestGroupIds.map((groupId) => `#${groupId}`).join(", "),
+
+          "",
+
+          "The event now owns an independent snapshot of this preset. Later preset changes will not alter this event.",
+
+          "Role-request messages are not posted by this command itself; scheduled group openings are handled by the event scheduler.",
+
+          "",
+
+          `Use \`/event role-option-list event-id:${result.eventId}\` and \`/event role-group-list event-id:${result.eventId}\` to inspect the event-level snapshot.`,
+        ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: guildDatabaseId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "role_preset.apply",
+
+        outcome: "success",
+
+        summary: `Applied role-request preset #${result.presetId} to event #${result.eventId}.`,
+
+        targetType: "event",
+
+        targetId: String(result.eventId),
+
+        details: {
+          presetId: result.presetId,
+
+          eventRoleOptionIds: [...result.eventRoleOptionIds],
+
+          roleRequestGroupIds: [...result.roleRequestGroupIds],
+        },
+      });
+
+      return;
+    }
+
+    case "event_not_found":
+      await interaction.editReply({
+        content: `Event #${eventId} was not found in this server.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "event_terminal":
+      await interaction.editReply({
+        content: `Event #${eventId} is ${result.status} and cannot accept a role-request preset.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "role_requests_disabled":
+      await interaction.editReply({
+        content: `Event #${eventId}'s event type has role requests disabled.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "preset_not_found":
+      await interaction.editReply({
+        content: `Role-request preset #${presetId} was not found in this server.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "preset_inactive":
+      await interaction.editReply({
+        content: `Role-request preset #${presetId} is inactive and cannot be applied.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "already_applied":
+      await interaction.editReply({
+        content: `Role-request preset #${presetId} has already been applied to event #${eventId}.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "missing_default_channel":
+      await interaction.editReply({
+        content: `Preset group #${result.presetGroupId} uses the guild default role-request channel, but no default role-request channel is configured.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "signup_required":
+      await interaction.editReply({
+        content: `Preset group #${result.presetGroupId} requires a positive signup, but event #${eventId} has signups disabled.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "role_option_conflict":
+      await interaction.editReply({
+        content: `Event #${eventId} already has a role option with the logical key \`${result.key}\`.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "invalid_preset":
+      await interaction.editReply({
+        content: formatInvalidPresetApplicationError(
+          result.reason,
+
+          presetId,
+
+          result.presetOptionId,
+
+          result.presetGroupId,
+        ),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
+}
+
 async function listPresets(
   interaction: CachedCommandInteraction,
   guildDatabaseId: number,
@@ -1013,6 +1238,56 @@ function findDuplicateNumber(values: readonly number[]): number | null {
   }
 
   return null;
+}
+
+function formatInvalidPresetApplicationError(
+  reason: InvalidRoleRequestPresetReason,
+
+  presetId: number,
+
+  presetOptionId?: number,
+
+  presetGroupId?: number,
+): string {
+  switch (reason) {
+    case "no_active_options":
+      return `Role-request preset #${presetId} has no active role options.`;
+
+    case "no_active_groups":
+      return `Role-request preset #${presetId} has no active request groups.`;
+
+    case "invalid_request_restriction":
+      return presetOptionId
+        ? `Preset role option #${presetOptionId} has an invalid request restriction.`
+        : `Role-request preset #${presetId} contains an invalid request restriction.`;
+
+    case "missing_qualification_roles":
+      return presetOptionId
+        ? `Preset role option #${presetOptionId} is qualified-only but has no qualification roles.`
+        : `Role-request preset #${presetId} contains a qualified-only option with no qualification roles.`;
+
+    case "invalid_qualification_level":
+      return presetOptionId
+        ? `Preset role option #${presetOptionId} contains an invalid qualification level.`
+        : `Role-request preset #${presetId} contains an invalid qualification level.`;
+
+    case "group_option_outside_preset":
+      if (presetGroupId && presetOptionId) {
+        return `Preset group #${presetGroupId} references role option #${presetOptionId} outside preset #${presetId}.`;
+      }
+
+      return `Role-request preset #${presetId} contains a request-group option mapping outside the preset.`;
+
+    case "active_group_without_active_options":
+      return presetGroupId
+        ? `Preset group #${presetGroupId} has no active role options.`
+        : `Role-request preset #${presetId} contains an active request group with no active role options.`;
+
+    case "invalid_group_window":
+      return presetGroupId
+        ? `Preset group #${presetGroupId} does not open before it closes.`
+        : `Role-request preset #${presetId} contains an invalid request-group window.`;
+  }
 }
 
 function formatPresetGroupValidationError(

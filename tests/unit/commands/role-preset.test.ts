@@ -104,7 +104,7 @@ describe("/role-preset command", () => {
     auditMocks.writeAuditLog.mockResolvedValue(undefined);
   });
 
-  it("registers create, list, show, option-add and group-add subcommands", () => {
+  it("registers all role-preset administration subcommands", () => {
     const definition = commandDefinitions.find(
       (command) => command.name === "role-preset",
     );
@@ -117,6 +117,7 @@ describe("/role-preset command", () => {
       "show",
       "option-add",
       "group-add",
+      "apply",
     ]);
   });
 
