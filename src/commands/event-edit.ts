@@ -23,7 +23,7 @@ import {
   scheduleEventCompletion,
   scheduleEventPublication,
 } from "../scheduler/action-maintenance.js";
-import { rescheduleOpenRoleRequestGroupCloses } from "../role-requests/role-request-scheduling.js";
+import { rescheduleRoleRequestGroupsForEventStart } from "../role-requests/role-request-scheduling.js";
 
 type CachedInteraction = ChatInputCommandInteraction<"cached">;
 
@@ -718,7 +718,15 @@ export async function editEvent(interaction: CachedInteraction): Promise<void> {
   }
 
   if (hasStartChange) {
-    await rescheduleOpenRoleRequestGroupCloses(event.id);
+    /*
+     * Preserve each still-active role-request group's event-relative
+     * lifecycle.
+     *
+     * Planned groups move their future opening as well as their close.
+     * Already-posted/manual groups retain their historical opening time and
+     * move only their close.
+     */
+    await rescheduleRoleRequestGroupsForEventStart(event.id);
 
     if (event.publishedAt) {
       await rescheduleOrganiserEventSafetyActions(event.id);
