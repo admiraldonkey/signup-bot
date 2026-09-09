@@ -1,6 +1,8 @@
 import {
+  ChannelType,
   type ChatInputCommandInteraction,
   MessageFlags,
+  PermissionFlagsBits,
   type Role,
 } from "discord.js";
 
@@ -12,6 +14,7 @@ import {
 import { writeAuditLog } from "../audit/audit-log.js";
 
 import {
+  addPresetRequestGroup,
   addPresetRoleOption,
   createRoleRequestPreset,
 } from "../role-requests/role-request-preset-admin-service.js";
@@ -70,6 +73,11 @@ export async function handleRolePresetCommand(
 
     case "option-add":
       await addPresetOption(interaction, configuration.guildId);
+
+      return;
+
+    case "group-add":
+      await addPresetGroup(interaction, configuration.guildId);
 
       return;
 
@@ -491,6 +499,424 @@ async function addPresetOption(
   }
 }
 
+async function addPresetGroup(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const presetId = interaction.options.getInteger("preset-id", true);
+
+  const name = interaction.options.getString("name", true).trim();
+
+  const description =
+    interaction.options.getString("description")?.trim() || null;
+
+  const presetOptionIds = [
+    interaction.options.getInteger("role-1", true),
+
+    interaction.options.getInteger("role-2"),
+
+    interaction.options.getInteger("role-3"),
+
+    interaction.options.getInteger("role-4"),
+
+    interaction.options.getInteger("role-5"),
+
+    interaction.options.getInteger("role-6"),
+
+    interaction.options.getInteger("role-7"),
+
+    interaction.options.getInteger("role-8"),
+
+    interaction.options.getInteger("role-9"),
+
+    interaction.options.getInteger("role-10"),
+  ].filter((value): value is number => value !== null);
+
+  const duplicateOptionId = findDuplicateNumber(presetOptionIds);
+
+  if (duplicateOptionId !== null) {
+    await interaction.editReply({
+      content: `Role option #${duplicateOptionId} was selected more than once. Each option can appear only once in a preset request group.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const openBefore = interaction.options.getInteger(
+    "open-minutes-before-start",
+  );
+
+  const openAfter = interaction.options.getInteger("open-minutes-after-start");
+
+  if (openBefore !== null && openAfter !== null) {
+    await interaction.editReply({
+      content:
+        "Choose either `open-minutes-before-start` or `open-minutes-after-start`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const closeBefore = interaction.options.getInteger(
+    "close-minutes-before-start",
+  );
+
+  const closeAfter = interaction.options.getInteger(
+    "close-minutes-after-start",
+  );
+
+  if (closeBefore !== null && closeAfter !== null) {
+    await interaction.editReply({
+      content:
+        "Choose either `close-minutes-before-start` or `close-minutes-after-start`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  /*
+   * The event-level stored representation uses signed offsets:
+   *
+   *  60 = T-60
+   *   0 = T
+   * -10 = T+10
+   */
+  const openMinutesBeforeStart =
+    openBefore ?? (openAfter !== null ? -openAfter : 60);
+
+  const closeMinutesBeforeStart =
+    closeBefore ?? (closeAfter !== null ? -closeAfter : 0);
+
+  if (openMinutesBeforeStart <= closeMinutesBeforeStart) {
+    await interaction.editReply({
+      content: `The role-request group must open before it closes. The supplied window would be ${formatRelativeOffset(
+        openMinutesBeforeStart,
+      )} → ${formatRelativeOffset(closeMinutesBeforeStart)}.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  /*
+   * Read the current preset definition for friendly command validation and
+   * display names.
+   *
+   * addPresetRequestGroup() repeats the authoritative ownership/activity
+   * validation under the preset FOR UPDATE lock, so this read is a UX layer,
+   * not a race-sensitive source of truth.
+   */
+  const presetResult = await getRoleRequestPresetDetails({
+    guildDatabaseId,
+
+    presetId,
+  });
+
+  if (presetResult.kind === "not_found") {
+    await interaction.editReply({
+      content: `Role-request preset #${presetId} was not found in this server.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const activeOptionById = new Map(
+    presetResult.preset.options
+      .filter((option) => option.active)
+      .map((option) => [option.id, option]),
+  );
+
+  const unavailableOptionId = presetOptionIds.find(
+    (optionId) => !activeOptionById.has(optionId),
+  );
+
+  if (unavailableOptionId !== undefined) {
+    await interaction.editReply({
+      content: `Role option #${unavailableOptionId} is not an active option in preset #${presetId}. Use \`/role-preset show preset-id:${presetId}\` to check the available option IDs.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const orderedOptions = presetOptionIds.map((optionId) => {
+    const option = activeOptionById.get(optionId);
+
+    if (!option) {
+      throw new Error(
+        `Preset option #${optionId} disappeared after validation.`,
+      );
+    }
+
+    return option;
+  });
+
+  const notifyRole = interaction.options.getRole("notify-role");
+
+  if (notifyRole?.id === interaction.guild.id) {
+    await interaction.editReply({
+      content:
+        "`@everyone` cannot be used as a preset request-group notification role.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const selectedChannel = interaction.options.getChannel("channel");
+
+  let explicitChannelId: string | null = null;
+
+  if (selectedChannel !== null) {
+    /*
+     * Re-fetch the explicitly selected destination so validation uses the
+     * guild's current Discord state rather than only interaction-resolved
+     * data.
+     */
+    const channel = await interaction.guild.channels.fetch(selectedChannel.id);
+
+    if (
+      !channel ||
+      (channel.type !== ChannelType.GuildText &&
+        channel.type !== ChannelType.GuildAnnouncement) ||
+      !channel.isSendable()
+    ) {
+      await interaction.editReply({
+        content: "The selected preset role-request channel is unavailable.",
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+    }
+
+    const botMember =
+      interaction.guild.members.me ??
+      (await interaction.guild.members.fetchMe());
+
+    const permissions = channel.permissionsFor(botMember);
+
+    const requiredPermissions = [
+      PermissionFlagsBits.ViewChannel,
+
+      PermissionFlagsBits.SendMessages,
+
+      PermissionFlagsBits.EmbedLinks,
+
+      PermissionFlagsBits.ReadMessageHistory,
+    ];
+
+    if (
+      requiredPermissions.some((permission) => !permissions.has(permission))
+    ) {
+      await interaction.editReply({
+        content:
+          "The bot does not currently have all required posting permissions in that preset role-request channel.",
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+    }
+
+    if (
+      notifyRole &&
+      !notifyRole.mentionable &&
+      !permissions.has(PermissionFlagsBits.MentionEveryone)
+    ) {
+      await interaction.editReply({
+        content: `The bot cannot currently mention **${notifyRole.name}** in that explicit preset channel.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+    }
+
+    explicitChannelId = channel.id;
+  }
+
+  /*
+   * If there is no explicit channel, do not inspect the guild's current
+   * default here.
+   *
+   * Null is meaningful preset state: resolve and snapshot the guild default
+   * when this preset is applied to an event.
+   *
+   * Consequently an unmentionable notification role is also not rejected
+   * here when the eventual destination is unknown. Publication validates the
+   * snapshotted combination again when the group actually opens.
+   */
+  const requiresPositiveSignup =
+    interaction.options.getBoolean("requires-signup") ?? false;
+
+  const result = await addPresetRequestGroup({
+    guildDatabaseId,
+
+    presetId,
+
+    name,
+
+    description,
+
+    presetOptionIds,
+
+    channelId: explicitChannelId,
+
+    notifyRole: notifyRole
+      ? {
+          discordRoleId: notifyRole.id,
+
+          roleNameSnapshot: notifyRole.name,
+        }
+      : null,
+
+    requiresPositiveSignup,
+
+    openMinutesBeforeStart,
+
+    closeMinutesBeforeStart,
+  });
+
+  switch (result.kind) {
+    case "added": {
+      await interaction.editReply({
+        content: [
+          `✅ Added request group **${result.group.name}** (#${result.group.id}) to preset #${result.group.presetId}.`,
+
+          "",
+
+          `**Channel:** ${
+            result.group.channelId
+              ? `<#${result.group.channelId}>`
+              : "Guild default at application"
+          }`,
+
+          `**Notification role:** ${
+            result.group.notifyRoleId
+              ? `<@&${result.group.notifyRoleId}>${
+                  result.group.notifyRoleNameSnapshot
+                    ? ` (${result.group.notifyRoleNameSnapshot})`
+                    : ""
+                }`
+              : "None"
+          }`,
+
+          `**Requires positive signup:** ${
+            result.group.requiresPositiveSignup ? "Yes" : "No"
+          }`,
+
+          `**Window:** ${formatRelativeOffset(
+            result.group.openMinutesBeforeStart,
+          )} → ${formatRelativeOffset(result.group.closeMinutesBeforeStart)}`,
+
+          `**Role options:** ${orderedOptions
+            .map((option) => `${option.displayName} (#${option.id})`)
+            .join(", ")}`,
+        ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: guildDatabaseId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "role_preset.group.add",
+
+        outcome: "success",
+
+        summary: `Added request group "${result.group.name}" (#${result.group.id}) to role-request preset #${result.group.presetId}.`,
+
+        targetType: "role_request_preset_group",
+
+        targetId: String(result.group.id),
+
+        details: {
+          presetId: result.group.presetId,
+
+          presetOptionIds: [...result.group.presetOptionIds],
+
+          channelId: result.group.channelId,
+
+          notifyRoleId: result.group.notifyRoleId,
+
+          requiresPositiveSignup: result.group.requiresPositiveSignup,
+
+          openMinutesBeforeStart: result.group.openMinutesBeforeStart,
+
+          closeMinutesBeforeStart: result.group.closeMinutesBeforeStart,
+        },
+      });
+
+      return;
+    }
+
+    case "preset_not_found":
+      await interaction.editReply({
+        content: `Role-request preset #${presetId} was not found in this server.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "invalid_input":
+      await interaction.editReply({
+        content: formatPresetGroupValidationError(
+          result.reason,
+          presetId,
+          result.presetOptionId,
+          result.discordRoleId,
+        ),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
+}
+
 async function listPresets(
   interaction: CachedCommandInteraction,
   guildDatabaseId: number,
@@ -573,6 +999,88 @@ async function showPreset(
   }
 
   await sendEphemeralText(interaction, formatPresetDetails(result.preset));
+}
+
+function findDuplicateNumber(values: readonly number[]): number | null {
+  const seen = new Set<number>();
+
+  for (const value of values) {
+    if (seen.has(value)) {
+      return value;
+    }
+
+    seen.add(value);
+  }
+
+  return null;
+}
+
+function formatPresetGroupValidationError(
+  reason:
+    | "invalid_name"
+    | "no_options"
+    | "invalid_option_id"
+    | "duplicate_option"
+    | "option_not_found_or_inactive"
+    | "invalid_channel_id"
+    | "invalid_notify_role_id"
+    | "invalid_notify_role_name"
+    | "everyone_notify_role"
+    | "invalid_open_offset"
+    | "invalid_close_offset"
+    | "invalid_group_window",
+
+  presetId: number,
+
+  presetOptionId?: number,
+
+  discordRoleId?: string,
+): string {
+  switch (reason) {
+    case "invalid_name":
+      return "The request-group name is invalid. Use a non-empty name of no more than 100 characters.";
+
+    case "no_options":
+      return "A preset request group must contain at least one role option.";
+
+    case "invalid_option_id":
+      return presetOptionId
+        ? `Role option #${presetOptionId} is not a valid preset option ID.`
+        : "One of the supplied preset role-option IDs is invalid.";
+
+    case "duplicate_option":
+      return presetOptionId
+        ? `Role option #${presetOptionId} was selected more than once. Each option can appear only once in a preset request group.`
+        : "A preset role option was selected more than once.";
+
+    case "option_not_found_or_inactive":
+      return presetOptionId
+        ? `Role option #${presetOptionId} is not an active option in preset #${presetId}. Use \`/role-preset show preset-id:${presetId}\` to check the available option IDs.`
+        : `One or more supplied role options are not active options in preset #${presetId}.`;
+
+    case "invalid_channel_id":
+      return "The explicit preset role-request channel ID is invalid.";
+
+    case "invalid_notify_role_id":
+      return "The preset notification-role ID is invalid.";
+
+    case "invalid_notify_role_name":
+      return discordRoleId
+        ? `The stored name for notification role <@&${discordRoleId}> is invalid.`
+        : "The preset notification-role name is invalid.";
+
+    case "everyone_notify_role":
+      return "`@everyone` cannot be used as a preset request-group notification role.";
+
+    case "invalid_open_offset":
+      return "The preset request-group opening offset is invalid.";
+
+    case "invalid_close_offset":
+      return "The preset request-group closing offset is invalid.";
+
+    case "invalid_group_window":
+      return "The preset request group must open before it closes.";
+  }
 }
 
 function formatPresetDetails(preset: RoleRequestPresetDetails): string {

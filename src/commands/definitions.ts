@@ -1335,6 +1335,177 @@ export const commandDefinitions = [
             .setName("supervised-role-4")
             .setDescription("Additional supervision-required Discord role."),
         ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("group-add")
+        .setDescription("Adds a reusable role-request group to a preset.")
+
+        /*
+         * Required options must precede optional options in Discord command
+         * definitions.
+         */
+        .addIntegerOption((option) =>
+          option
+            .setName("preset-id")
+            .setDescription("Preset ID shown by /role-preset list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("name")
+            .setDescription("Request-group name, such as Naval Roles.")
+            .setMinLength(1)
+            .setMaxLength(100)
+            .setRequired(true),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-1")
+            .setDescription("Preset role-option ID from /role-preset show.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addChannelOption((option) =>
+          option
+            .setName("channel")
+            .setDescription(
+              "Optional fixed channel; blank uses the guild default when applied.",
+            )
+            .addChannelTypes(
+              ChannelType.GuildText,
+              ChannelType.GuildAnnouncement,
+            ),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("description")
+            .setDescription("Optional instructions for this request group.")
+            .setMaxLength(800),
+        )
+
+        .addBooleanOption((option) =>
+          option
+            .setName("requires-signup")
+            .setDescription(
+              "Require an Attending/Tentative signup. Defaults to No.",
+            ),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("open-minutes-before-start")
+            .setDescription(
+              "Open this many minutes before event start. Defaults to 60.",
+            )
+            .setMinValue(0)
+            .setMaxValue(10080),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("open-minutes-after-start")
+            .setDescription("Open this many minutes after event start instead.")
+            .setMinValue(0)
+            .setMaxValue(480),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("close-minutes-before-start")
+            .setDescription(
+              "Close this many minutes before event start. Defaults to 0.",
+            )
+            .setMinValue(0)
+            .setMaxValue(10080),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("close-minutes-after-start")
+            .setDescription(
+              "Close this many minutes after event start instead.",
+            )
+            .setMinValue(0)
+            .setMaxValue(480),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("notify-role")
+            .setDescription(
+              "Optional role to ping when the snapshotted group opens.",
+            ),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-2")
+            .setDescription("Additional preset role-option ID.")
+            .setMinValue(1),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-3")
+            .setDescription("Additional preset role-option ID.")
+            .setMinValue(1),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-4")
+            .setDescription("Additional preset role-option ID.")
+            .setMinValue(1),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-5")
+            .setDescription("Additional preset role-option ID.")
+            .setMinValue(1),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-6")
+            .setDescription("Additional preset role-option ID.")
+            .setMinValue(1),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-7")
+            .setDescription("Additional preset role-option ID.")
+            .setMinValue(1),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-8")
+            .setDescription("Additional preset role-option ID.")
+            .setMinValue(1),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-9")
+            .setDescription("Additional preset role-option ID.")
+            .setMinValue(1),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("role-10")
+            .setDescription("Additional preset role-option ID.")
+            .setMinValue(1),
+        ),
     ),
 
   new SlashCommandBuilder()

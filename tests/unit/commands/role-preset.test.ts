@@ -1,4 +1,9 @@
-import { MessageFlags, type ChatInputCommandInteraction } from "discord.js";
+import {
+  ChannelType,
+  MessageFlags,
+  PermissionFlagsBits,
+  type ChatInputCommandInteraction,
+} from "discord.js";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -12,6 +17,8 @@ const adminServiceMocks = vi.hoisted(() => ({
   createRoleRequestPreset: vi.fn(),
 
   addPresetRoleOption: vi.fn(),
+
+  addPresetRequestGroup: vi.fn(),
 }));
 
 const queryServiceMocks = vi.hoisted(() => ({
@@ -51,6 +58,10 @@ const EVENT_ADMIN_ROLE_ID = "988000000000000003";
 const QUALIFIED_ROLE_ID = "988000000000000010";
 
 const SUPERVISED_ROLE_ID = "988000000000000011";
+
+const EXPLICIT_CHANNEL_ID = "988000000000000020";
+
+const NAVAL_NOTIFY_ROLE_ID = "988000000000000021";
 
 describe("/role-preset command", () => {
   beforeEach(() => {
@@ -93,7 +104,7 @@ describe("/role-preset command", () => {
     auditMocks.writeAuditLog.mockResolvedValue(undefined);
   });
 
-  it("registers create, list, show and option-add subcommands", () => {
+  it("registers create, list, show, option-add and group-add subcommands", () => {
     const definition = commandDefinitions.find(
       (command) => command.name === "role-preset",
     );
@@ -105,6 +116,7 @@ describe("/role-preset command", () => {
       "list",
       "show",
       "option-add",
+      "group-add",
     ]);
   });
 
@@ -471,6 +483,522 @@ describe("/role-preset command", () => {
     });
   });
 
+  it("adds a preset request group with ordered options, an explicit channel and a notification role", async () => {
+    // Arrange
+    mockPresetDetailsForGroup();
+
+    adminServiceMocks.addPresetRequestGroup.mockResolvedValue({
+      kind: "added",
+
+      group: {
+        id: 41,
+
+        presetId: 7,
+
+        name: "Naval Roles",
+
+        description: "General naval applications.",
+
+        channelId: EXPLICIT_CHANNEL_ID,
+
+        notifyRoleId: NAVAL_NOTIFY_ROLE_ID,
+
+        notifyRoleNameSnapshot: "Naval",
+
+        requiresPositiveSignup: true,
+
+        openMinutesBeforeStart: 60,
+
+        closeMinutesBeforeStart: -10,
+
+        sortOrder: 1,
+
+        active: true,
+
+        presetOptionIds: [12, 11],
+      },
+    });
+
+    const interaction = createInteraction({
+      subcommand: "group-add",
+
+      strings: {
+        name: "Naval Roles",
+
+        description: "General naval applications.",
+      },
+
+      integers: {
+        "preset-id": 7,
+
+        "role-1": 12,
+
+        "role-2": 11,
+
+        "open-minutes-before-start": 60,
+
+        "close-minutes-after-start": 10,
+      },
+
+      booleans: {
+        "requires-signup": true,
+      },
+
+      roles: {
+        "notify-role": {
+          id: NAVAL_NOTIFY_ROLE_ID,
+
+          name: "Naval",
+
+          mentionable: true,
+        },
+      },
+
+      channels: {
+        channel: createTestTextChannel(),
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.addPresetRequestGroup).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      presetId: 7,
+
+      name: "Naval Roles",
+
+      description: "General naval applications.",
+
+      presetOptionIds: [12, 11],
+
+      channelId: EXPLICIT_CHANNEL_ID,
+
+      notifyRole: {
+        discordRoleId: NAVAL_NOTIFY_ROLE_ID,
+
+        roleNameSnapshot: "Naval",
+      },
+
+      requiresPositiveSignup: true,
+
+      openMinutesBeforeStart: 60,
+
+      closeMinutesBeforeStart: -10,
+    });
+
+    const content = readFirstReplyContent(interaction.editReply);
+
+    expect(content).toContain("Added request group **Naval Roles** (#41)");
+
+    expect(content).toContain("to preset #7");
+
+    expect(content).toContain(`<#${EXPLICIT_CHANNEL_ID}>`);
+
+    expect(content).toContain(`<@&${NAVAL_NOTIFY_ROLE_ID}>`);
+
+    expect(content).toContain("T-60 → T+10");
+
+    /*
+     * Preserve the administrator's requested order, not the preset's
+     * underlying option-table order.
+     */
+    expect(content).toContain("Carpenter (#12), Captain (#11)");
+
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        guildId: 42,
+
+        actorUserId: ADMIN_USER_ID,
+
+        action: "role_preset.group.add",
+
+        outcome: "success",
+
+        targetType: "role_request_preset_group",
+
+        targetId: "41",
+
+        details: expect.objectContaining({
+          presetId: 7,
+
+          presetOptionIds: [12, 11],
+
+          channelId: EXPLICIT_CHANNEL_ID,
+
+          notifyRoleId: NAVAL_NOTIFY_ROLE_ID,
+
+          requiresPositiveSignup: true,
+
+          openMinutesBeforeStart: 60,
+
+          closeMinutesBeforeStart: -10,
+        }),
+      }),
+    );
+  });
+
+  it("stores no channel override when a preset group should resolve the guild default at application time", async () => {
+    // Arrange
+    mockPresetDetailsForGroup();
+
+    adminServiceMocks.addPresetRequestGroup.mockResolvedValue({
+      kind: "added",
+
+      group: {
+        id: 42,
+
+        presetId: 7,
+
+        name: "Command Roles",
+
+        description: null,
+
+        channelId: null,
+
+        notifyRoleId: null,
+
+        notifyRoleNameSnapshot: null,
+
+        requiresPositiveSignup: false,
+
+        openMinutesBeforeStart: 180,
+
+        closeMinutesBeforeStart: 60,
+
+        sortOrder: 2,
+
+        active: true,
+
+        presetOptionIds: [11],
+      },
+    });
+
+    const interaction = createInteraction({
+      subcommand: "group-add",
+
+      strings: {
+        name: "Command Roles",
+      },
+
+      integers: {
+        "preset-id": 7,
+
+        "role-1": 11,
+
+        "open-minutes-before-start": 180,
+
+        "close-minutes-before-start": 60,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.addPresetRequestGroup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channelId: null,
+
+        notifyRole: null,
+
+        requiresPositiveSignup: false,
+
+        openMinutesBeforeStart: 180,
+
+        closeMinutesBeforeStart: 60,
+      }),
+    );
+
+    /*
+     * No explicit destination means there is deliberately nothing to fetch or
+     * validate now. The guild default is resolved when the preset is applied.
+     */
+    expect(interaction.fetchChannel).not.toHaveBeenCalled();
+
+    const content = readFirstReplyContent(interaction.editReply);
+
+    expect(content).toContain("Guild default at application");
+
+    expect(content).toContain("T-180 → T-60");
+  });
+
+  it("rejects a duplicate preset option selection before calling the administration service", async () => {
+    // Arrange
+    const interaction = createInteraction({
+      subcommand: "group-add",
+
+      strings: {
+        name: "Duplicate Group",
+      },
+
+      integers: {
+        "preset-id": 7,
+
+        "role-1": 11,
+
+        "role-2": 11,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.addPresetRequestGroup).not.toHaveBeenCalled();
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "Role option #11 was selected more than once. Each option can appear only once in a preset request group.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  });
+
+  it("rejects a missing or inactive role option before creating a preset group", async () => {
+    // Arrange
+    mockPresetDetailsForGroup();
+
+    const interaction = createInteraction({
+      subcommand: "group-add",
+
+      strings: {
+        name: "Invalid Group",
+      },
+
+      integers: {
+        "preset-id": 7,
+
+        "role-1": 999,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.addPresetRequestGroup).not.toHaveBeenCalled();
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "Role option #999 is not an active option in preset #7. Use `/role-preset show preset-id:7` to check the available option IDs.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  });
+
+  it("rejects both before-start and after-start values for the same opening rule", async () => {
+    // Arrange
+    const interaction = createInteraction({
+      subcommand: "group-add",
+
+      strings: {
+        name: "Confused Group",
+      },
+
+      integers: {
+        "preset-id": 7,
+
+        "role-1": 11,
+
+        "open-minutes-before-start": 60,
+
+        "open-minutes-after-start": 10,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.addPresetRequestGroup).not.toHaveBeenCalled();
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "Choose either `open-minutes-before-start` or `open-minutes-after-start`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  });
+
+  it("rejects a preset group whose opening would not precede its closing", async () => {
+    // Arrange
+    const interaction = createInteraction({
+      subcommand: "group-add",
+
+      strings: {
+        name: "Impossible Group",
+      },
+
+      integers: {
+        "preset-id": 7,
+
+        "role-1": 11,
+
+        "open-minutes-before-start": 0,
+
+        "close-minutes-before-start": 60,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.addPresetRequestGroup).not.toHaveBeenCalled();
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "The role-request group must open before it closes. The supplied window would be T → T-60.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  });
+
+  it("rejects an explicit preset channel where the bot cannot post", async () => {
+    // Arrange
+    mockPresetDetailsForGroup();
+
+    const interaction = createInteraction({
+      subcommand: "group-add",
+
+      strings: {
+        name: "Unavailable Channel",
+      },
+
+      integers: {
+        "preset-id": 7,
+
+        "role-1": 11,
+      },
+
+      channels: {
+        channel: createTestTextChannel({
+          canPost: false,
+        }),
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.addPresetRequestGroup).not.toHaveBeenCalled();
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "The bot does not currently have all required posting permissions in that preset role-request channel.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  });
+
+  it("rejects @everyone as a preset request-group notification role", async () => {
+    // Arrange
+    mockPresetDetailsForGroup();
+
+    const interaction = createInteraction({
+      subcommand: "group-add",
+
+      strings: {
+        name: "Everyone Group",
+      },
+
+      integers: {
+        "preset-id": 7,
+
+        "role-1": 11,
+      },
+
+      roles: {
+        "notify-role": {
+          id: DISCORD_GUILD_ID,
+
+          name: "@everyone",
+
+          mentionable: true,
+        },
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.addPresetRequestGroup).not.toHaveBeenCalled();
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "`@everyone` cannot be used as a preset request-group notification role.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  });
+
+  it("rejects an unmentionable notification role for an explicit channel when the bot cannot mention it", async () => {
+    // Arrange
+    mockPresetDetailsForGroup();
+
+    const interaction = createInteraction({
+      subcommand: "group-add",
+
+      strings: {
+        name: "Unmentionable Group",
+      },
+
+      integers: {
+        "preset-id": 7,
+
+        "role-1": 11,
+      },
+
+      roles: {
+        "notify-role": {
+          id: NAVAL_NOTIFY_ROLE_ID,
+
+          name: "Naval",
+
+          mentionable: false,
+        },
+      },
+
+      channels: {
+        channel: createTestTextChannel({
+          canMentionUnmentionableRoles: false,
+        }),
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.addPresetRequestGroup).not.toHaveBeenCalled();
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "The bot cannot currently mention **Naval** in that explicit preset channel.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  });
+
   it("lists the guild's role-request presets", async () => {
     // Arrange
     queryServiceMocks.listRoleRequestPresets.mockResolvedValue([
@@ -776,6 +1304,23 @@ function createInteraction(input: {
       id: string;
 
       name: string;
+
+      mentionable?: boolean;
+    } | null
+  >;
+
+  channels?: Record<
+    string,
+    {
+      id: string;
+
+      type: ChannelType;
+
+      isSendable: () => boolean;
+
+      permissionsFor: (member: unknown) => {
+        has: (permission: bigint) => boolean;
+      };
     } | null
   >;
 }): {
@@ -786,12 +1331,22 @@ function createInteraction(input: {
   editReply: ReturnType<typeof vi.fn>;
 
   followUp: ReturnType<typeof vi.fn>;
+
+  fetchChannel: ReturnType<typeof vi.fn>;
 } {
   const deferReply = vi.fn().mockResolvedValue(undefined);
 
   const editReply = vi.fn().mockResolvedValue(undefined);
 
   const followUp = vi.fn().mockResolvedValue(undefined);
+
+  const fetchChannel = vi.fn(async (channelId: string) => {
+    const channel = Object.values(input.channels ?? {}).find(
+      (candidate) => candidate?.id === channelId,
+    );
+
+    return channel ?? null;
+  });
 
   const interaction = {
     commandName: "role-preset",
@@ -802,6 +1357,20 @@ function createInteraction(input: {
       id: DISCORD_GUILD_ID,
 
       name: "Preset Command Test Guild",
+
+      members: {
+        me: {
+          id: "988000000000000099",
+        },
+
+        fetchMe: vi.fn().mockResolvedValue({
+          id: "988000000000000099",
+        }),
+      },
+
+      channels: {
+        fetch: fetchChannel,
+      },
     },
 
     member: {
@@ -848,6 +1417,8 @@ function createInteraction(input: {
       getBoolean: (name: string) => input.booleans?.[name] ?? null,
 
       getRole: (name: string) => input.roles?.[name] ?? null,
+
+      getChannel: (name: string) => input.channels?.[name] ?? null,
     },
   };
 
@@ -859,6 +1430,8 @@ function createInteraction(input: {
     editReply,
 
     followUp,
+
+    fetchChannel,
   };
 }
 
@@ -881,4 +1454,121 @@ function readFirstReplyContent(editReply: ReturnType<typeof vi.fn>): string {
   }
 
   return payload.content;
+}
+
+function createTestTextChannel(
+  options: {
+    canPost?: boolean;
+
+    canMentionUnmentionableRoles?: boolean;
+  } = {},
+) {
+  const canPost = options.canPost ?? true;
+
+  const canMentionUnmentionableRoles =
+    options.canMentionUnmentionableRoles ?? true;
+
+  return {
+    id: EXPLICIT_CHANNEL_ID,
+
+    type: ChannelType.GuildText,
+
+    isSendable: () => true,
+
+    permissionsFor: () => ({
+      has: (permission: bigint) => {
+        if (permission === PermissionFlagsBits.MentionEveryone) {
+          return canMentionUnmentionableRoles;
+        }
+
+        return canPost;
+      },
+    }),
+  };
+}
+
+function mockPresetDetailsForGroup(): void {
+  queryServiceMocks.getRoleRequestPresetDetails.mockResolvedValue({
+    kind: "found",
+
+    preset: {
+      id: 7,
+
+      name: "Naval",
+
+      description: null,
+
+      active: true,
+
+      createdByUserId: ADMIN_USER_ID,
+
+      createdAt: new Date("2026-09-01T12:00:00Z"),
+
+      updatedAt: new Date("2026-09-01T12:00:00Z"),
+
+      options: [
+        {
+          id: 11,
+
+          key: "captain",
+
+          displayName: "Captain",
+
+          description: null,
+
+          requestRestriction: "qualified_only",
+
+          capacity: 1,
+
+          sortOrder: 0,
+
+          active: true,
+
+          qualificationRoles: [],
+        },
+
+        {
+          id: 12,
+
+          key: "carpenter",
+
+          displayName: "Carpenter",
+
+          description: null,
+
+          requestRestriction: "open",
+
+          capacity: null,
+
+          sortOrder: 1,
+
+          active: true,
+
+          qualificationRoles: [],
+        },
+
+        {
+          id: 13,
+
+          key: "retired-role",
+
+          displayName: "Retired Role",
+
+          description: null,
+
+          requestRestriction: "open",
+
+          capacity: null,
+
+          sortOrder: 2,
+
+          active: false,
+
+          qualificationRoles: [],
+        },
+      ],
+
+      groups: [],
+    },
+  });
 }
