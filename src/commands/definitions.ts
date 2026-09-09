@@ -1514,7 +1514,6 @@ export const commandDefinitions = [
         .setDescription(
           "Snapshots a reusable role-request preset onto an existing event.",
         )
-
         .addIntegerOption((option) =>
           option
             .setName("preset-id")
@@ -1530,6 +1529,95 @@ export const commandDefinitions = [
               "Existing event that should receive the preset snapshot.",
             )
             .setMinValue(1)
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("set-active")
+        .setDescription(
+          "Activates or deactivates a reusable role-request preset.",
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("preset-id")
+            .setDescription("Preset ID shown by /role-preset list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addBooleanOption((option) =>
+          option
+            .setName("active")
+            .setDescription(
+              "Whether the preset should be available for future applications.",
+            )
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("option-set-active")
+        .setDescription(
+          "Activates or deactivates one reusable preset role option.",
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("preset-id")
+            .setDescription("Preset ID shown by /role-preset list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("option-id")
+            .setDescription("Role-option ID shown by /role-preset show.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addBooleanOption((option) =>
+          option
+            .setName("active")
+            .setDescription(
+              "Whether this role option should be included in future snapshots.",
+            )
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("group-set-active")
+        .setDescription(
+          "Activates or deactivates one reusable preset request group.",
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("preset-id")
+            .setDescription("Preset ID shown by /role-preset list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("group-id")
+            .setDescription("Request-group ID shown by /role-preset show.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addBooleanOption((option) =>
+          option
+            .setName("active")
+            .setDescription(
+              "Whether this request group should be included in future snapshots.",
+            )
             .setRequired(true),
         ),
     ),
