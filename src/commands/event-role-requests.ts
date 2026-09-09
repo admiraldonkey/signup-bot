@@ -33,6 +33,10 @@ import {
   markRoleRequestGroupCloseCompleted,
   scheduleRoleRequestGroupClose,
 } from "../role-requests/role-request-scheduling.js";
+import {
+  resolveRoleRequestGroupLifecycleState,
+  type RoleRequestGroupLifecycleState,
+} from "../role-requests/role-request-group-lifecycle.js";
 
 type CachedInteraction = ChatInputCommandInteraction<"cached">;
 
@@ -811,11 +815,13 @@ export async function listRoleRequestGroups(
 
       requiresPositiveSignup: roleRequestGroups.requiresPositiveSignup,
 
+      openMinutesBeforeStart: roleRequestGroups.openMinutesBeforeStart,
+
       opensAt: roleRequestGroups.opensAt,
 
-      closesAt: roleRequestGroups.closesAt,
-
       closeMinutesBeforeStart: roleRequestGroups.closeMinutesBeforeStart,
+
+      closesAt: roleRequestGroups.closesAt,
 
       closedAt: roleRequestGroups.closedAt,
 
@@ -836,17 +842,29 @@ export async function listRoleRequestGroups(
   const now = new Date();
 
   const lines = groups.map((group) => {
+    const openTimestamp = Math.floor(group.opensAt.getTime() / 1000);
+
     const closeTimestamp = Math.floor(group.closesAt.getTime() / 1000);
 
-    const status = group.closedAt || group.closesAt <= now ? "Closed" : "Open";
+    const lifecycleState = resolveRoleRequestGroupLifecycleState(group, now);
 
     return [
       `**#${group.id} — ${group.name}**`,
-      `${status} • <#${group.channelId}>`,
+
+      `${formatRoleRequestGroupLifecycleState(
+        lifecycleState,
+      )} • <#${group.channelId}>`,
+
       `Signup required: ${group.requiresPositiveSignup ? "Yes" : "No"}`,
+
+      `Open rule: ${formatRoleRequestOpenOffset(group.openMinutesBeforeStart)}`,
+
+      `Opens: <t:${openTimestamp}:F>`,
+
       `Close rule: ${formatRoleRequestCloseOffset(
         group.closeMinutesBeforeStart,
       )}`,
+
       `Closes: <t:${closeTimestamp}:F>`,
     ].join("\n");
   });
@@ -1410,6 +1428,40 @@ function formatSignupMarker(
     case null:
       return " ⚪ No signup";
   }
+}
+
+function formatRoleRequestGroupLifecycleState(
+  state: RoleRequestGroupLifecycleState,
+): string {
+  switch (state) {
+    case "planned":
+      return "Planned";
+
+    case "pending_publication":
+      return "Pending publication";
+
+    case "open":
+      return "Open";
+
+    case "closed":
+      return "Closed";
+  }
+}
+
+function formatRoleRequestOpenOffset(offsetMinutes: number | null): string {
+  if (offsetMinutes === null) {
+    return "Opened manually";
+  }
+
+  if (offsetMinutes > 0) {
+    return `${offsetMinutes} minute(s) before event start`;
+  }
+
+  if (offsetMinutes < 0) {
+    return `${Math.abs(offsetMinutes)} minute(s) after event start`;
+  }
+
+  return "At event start";
 }
 
 function formatRoleRequestCloseOffset(offsetMinutes: number): string {
