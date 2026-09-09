@@ -8,6 +8,7 @@ import {
   addPresetRequestGroup,
   addPresetRoleOption,
   createRoleRequestPreset,
+  setRoleRequestPresetActive,
 } from "../../../src/role-requests/role-request-preset-admin-service.js";
 
 import {
@@ -214,6 +215,395 @@ describe("role-request preset administration service", () => {
     );
 
     expect(count.rows[0]?.count).toBe(0);
+  });
+
+  it("deactivates a preset without changing its child configuration", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const groupResult = await pool.query<{
+      id: number;
+    }>(
+      `
+        INSERT INTO
+          "role_request_preset_groups" (
+            "preset_id",
+            "name",
+            "requires_positive_signup",
+            "open_minutes_before_start",
+            "close_minutes_before_start",
+            "sort_order",
+            "active"
+          )
+        VALUES (
+          $1,
+          'Naval Roles',
+          false,
+          60,
+          0,
+          0,
+          true
+        )
+        RETURNING
+          "id"
+      `,
+      [fixture.presetId],
+    );
+
+    const groupId = groupResult.rows[0]?.id;
+
+    if (!groupId) {
+      throw new Error("The integration-test preset group was not created.");
+    }
+
+    await pool.query(
+      `
+      INSERT INTO
+        "role_request_preset_group_options" (
+          "group_id",
+          "preset_option_id",
+          "sort_order"
+        )
+      VALUES (
+        $1,
+        $2,
+        0
+      )
+    `,
+      [groupId, options.captainId],
+    );
+
+    /*
+     * Give updated_at a deterministic old value so the assertion does not
+     * depend on two very fast operations landing in the same clock tick.
+     */
+    await pool.query(
+      `
+      UPDATE
+        "role_request_presets"
+      SET
+        "updated_at" =
+          '2026-01-01T00:00:00Z'
+      WHERE
+        "id" = $1
+    `,
+      [fixture.presetId],
+    );
+
+    // Act
+    const result = await setRoleRequestPresetActive({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      active: false,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "updated",
+
+      preset: {
+        id: fixture.presetId,
+
+        name: "Naval",
+
+        active: false,
+      },
+    });
+
+    const storedPreset = await pool.query<{
+      active: boolean;
+
+      updated_at: Date;
+    }>(
+      `
+        SELECT
+          "active",
+          "updated_at"
+        FROM
+          "role_request_presets"
+        WHERE
+          "id" = $1
+      `,
+      [fixture.presetId],
+    );
+
+    expect(storedPreset.rows[0]?.active).toBe(false);
+
+    expect(storedPreset.rows[0]?.updated_at.getTime()).toBeGreaterThan(
+      new Date("2026-01-01T00:00:00Z").getTime(),
+    );
+
+    /*
+     * Deactivating the parent archives the reusable preset as a source. It
+     * does not rewrite the administrator's child configuration.
+     */
+    const childState = await pool.query<{
+      active_options: number;
+
+      active_groups: number;
+
+      mappings: number;
+    }>(
+      `
+        SELECT
+          (
+            SELECT
+              COUNT(*)::int
+            FROM
+              "role_request_preset_options"
+            WHERE
+              "preset_id" = $1
+              AND
+              "active" = true
+          ) AS "active_options",
+
+          (
+            SELECT
+              COUNT(*)::int
+            FROM
+              "role_request_preset_groups"
+            WHERE
+              "preset_id" = $1
+              AND
+              "active" = true
+          ) AS "active_groups",
+
+          (
+            SELECT
+              COUNT(*)::int
+            FROM
+              "role_request_preset_group_options"
+            WHERE
+              "group_id" = $2
+          ) AS "mappings"
+      `,
+      [fixture.presetId, groupId],
+    );
+
+    expect(childState.rows).toEqual([
+      {
+        active_options: 2,
+
+        active_groups: 1,
+
+        mappings: 1,
+      },
+    ]);
+  });
+
+  it("reactivates an inactive preset while preserving its child active states", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    await pool.query(
+      `
+      UPDATE
+        "role_request_presets"
+      SET
+        "active" = false
+      WHERE
+        "id" = $1
+    `,
+      [fixture.presetId],
+    );
+
+    /*
+     * Child activation is independent. Retiring Carpenter should remain
+     * retired when the parent preset is later reactivated.
+     */
+    await pool.query(
+      `
+      UPDATE
+        "role_request_preset_options"
+      SET
+        "active" = false
+      WHERE
+        "id" = $1
+    `,
+      [options.carpenterId],
+    );
+
+    // Act
+    const result = await setRoleRequestPresetActive({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      active: true,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "updated",
+
+      preset: {
+        id: fixture.presetId,
+
+        name: "Naval",
+
+        active: true,
+      },
+    });
+
+    const stored = await pool.query<{
+      preset_active: boolean;
+
+      captain_active: boolean;
+
+      carpenter_active: boolean;
+    }>(
+      `
+        SELECT
+          "preset"."active"
+            AS "preset_active",
+
+          "captain"."active"
+            AS "captain_active",
+
+          "carpenter"."active"
+            AS "carpenter_active"
+
+        FROM
+          "role_request_presets"
+            AS "preset"
+
+        INNER JOIN
+          "role_request_preset_options"
+            AS "captain"
+        ON
+          "captain"."preset_id" =
+            "preset"."id"
+          AND
+          "captain"."id" = $2
+
+        INNER JOIN
+          "role_request_preset_options"
+            AS "carpenter"
+        ON
+          "carpenter"."preset_id" =
+            "preset"."id"
+          AND
+          "carpenter"."id" = $3
+
+        WHERE
+          "preset"."id" = $1
+      `,
+      [fixture.presetId, options.captainId, options.carpenterId],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        preset_active: true,
+
+        captain_active: true,
+
+        carpenter_active: false,
+      },
+    ]);
+  });
+
+  it("treats setting a preset to its existing active state as an idempotent no-op", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const fixedUpdatedAt = new Date("2026-01-01T00:00:00Z");
+
+    await pool.query(
+      `
+      UPDATE
+        "role_request_presets"
+      SET
+        "updated_at" = $2
+      WHERE
+        "id" = $1
+    `,
+      [fixture.presetId, fixedUpdatedAt],
+    );
+
+    // Act
+    const result = await setRoleRequestPresetActive({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      active: true,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "unchanged",
+
+      preset: {
+        id: fixture.presetId,
+
+        name: "Naval",
+
+        active: true,
+      },
+    });
+
+    const stored = await pool.query<{
+      updated_at: Date;
+    }>(
+      `
+        SELECT
+          "updated_at"
+        FROM
+          "role_request_presets"
+        WHERE
+          "id" = $1
+      `,
+      [fixture.presetId],
+    );
+
+    expect(stored.rows[0]?.updated_at.getTime()).toBe(fixedUpdatedAt.getTime());
+  });
+
+  it("does not allow one guild to change another guild's preset lifecycle", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const otherGuildId = await createGuild(pool, OTHER_DISCORD_GUILD_ID);
+
+    // Act
+    const result = await setRoleRequestPresetActive({
+      guildDatabaseId: otherGuildId,
+
+      presetId: fixture.presetId,
+
+      active: false,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "preset_not_found",
+    });
+
+    const stored = await pool.query<{
+      active: boolean;
+    }>(
+      `
+        SELECT
+          "active"
+        FROM
+          "role_request_presets"
+        WHERE
+          "id" = $1
+      `,
+      [fixture.presetId],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        active: true,
+      },
+    ]);
   });
 
   it("adds a qualified preset role option with snapshotted qualification roles and the next sort order", async () => {

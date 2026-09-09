@@ -51,6 +51,41 @@ export type CreateRoleRequestPresetResult =
       reason: "invalid_name";
     };
 
+export type SetRoleRequestPresetActiveInput = {
+  guildDatabaseId: number;
+
+  presetId: number;
+
+  active: boolean;
+};
+
+export type SetRoleRequestPresetActiveResult =
+  | {
+      kind: "updated";
+
+      preset: {
+        id: number;
+
+        name: string;
+
+        active: boolean;
+      };
+    }
+  | {
+      kind: "unchanged";
+
+      preset: {
+        id: number;
+
+        name: string;
+
+        active: boolean;
+      };
+    }
+  | {
+      kind: "preset_not_found";
+    };
+
 export type PresetQualificationRoleInput = {
   discordRoleId: string;
 
@@ -310,6 +345,85 @@ export async function createRoleRequestPreset(
       kind: "created",
 
       preset,
+    } as const;
+  });
+}
+
+/**
+ * Activates or deactivates one reusable role-request preset.
+ *
+ * This changes only the availability of the reusable parent preset. Child
+ * options/groups keep their own active states, and event-level snapshots
+ * created by earlier applications are independent and therefore unaffected.
+ *
+ * Preset application takes FOR SHARE on this same parent row. Taking
+ * FOR UPDATE here preserves the existing mutation/application lock contract:
+ * an application sees either the complete state before this lifecycle change
+ * or the complete state after it.
+ */
+export async function setRoleRequestPresetActive(
+  input: SetRoleRequestPresetActiveInput,
+): Promise<SetRoleRequestPresetActiveResult> {
+  return db.transaction(async (transaction) => {
+    const [preset] = await transaction
+      .select({
+        id: roleRequestPresets.id,
+
+        name: roleRequestPresets.name,
+
+        active: roleRequestPresets.active,
+      })
+      .from(roleRequestPresets)
+      .where(
+        and(
+          eq(roleRequestPresets.id, input.presetId),
+
+          eq(roleRequestPresets.ownerGuildId, input.guildDatabaseId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    if (!preset) {
+      return {
+        kind: "preset_not_found",
+      } as const;
+    }
+
+    if (preset.active === input.active) {
+      return {
+        kind: "unchanged",
+
+        preset,
+      } as const;
+    }
+
+    const [updatedPreset] = await transaction
+      .update(roleRequestPresets)
+      .set({
+        active: input.active,
+
+        updatedAt: new Date(),
+      })
+      .where(eq(roleRequestPresets.id, preset.id))
+      .returning({
+        id: roleRequestPresets.id,
+
+        name: roleRequestPresets.name,
+
+        active: roleRequestPresets.active,
+      });
+
+    if (!updatedPreset) {
+      throw new Error(
+        `Role-request preset #${preset.id} disappeared while its lifecycle state was being changed.`,
+      );
+    }
+
+    return {
+      kind: "updated",
+
+      preset: updatedPreset,
     } as const;
   });
 }
