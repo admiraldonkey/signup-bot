@@ -10,6 +10,8 @@ const authMocks = vi.hoisted(() => ({
 
 const adminServiceMocks = vi.hoisted(() => ({
   createRoleRequestPreset: vi.fn(),
+
+  addPresetRoleOption: vi.fn(),
 }));
 
 const queryServiceMocks = vi.hoisted(() => ({
@@ -45,6 +47,10 @@ const DISCORD_GUILD_ID = "988000000000000001";
 const ADMIN_USER_ID = "988000000000000002";
 
 const EVENT_ADMIN_ROLE_ID = "988000000000000003";
+
+const QUALIFIED_ROLE_ID = "988000000000000010";
+
+const SUPERVISED_ROLE_ID = "988000000000000011";
 
 describe("/role-preset command", () => {
   beforeEach(() => {
@@ -87,7 +93,7 @@ describe("/role-preset command", () => {
     auditMocks.writeAuditLog.mockResolvedValue(undefined);
   });
 
-  it("registers create, list and show subcommands", () => {
+  it("registers create, list, show and option-add subcommands", () => {
     const definition = commandDefinitions.find(
       (command) => command.name === "role-preset",
     );
@@ -98,6 +104,7 @@ describe("/role-preset command", () => {
       "create",
       "list",
       "show",
+      "option-add",
     ]);
   });
 
@@ -174,6 +181,294 @@ describe("/role-preset command", () => {
         targetId: "7",
       }),
     );
+  });
+
+  it("adds a qualified role option through the administration service and audits the mutation", async () => {
+    // Arrange
+    adminServiceMocks.addPresetRoleOption.mockResolvedValue({
+      kind: "added",
+
+      option: {
+        id: 31,
+
+        presetId: 7,
+
+        key: "2-gun-gunner",
+
+        displayName: "2-Gun Gunner",
+
+        description: "Operates a two-gun position.",
+
+        requestRestriction: "qualified_only",
+
+        capacity: 2,
+
+        sortOrder: 3,
+
+        active: true,
+      },
+    });
+
+    const interaction = createInteraction({
+      subcommand: "option-add",
+
+      strings: {
+        name: "2-Gun Gunner",
+
+        description: "Operates a two-gun position.",
+
+        restriction: "qualified_only",
+      },
+
+      integers: {
+        "preset-id": 7,
+
+        capacity: 2,
+      },
+
+      roles: {
+        "qualified-role-1": {
+          id: QUALIFIED_ROLE_ID,
+
+          name: "Qualified Gunner",
+        },
+
+        "supervised-role-1": {
+          id: SUPERVISED_ROLE_ID,
+
+          name: "Gunner Trainee",
+        },
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.addPresetRoleOption).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      presetId: 7,
+
+      displayName: "2-Gun Gunner",
+
+      description: "Operates a two-gun position.",
+
+      requestRestriction: "qualified_only",
+
+      capacity: 2,
+
+      qualificationRoles: [
+        {
+          discordRoleId: QUALIFIED_ROLE_ID,
+
+          roleNameSnapshot: "Qualified Gunner",
+
+          qualificationLevel: "qualified",
+        },
+
+        {
+          discordRoleId: SUPERVISED_ROLE_ID,
+
+          roleNameSnapshot: "Gunner Trainee",
+
+          qualificationLevel: "supervision_required",
+        },
+      ],
+    });
+
+    const content = readFirstReplyContent(interaction.editReply);
+
+    expect(content).toContain("Added role option **2-Gun Gunner** (#31)");
+
+    expect(content).toContain("to preset #7");
+
+    expect(content).toContain("`2-gun-gunner`");
+
+    expect(content).toContain("Qualified only");
+
+    expect(content).toContain(`<@&${QUALIFIED_ROLE_ID}>`);
+
+    expect(content).toContain(`<@&${SUPERVISED_ROLE_ID}>`);
+
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        guildId: 42,
+
+        actorUserId: ADMIN_USER_ID,
+
+        action: "role_preset.option.add",
+
+        outcome: "success",
+
+        targetType: "role_request_preset_option",
+
+        targetId: "31",
+
+        details: expect.objectContaining({
+          presetId: 7,
+
+          key: "2-gun-gunner",
+
+          requestRestriction: "qualified_only",
+
+          capacity: 2,
+        }),
+      }),
+    );
+  });
+
+  it("rejects one Discord role being selected at both qualification levels before calling the service", async () => {
+    // Arrange
+    const interaction = createInteraction({
+      subcommand: "option-add",
+
+      strings: {
+        name: "Captain",
+
+        restriction: "qualified_only",
+      },
+
+      integers: {
+        "preset-id": 7,
+      },
+
+      roles: {
+        "qualified-role-1": {
+          id: QUALIFIED_ROLE_ID,
+
+          name: "Qualified Captain",
+        },
+
+        "supervised-role-1": {
+          id: QUALIFIED_ROLE_ID,
+
+          name: "Qualified Captain",
+        },
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.addPresetRoleOption).not.toHaveBeenCalled();
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "**Qualified Captain** cannot be both fully qualified and supervision-required for the same preset role option.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  });
+
+  it("rejects a qualified-only preset option without qualification roles before calling the service", async () => {
+    // Arrange
+    const interaction = createInteraction({
+      subcommand: "option-add",
+
+      strings: {
+        name: "Captain",
+
+        restriction: "qualified_only",
+      },
+
+      integers: {
+        "preset-id": 7,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.addPresetRoleOption).not.toHaveBeenCalled();
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "A `Qualified only` preset role option must have at least one configured qualification role.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  });
+
+  it("rejects @everyone as a preset qualification role before calling the service", async () => {
+    // Arrange
+    const interaction = createInteraction({
+      subcommand: "option-add",
+
+      strings: {
+        name: "Captain",
+
+        restriction: "qualified_only",
+      },
+
+      integers: {
+        "preset-id": 7,
+      },
+
+      roles: {
+        "qualified-role-1": {
+          id: DISCORD_GUILD_ID,
+
+          name: "@everyone",
+        },
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.addPresetRoleOption).not.toHaveBeenCalled();
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: "`@everyone` cannot be used as a preset qualification role.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  });
+
+  it("reports a preset option key conflict returned by the administration service", async () => {
+    // Arrange
+    adminServiceMocks.addPresetRoleOption.mockResolvedValue({
+      kind: "key_conflict",
+
+      key: "2-gun-gunner",
+    });
+
+    const interaction = createInteraction({
+      subcommand: "option-add",
+
+      strings: {
+        name: "2 Gun Gunner",
+
+        restriction: "open",
+      },
+
+      integers: {
+        "preset-id": 7,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "Preset #7 already has a role option with the logical key `2-gun-gunner`. Choose a more distinct name.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
   });
 
   it("lists the guild's role-request presets", async () => {
@@ -474,6 +769,15 @@ function createInteraction(input: {
   integers?: Record<string, number | null>;
 
   booleans?: Record<string, boolean | null>;
+
+  roles?: Record<
+    string,
+    {
+      id: string;
+
+      name: string;
+    } | null
+  >;
 }): {
   interaction: ChatInputCommandInteraction;
 
@@ -542,6 +846,8 @@ function createInteraction(input: {
       },
 
       getBoolean: (name: string) => input.booleans?.[name] ?? null,
+
+      getRole: (name: string) => input.roles?.[name] ?? null,
     },
   };
 

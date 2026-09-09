@@ -1223,6 +1223,118 @@ export const commandDefinitions = [
             .setMinValue(1)
             .setRequired(true),
         ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("option-add")
+        .setDescription("Adds a requestable role option to a reusable preset.")
+
+        /*
+         * Discord requires required options before optional ones.
+         */
+        .addIntegerOption((option) =>
+          option
+            .setName("preset-id")
+            .setDescription("Preset ID shown by /role-preset list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("name")
+            .setDescription(
+              "Displayed role name, such as Captain or Carpenter.",
+            )
+            .setMinLength(1)
+            .setMaxLength(100)
+            .setRequired(true),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("restriction")
+            .setDescription("Who may request this role. Defaults to Open.")
+            .addChoices(
+              {
+                name: "Open",
+                value: "open",
+              },
+
+              {
+                name: "Qualified only",
+                value: "qualified_only",
+              },
+            ),
+        )
+
+        .addStringOption((option) =>
+          option
+            .setName("description")
+            .setDescription("Optional description of this role.")
+            .setMaxLength(1000),
+        )
+
+        .addIntegerOption((option) =>
+          option
+            .setName("capacity")
+            .setDescription(
+              "Optional maximum number of volunteers accepted for this role.",
+            )
+            .setMinValue(1)
+            .setMaxValue(2_147_483_647),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("qualified-role-1")
+            .setDescription("Discord role whose members are fully qualified."),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("qualified-role-2")
+            .setDescription("Additional fully-qualified Discord role."),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("qualified-role-3")
+            .setDescription("Additional fully-qualified Discord role."),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("qualified-role-4")
+            .setDescription("Additional fully-qualified Discord role."),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("supervised-role-1")
+            .setDescription(
+              "Discord role whose members may perform this role with supervision.",
+            ),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("supervised-role-2")
+            .setDescription("Additional supervision-required Discord role."),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("supervised-role-3")
+            .setDescription("Additional supervision-required Discord role."),
+        )
+
+        .addRoleOption((option) =>
+          option
+            .setName("supervised-role-4")
+            .setDescription("Additional supervision-required Discord role."),
+        ),
     ),
 
   new SlashCommandBuilder()

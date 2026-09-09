@@ -1,4 +1,8 @@
-import { type ChatInputCommandInteraction, MessageFlags } from "discord.js";
+import {
+  type ChatInputCommandInteraction,
+  MessageFlags,
+  type Role,
+} from "discord.js";
 
 import {
   getGuildConfiguration,
@@ -7,7 +11,10 @@ import {
 
 import { writeAuditLog } from "../audit/audit-log.js";
 
-import { createRoleRequestPreset } from "../role-requests/role-request-preset-admin-service.js";
+import {
+  addPresetRoleOption,
+  createRoleRequestPreset,
+} from "../role-requests/role-request-preset-admin-service.js";
 
 import {
   getRoleRequestPresetDetails,
@@ -58,6 +65,11 @@ export async function handleRolePresetCommand(
 
     case "show":
       await showPreset(interaction, configuration.guildId);
+
+      return;
+
+    case "option-add":
+      await addPresetOption(interaction, configuration.guildId);
 
       return;
 
@@ -232,6 +244,243 @@ async function createPreset(
       await interaction.editReply({
         content:
           "This server's stored configuration changed while the command was being processed. Run `/setup initialise` and try again.",
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
+}
+
+async function addPresetOption(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const presetId = interaction.options.getInteger("preset-id", true);
+
+  const displayName = interaction.options.getString("name", true).trim();
+
+  const description =
+    interaction.options.getString("description")?.trim() || null;
+
+  const restrictionText =
+    interaction.options.getString("restriction") ?? "open";
+
+  if (restrictionText !== "open" && restrictionText !== "qualified_only") {
+    await interaction.editReply({
+      content: "The preset role-request restriction is invalid.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  /*
+   * Capture the narrowed domain value before asynchronous service work.
+   */
+  const requestRestriction: "open" | "qualified_only" = restrictionText;
+
+  const capacity = interaction.options.getInteger("capacity");
+
+  const qualifiedRoles = getSelectedRoles(interaction, [
+    "qualified-role-1",
+    "qualified-role-2",
+    "qualified-role-3",
+    "qualified-role-4",
+  ]);
+
+  const supervisedRoles = getSelectedRoles(interaction, [
+    "supervised-role-1",
+    "supervised-role-2",
+    "supervised-role-3",
+    "supervised-role-4",
+  ]);
+
+  const overlappingRole = qualifiedRoles.find((qualified) =>
+    supervisedRoles.some((supervised) => supervised.id === qualified.id),
+  );
+
+  if (overlappingRole) {
+    await interaction.editReply({
+      content: `**${overlappingRole.name}** cannot be both fully qualified and supervision-required for the same preset role option.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const allQualificationRoles = [...qualifiedRoles, ...supervisedRoles];
+
+  if (allQualificationRoles.some((role) => role.id === interaction.guild.id)) {
+    await interaction.editReply({
+      content: "`@everyone` cannot be used as a preset qualification role.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  if (
+    requestRestriction === "qualified_only" &&
+    allQualificationRoles.length === 0
+  ) {
+    await interaction.editReply({
+      content:
+        "A `Qualified only` preset role option must have at least one configured qualification role.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const result = await addPresetRoleOption({
+    guildDatabaseId,
+
+    presetId,
+
+    displayName,
+
+    description,
+
+    requestRestriction,
+
+    capacity,
+
+    qualificationRoles: [
+      ...qualifiedRoles.map((role) => ({
+        discordRoleId: role.id,
+
+        roleNameSnapshot: role.name,
+
+        qualificationLevel: "qualified",
+      })),
+
+      ...supervisedRoles.map((role) => ({
+        discordRoleId: role.id,
+
+        roleNameSnapshot: role.name,
+
+        qualificationLevel: "supervision_required",
+      })),
+    ],
+  });
+
+  switch (result.kind) {
+    case "added": {
+      await interaction.editReply({
+        content: [
+          `✅ Added role option **${result.option.displayName}** (#${result.option.id}) to preset #${result.option.presetId}.`,
+
+          "",
+          `**Key:** \`${result.option.key}\``,
+
+          `**Restriction:** ${
+            result.option.requestRestriction === "qualified_only"
+              ? "Qualified only"
+              : "Open"
+          }`,
+
+          `**Capacity:** ${
+            result.option.capacity === null
+              ? "Unlimited"
+              : result.option.capacity
+          }`,
+
+          `**Fully qualified roles:** ${
+            qualifiedRoles.length > 0
+              ? qualifiedRoles.map((role) => `<@&${role.id}>`).join(", ")
+              : "None configured"
+          }`,
+
+          `**Supervision-required roles:** ${
+            supervisedRoles.length > 0
+              ? supervisedRoles.map((role) => `<@&${role.id}>`).join(", ")
+              : "None configured"
+          }`,
+        ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: guildDatabaseId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "role_preset.option.add",
+
+        outcome: "success",
+
+        summary: `Added role option "${result.option.displayName}" (#${result.option.id}) to role-request preset #${result.option.presetId}.`,
+
+        targetType: "role_request_preset_option",
+
+        targetId: String(result.option.id),
+
+        details: {
+          presetId: result.option.presetId,
+
+          key: result.option.key,
+
+          requestRestriction: result.option.requestRestriction,
+
+          capacity: result.option.capacity,
+
+          qualifiedRoleIds: qualifiedRoles.map((role) => role.id),
+
+          supervisedRoleIds: supervisedRoles.map((role) => role.id),
+        },
+      });
+
+      return;
+    }
+
+    case "preset_not_found":
+      await interaction.editReply({
+        content: `Role-request preset #${presetId} was not found in this server.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "key_conflict":
+      await interaction.editReply({
+        content: `Preset #${presetId} already has a role option with the logical key \`${result.key}\`. Choose a more distinct name.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "invalid_input":
+      await interaction.editReply({
+        content: formatPresetOptionValidationError(
+          result.reason,
+          result.discordRoleId,
+        ),
 
         allowedMentions: {
           parse: [],
@@ -441,6 +690,70 @@ function formatPresetDetails(preset: RoleRequestPresetDetails): string {
   }
 
   return lines.join("\n");
+}
+
+function getSelectedRoles(
+  interaction: CachedCommandInteraction,
+  names: readonly string[],
+): Role[] {
+  const roles = names
+    .map((name) => interaction.options.getRole(name))
+    .filter((role): role is Role => role !== null);
+
+  /*
+   * Duplicate selections within one qualification level are harmless from
+   * the command user's point of view, so collapse them before calling the
+   * stricter domain service.
+   *
+   * A role appearing across both levels is rejected explicitly above.
+   */
+  return [...new Map(roles.map((role) => [role.id, role])).values()];
+}
+
+function formatPresetOptionValidationError(
+  reason:
+    | "invalid_name"
+    | "invalid_request_restriction"
+    | "invalid_capacity"
+    | "invalid_qualification_level"
+    | "invalid_qualification_role_id"
+    | "invalid_qualification_role_name"
+    | "duplicate_qualification_role"
+    | "everyone_qualification_role"
+    | "missing_qualification_roles",
+
+  discordRoleId?: string,
+): string {
+  switch (reason) {
+    case "invalid_name":
+      return "The role-option name is invalid. Use a non-empty name of no more than 100 characters.";
+
+    case "invalid_request_restriction":
+      return "The preset role-request restriction is invalid.";
+
+    case "invalid_capacity":
+      return "Capacity must be a positive whole number.";
+
+    case "missing_qualification_roles":
+      return "A `Qualified only` preset role option must have at least one configured qualification role.";
+
+    case "everyone_qualification_role":
+      return "`@everyone` cannot be used as a preset qualification role.";
+
+    case "duplicate_qualification_role":
+      return discordRoleId
+        ? `Discord role <@&${discordRoleId}> was supplied more than once in the qualification rules.`
+        : "A Discord qualification role was supplied more than once.";
+
+    case "invalid_qualification_level":
+      return "One of the supplied qualification levels is invalid.";
+
+    case "invalid_qualification_role_id":
+      return "One of the supplied qualification-role IDs is invalid.";
+
+    case "invalid_qualification_role_name":
+      return "One of the supplied qualification-role names is invalid.";
+  }
 }
 
 function formatRequestRestriction(value: string): string {
