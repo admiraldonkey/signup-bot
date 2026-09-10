@@ -2023,6 +2023,11 @@ Completed work includes:
 - scheduled opening
 - durable opening/closing actions
 - event-start rescheduling
+- publication-intent-aware automatic opening
+- manual-hold deferral without consuming scheduler retries
+- publication wake-up for already-due groups
+- intentional pre-publication role-group support
+- in-flight publication-intent race protection
 - deleted-message recovery
 - concurrent publication/recovery protection
 

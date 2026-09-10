@@ -597,6 +597,26 @@ The same underlying publication behaviour is used by:
 
 This reduces the risk of three publication paths developing different domain rules.
 
+Successful publication is also the authoritative release point for automatic role-request groups which became due while the event was deliberately held unpublished.
+
+Within the same PostgreSQL publication transaction, the system can wake still-valid due role-group opening actions through:
+
+```text
+resumeDueRoleRequestGroupOpeningsAfterPublication(...)
+```
+
+Only groups satisfying:
+
+```text
+opensAt <= publishedAt < closesAt
+```
+
+are resumed.
+
+Future groups retain their original schedule.
+
+This means event publication and release of already-due deferred role-request work become one coherent database transition.
+
 ---
 
 # Publication Validation
@@ -1816,6 +1836,38 @@ in the same transaction as the event-level snapshot.
 
 This ensures the group configuration and its future work cannot be partially created.
 
+A due automatic opening does not necessarily publish immediately.
+
+Event publication intent is also part of the decision.
+
+Conceptually:
+
+```text
+due group
+    |
+    +---- event already published
+    |       -> publish normally
+    |
+    +---- event has future scheduled publication
+    |       |
+    |       +---- publication time still future
+    |       |       -> intentional early group may publish
+    |       |
+    |       +---- publication time reached but event still unpublished
+    |               -> defer
+    |
+    +---- event held for manual publication
+            -> defer
+```
+
+A deferred opening is parked durably at the group's closing boundary.
+
+This is not treated as a scheduler failure and does not consume delivery retry attempts.
+
+If the event publishes before the group closes, event publication wakes the opening action immediately.
+
+If the event never publishes, the parked action eventually reaches the closing boundary and becomes obsolete.
+
 ---
 
 # Role-Request Group Publication
@@ -1830,6 +1882,8 @@ Publication re-checks:
 
 - event ownership
 - event lifecycle
+- event publication state
+- event publication intent
 - group active state
 - opening time
 - closing time
@@ -1837,19 +1891,60 @@ Publication re-checks:
 - channel permissions
 - notification role state
 
-Possible outcomes distinguish normal obsolete states from environmental failure.
+Possible outcomes distinguish normal obsolete or deferred states from environmental failure.
 
-Examples include:
+Representative outcomes include:
 
 ```text
-already posted
+already-posted
 inactive
-not open yet
-window expired
-channel unavailable
+not-open-yet
+awaiting-event-publication
+window-expired
+channel-unavailable
 ```
 
-Unexpected Discord failures are allowed to propagate so the durable scheduler can apply its retry policy.
+`awaiting-event-publication` is deliberate deferral rather than a delivery failure.
+
+The publication-intent rules are:
+
+```text
+published event
+    -> due group may publish
+
+manual unpublished event
+    -> automatic group waits
+
+future scheduled event publication
+    -> an earlier due group may publish intentionally
+
+scheduled publication overdue but event still unpublished
+    -> later group waits
+```
+
+Discord lookups and message sends cross an external boundary.
+
+The service therefore re-checks authoritative state before sending and again before claiming the final message linkage.
+
+If publication intent changes while the Discord send is in flight:
+
+```text
+Discord candidate created
+        |
+        v
+authoritative event state re-read
+        |
+        v
+candidate no longer permitted
+        |
+        v
+database linkage rejected
+        |
+        v
+candidate Discord message deleted
+```
+
+PostgreSQL remains authoritative.
 
 ---
 
@@ -3387,6 +3482,10 @@ The following invariants are particularly important.
 - `supervision_required` is distinct from fully qualified.
 - Signup-gated groups restrict new requests, not the existence of the event-level request itself.
 - Event timing changes preserve the distinction between planned openings and manual immediate openings.
+- Automatic role-group opening respects the parent event's publication intent.
+- Manual-held events do not automatically expose scheduled role groups before publication.
+- Deliberately earlier groups may precede an explicit future scheduled event publication.
+- Successful event publication wakes already-due, still-valid deferred opening actions without pulling future groups forward.
 
 ## Presets
 
