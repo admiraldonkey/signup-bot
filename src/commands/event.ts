@@ -25,6 +25,7 @@ import {
   type AttendanceRefreshResult,
 } from "../events/attendance-refresh.js";
 import { reconcileOrganiserPendingWarning } from "../events/organiser-warning-reconciliation.js";
+import { reconcileOrganiserCoverMessages } from "../events/organiser-cover-reconciliation.js";
 import { isValidEventTimezone } from "../time/timezones.js";
 import { handleEventResponses } from "./event-responses.js";
 import {
@@ -1562,6 +1563,25 @@ async function cancelEvent(
       );
     });
   }
+
+  await reconcileOrganiserCoverMessages({
+    guild: interaction.guild,
+
+    eventId,
+
+    resolution: {
+      kind: "event_cancelled",
+    },
+  }).catch((error: unknown) => {
+    /*
+     * Cancellation is already authoritative. Discord cleanup must not roll it
+     * back or change the command result.
+     */
+    console.error(
+      `Failed to reconcile organiser cover messages after cancelling event ${eventId}:`,
+      error,
+    );
+  });
 
   const refreshResult = event.publishedAt
     ? await refreshAttendanceMessage(interaction.guild, eventId)

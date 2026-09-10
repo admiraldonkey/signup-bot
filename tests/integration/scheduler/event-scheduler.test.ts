@@ -98,6 +98,15 @@ vi.mock("../../../src/events/organiser-warning-reconciliation.js", () => ({
     organiserNotificationMocks.reconcileOrganiserPendingWarning,
 }));
 
+const organiserCoverReconciliationMocks = vi.hoisted(() => ({
+  reconcileOrganiserCoverMessages: vi.fn().mockResolvedValue(0),
+}));
+
+vi.mock("../../../src/events/organiser-cover-reconciliation.js", () => ({
+  reconcileOrganiserCoverMessages:
+    organiserCoverReconciliationMocks.reconcileOrganiserCoverMessages,
+}));
+
 import {
   startEventScheduler,
   stopEventScheduler,
@@ -131,6 +140,10 @@ describe("event scheduler", () => {
     organiserNotificationMocks.reconcileOrganiserPendingWarning.mockClear();
     organiserNotificationMocks.sendOrganiserCoverRequest.mockClear();
     organiserNotificationMocks.sendOrganiserMissingAtStartAlert.mockClear();
+    organiserCoverReconciliationMocks.reconcileOrganiserCoverMessages.mockReset();
+    organiserCoverReconciliationMocks.reconcileOrganiserCoverMessages.mockResolvedValue(
+      0,
+    );
   });
 
   afterEach(() => {
@@ -2505,6 +2518,181 @@ describe("event scheduler", () => {
     expect(deleteMessage).not.toHaveBeenCalled();
   });
 
+  it("reconciles earlier organiser cover messages only after the event-start alert has been durably tracked", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserMissingAtStart(pool);
+
+    const olderCoverMessageId = "300000000000000040";
+
+    /*
+     * Model the general-cover message which was already posted before T+0.
+     *
+     * The missing-at-start fixture already models the earlier logical cover
+     * request. This row adds the durable Discord linkage introduced by the
+     * organiser-cover message tracking work.
+     */
+    await pool.query(
+      `
+      INSERT INTO "event_messages" (
+        "event_id",
+        "guild_id",
+        "channel_id",
+        "message_id",
+        "kind"
+      )
+      SELECT
+        "id",
+        "owner_guild_id",
+        $2,
+        $3,
+        'organiser_cover'
+      FROM
+        "events"
+      WHERE
+        "id" = $1
+    `,
+      [fixture.eventId, "300000000000000005", olderCoverMessageId],
+    );
+
+    /*
+     * The scheduler must persist the new T+0 message before it retires the
+     * older cover surface.
+     *
+     * Checking PostgreSQL from inside the reconciliation boundary makes that
+     * ordering deterministic rather than merely asserting that both operations
+     * eventually happened.
+     */
+    organiserCoverReconciliationMocks.reconcileOrganiserCoverMessages.mockImplementationOnce(
+      async (input: {
+        eventId: number;
+        resolution: {
+          kind: string;
+        };
+        scope?: string;
+      }) => {
+        expect(input.eventId).toBe(fixture.eventId);
+
+        expect(input.resolution).toEqual({
+          kind: "superseded_at_start",
+        });
+
+        expect(input.scope).toBe("cover_only");
+
+        const trackedMessages = await pool.query<{
+          kind: string;
+          message_id: string;
+          resolved_at: Date | null;
+        }>(
+          `
+          SELECT
+            "kind"::text AS "kind",
+            "message_id",
+            "resolved_at"
+          FROM
+            "event_messages"
+          WHERE
+            "event_id" = $1
+            AND
+            "kind"::text IN (
+              'organiser_cover',
+              'organiser_missing_at_start'
+            )
+          ORDER BY
+            "kind"::text,
+            "message_id"
+        `,
+          [fixture.eventId],
+        );
+
+        expect(trackedMessages.rows).toEqual([
+          {
+            kind: "organiser_cover",
+
+            message_id: olderCoverMessageId,
+
+            resolved_at: null,
+          },
+          {
+            kind: "organiser_missing_at_start",
+
+            message_id: "300000000000000031",
+
+            resolved_at: null,
+          },
+        ]);
+
+        return 1;
+      },
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    expect(
+      organiserNotificationMocks.sendOrganiserMissingAtStartAlert,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      organiserCoverReconciliationMocks.reconcileOrganiserCoverMessages,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      organiserCoverReconciliationMocks.reconcileOrganiserCoverMessages,
+    ).toHaveBeenCalledWith({
+      guild: expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+
+      eventId: fixture.eventId,
+
+      resolution: {
+        kind: "superseded_at_start",
+      },
+
+      scope: "cover_only",
+    });
+
+    /*
+     * The scheduler owns only the wiring here.
+     *
+     * The direct reconciliation integration tests separately prove that the
+     * service edits the older message and marks its event_messages row
+     * resolved.
+     */
+    const startMessageResult = await pool.query<{
+      message_id: string;
+      resolved_at: Date | null;
+    }>(
+      `
+      SELECT
+        "message_id",
+        "resolved_at"
+      FROM
+        "event_messages"
+      WHERE
+        "event_id" = $1
+        AND
+        "kind"::text = 'organiser_missing_at_start'
+    `,
+      [fixture.eventId],
+    );
+
+    expect(startMessageResult.rows).toEqual([
+      {
+        message_id: "300000000000000031",
+
+        resolved_at: null,
+      },
+    ]);
+  });
+
   it("does not post a missing-organiser alert after the event has already ended when completion has not caught up yet", async () => {
     // Arrange
     const fixture = await createOpenEventWithDueOrganiserMissingAtStart(pool);
@@ -4462,6 +4650,103 @@ describe("event scheduler", () => {
       }),
 
       assignmentId,
+    });
+  });
+
+  it("reconciles outstanding organiser cover messages after automatic event completion becomes authoritative", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueCompletion(pool);
+
+    /*
+     * The reconciliation service itself has direct tests proving how tracked
+     * cover messages are edited.
+     *
+     * This scheduler regression instead proves that completion is already
+     * authoritative before the presentation reconciliation boundary runs.
+     */
+    organiserCoverReconciliationMocks.reconcileOrganiserCoverMessages.mockImplementationOnce(
+      async (input: {
+        eventId: number;
+        resolution: {
+          kind: string;
+        };
+      }) => {
+        expect(input.eventId).toBe(fixture.eventId);
+
+        expect(input.resolution).toEqual({
+          kind: "event_completed",
+        });
+
+        const eventStateAtReconciliation = await pool.query<{
+          status: string;
+        }>(
+          `
+          SELECT
+            "status"
+          FROM
+            "events"
+          WHERE
+            "id" = $1
+        `,
+          [fixture.eventId],
+        );
+
+        expect(eventStateAtReconciliation.rows).toEqual([
+          {
+            status: "completed",
+          },
+        ]);
+
+        return 1;
+      },
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+      SELECT
+        "status"
+      FROM
+        "events"
+      WHERE
+        "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toEqual([
+      {
+        status: "completed",
+      },
+    ]);
+
+    expect(
+      organiserCoverReconciliationMocks.reconcileOrganiserCoverMessages,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      organiserCoverReconciliationMocks.reconcileOrganiserCoverMessages,
+    ).toHaveBeenCalledWith({
+      guild: expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+
+      eventId: fixture.eventId,
+
+      resolution: {
+        kind: "event_completed",
+      },
     });
   });
 

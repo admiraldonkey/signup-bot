@@ -20,6 +20,7 @@ import {
 } from "../audit/audit-log.js";
 import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
 import { reconcileOrganiserPendingWarning } from "../events/organiser-warning-reconciliation.js";
+import { reconcileOrganiserCoverMessages } from "../events/organiser-cover-reconciliation.js";
 import { setGuildOrganisersEnabled } from "../organisers/organiser-feature-service.js";
 
 const DEFAULT_EVENT_TYPES = [
@@ -868,6 +869,23 @@ async function configureGuildFeature(
             }).catch((error: unknown) => {
               console.error(
                 `Failed to reconcile organiser warning for assignment ${assignment.id} after disabling organisers:`,
+                error,
+              );
+            });
+          }),
+
+          ...transition.affectedEventIds.map(async (affectedEventId) => {
+            await reconcileOrganiserCoverMessages({
+              guild,
+
+              eventId: affectedEventId,
+
+              resolution: {
+                kind: "organisers_disabled",
+              },
+            }).catch((error: unknown) => {
+              console.error(
+                `Failed to reconcile organiser cover messages for event ${affectedEventId} after disabling organisers:`,
                 error,
               );
             });

@@ -47,6 +47,7 @@ import {
   type CoverRequestDelivery,
 } from "../events/organiser-notification.js";
 import { reconcileOrganiserPendingWarning } from "../events/organiser-warning-reconciliation.js";
+import { reconcileOrganiserCoverMessages } from "../events/organiser-cover-reconciliation.js";
 import {
   ROLE_REQUEST_GROUP_OPEN_ACTION_PREFIX,
   ROLE_REQUEST_GROUP_CLOSE_ACTION_PREFIX,
@@ -1499,6 +1500,27 @@ async function executeOrganiserMissingAtStart(
     return;
   }
 
+  await reconcileOrganiserCoverMessages({
+    guild,
+
+    eventId: transition.event.id,
+
+    resolution: {
+      kind: "superseded_at_start",
+    },
+
+    scope: "cover_only",
+  }).catch((error: unknown) => {
+    /*
+     * The T+0 message is already tracked and remains the active claim surface.
+     * Failure to tidy an older cover message must not invalidate it.
+     */
+    console.error(
+      `Failed to reconcile earlier organiser cover messages after the event-start alert for event ${transition.event.id}:`,
+      error,
+    );
+  });
+
   await writeAuditLog({
     guildId: transition.event.guildDatabaseId,
 
@@ -2463,6 +2485,25 @@ async function executeCompleteEvent(
       );
     });
   }
+
+  await reconcileOrganiserCoverMessages({
+    guild: completedGuild,
+
+    eventId,
+
+    resolution: {
+      kind: "event_completed",
+    },
+  }).catch((error: unknown) => {
+    /*
+     * Completion is already authoritative. A Discord cleanup failure must not
+     * turn successful lifecycle completion into a scheduler retry.
+     */
+    console.error(
+      `Failed to reconcile organiser cover messages after completing event ${eventId}:`,
+      error,
+    );
+  });
 
   await refreshRoleRequestMessages(completedGuild, eventId);
 
