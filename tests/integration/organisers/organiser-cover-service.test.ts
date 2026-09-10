@@ -242,6 +242,21 @@ describe("organiser cover service", () => {
       started: true,
     });
 
+    await pool.query(
+      `
+    UPDATE "events"
+    SET
+      "ends_at" =
+        NOW() +
+          INTERVAL '55 minutes',
+      "updated_at" =
+        NOW()
+    WHERE
+      "id" = $1
+  `,
+      [fixture.eventId],
+    );
+
     // Act
     const context = await getOrganiserCoverClaimContext({
       eventId: fixture.eventId,
@@ -295,6 +310,83 @@ describe("organiser cover service", () => {
         is_current: true,
 
         discord_user_id: COVER_USER_ID,
+      },
+    ]);
+  });
+
+  it("does not allow organiser cover after the event has ended when completion has not caught up yet", async () => {
+    // Arrange
+    const fixture = await createCoverFixture(pool, {
+      started: true,
+    });
+
+    /*
+     * Leave lifecycle status as "open" to model complete_event still waiting
+     * behind earlier overdue scheduler work after a period of downtime.
+     */
+    await pool.query(
+      `
+      UPDATE "events"
+      SET
+        "starts_at" =
+          NOW() -
+            INTERVAL '2 hours',
+        "ends_at" =
+          NOW() -
+            INTERVAL '1 hour',
+        "status" =
+          'open',
+        "updated_at" =
+          NOW()
+      WHERE
+        "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    // Act
+    const context = await getOrganiserCoverClaimContext({
+      eventId: fixture.eventId,
+
+      discordGuildId: DISCORD_GUILD_ID,
+    });
+
+    const result = await claimEventOrganiserCover({
+      eventId: fixture.eventId,
+
+      organiserUserId: COVER_USER_ID,
+
+      displayNameSnapshot: "Too-Late Cover Organiser",
+    });
+
+    // Assert
+    expect(context).toEqual({
+      kind: "event_inactive",
+    });
+
+    expect(result).toEqual({
+      kind: "event_inactive",
+    });
+
+    const coverResult = await pool.query<{
+      count: number;
+    }>(
+      `
+      SELECT
+        COUNT(*)::int AS "count"
+      FROM
+        "event_organiser_assignments"
+      WHERE
+        "event_id" = $1
+        AND
+        "slot" = 'cover'
+    `,
+      [fixture.eventId],
+    );
+
+    expect(coverResult.rows).toEqual([
+      {
+        count: 0,
       },
     ]);
   });

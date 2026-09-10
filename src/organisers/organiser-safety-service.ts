@@ -170,24 +170,27 @@ export async function openOrganiserCoverAtSafetyDeadline(input: {
         publishedAt: events.publishedAt,
 
         startsAt: events.startsAt,
+
+        endsAt: events.endsAt,
       })
       .from(events)
       .where(eq(events.id, input.eventId))
       .limit(1)
       .for("update");
 
+    const now = new Date();
+
     if (
       !event ||
       !event.publishedAt ||
       event.status === "cancelled" ||
-      event.status === "completed"
+      event.status === "completed" ||
+      (event.endsAt !== null && event.endsAt <= now)
     ) {
       return {
         kind: "event_inactive",
       } as const;
     }
-
-    const now = new Date();
 
     const coverDeadline = calculateOrganiserCoverDeadline(
       event.startsAt,

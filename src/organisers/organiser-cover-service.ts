@@ -78,6 +78,8 @@ export async function getOrganiserCoverClaimContext(input: {
 
       status: events.status,
 
+      endsAt: events.endsAt,
+
       guildDatabaseId: events.ownerGuildId,
 
       discordGuildId: discordGuilds.discordGuildId,
@@ -104,7 +106,13 @@ export async function getOrganiserCoverClaimContext(input: {
     };
   }
 
-  if (event.status === "cancelled" || event.status === "completed") {
+  const now = new Date();
+
+  if (
+    event.status === "cancelled" ||
+    event.status === "completed" ||
+    (event.endsAt !== null && event.endsAt <= now)
+  ) {
     return {
       kind: "event_inactive",
     };
@@ -188,16 +196,21 @@ export async function claimEventOrganiserCover(input: {
     const [lockedEvent] = await transaction
       .select({
         status: events.status,
+
+        endsAt: events.endsAt,
       })
       .from(events)
       .where(eq(events.id, input.eventId))
       .limit(1)
       .for("update");
 
+    const now = new Date();
+
     if (
       !lockedEvent ||
       lockedEvent.status === "cancelled" ||
-      lockedEvent.status === "completed"
+      lockedEvent.status === "completed" ||
+      (lockedEvent.endsAt !== null && lockedEvent.endsAt <= now)
     ) {
       return {
         kind: "event_inactive",
@@ -227,8 +240,6 @@ export async function claimEventOrganiserCover(input: {
         kind: "active_assignment",
       } as const;
     }
-
-    const now = new Date();
 
     const [coverAssignment] = await transaction
       .insert(eventOrganiserAssignments)

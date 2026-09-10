@@ -1364,6 +1364,136 @@ describe("event scheduler", () => {
     expect.soft(auditResult.rows).toEqual([]);
   });
 
+  it("does not time out an overdue organiser after the event has already ended when completion has not caught up yet", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserTimeout(pool);
+
+    /*
+     * Reproduce scheduler catch-up after downtime.
+     *
+     * The event's absolute time window has finished, but complete_event has not
+     * yet updated the persisted lifecycle state.
+     */
+    await pool.query(
+      `
+      UPDATE "events"
+      SET
+        "starts_at" =
+          NOW() -
+            INTERVAL '2 hours',
+        "ends_at" =
+          NOW() -
+            INTERVAL '1 hour',
+        "status" =
+          'open',
+        "updated_at" =
+          NOW()
+      WHERE
+        "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const assignmentResult = await pool.query<{
+      status: string;
+
+      is_current: boolean;
+
+      ended_at: Date | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current",
+        "ended_at"
+      FROM
+        "event_organiser_assignments"
+      WHERE
+        "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toEqual([
+      {
+        status: "pending",
+
+        is_current: true,
+
+        ended_at: null,
+      },
+    ]);
+
+    /*
+     * No successful timeout should be recorded for organiser work which became
+     * obsolete because the event itself had already ended.
+     */
+    const auditResult = await pool.query<{
+      count: number;
+    }>(
+      `
+      SELECT
+        COUNT(*)::int AS "count"
+      FROM
+        "audit_logs"
+      WHERE
+        "action" =
+          'scheduler.organiser_timeout'
+        AND
+        "target_id" = $1
+        AND
+        "outcome" = 'success'
+    `,
+      [String(fixture.assignmentId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+
+    /*
+     * A stale organiser timeout must not create fresh downstream cover work
+     * after the event's operational window has finished.
+     */
+    const coverActionResult = await pool.query<{
+      count: number;
+    }>(
+      `
+      SELECT
+        COUNT(*)::int AS "count"
+      FROM
+        "scheduled_actions"
+      WHERE
+        "event_id" = $1
+        AND
+        "action_key" = $2
+    `,
+      [fixture.eventId, `organiser_cover_request:${fixture.assignmentId}`],
+    );
+
+    expect(coverActionResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+
+    expect(
+      organiserNotificationMocks.reconcileOrganiserPendingWarning,
+    ).not.toHaveBeenCalled();
+  });
+
   it("does not time out an overdue organiser when organisers are disabled", async () => {
     // Arrange
     const fixture = await createOpenEventWithDueOrganiserTimeout(pool);
@@ -2199,6 +2329,97 @@ describe("event scheduler", () => {
     ]);
   });
 
+  it("does not post a missing-organiser alert after the event has already ended when completion has not caught up yet", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserMissingAtStart(pool);
+
+    /*
+     * Reproduce restart catch-up after the event has already finished.
+     *
+     * Deliberately leave the persisted lifecycle as "open". The later
+     * complete_event action has not caught up yet, so the event's ends_at value
+     * must be sufficient to make organiser escalation obsolete.
+     */
+    await pool.query(
+      `
+      UPDATE "events"
+      SET
+        "starts_at" =
+          NOW() -
+            INTERVAL '2 hours',
+        "ends_at" =
+          NOW() -
+            INTERVAL '1 hour',
+        "updated_at" =
+          NOW()
+      WHERE
+        "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    expect(
+      organiserNotificationMocks.sendOrganiserMissingAtStartAlert,
+    ).not.toHaveBeenCalled();
+
+    /*
+     * This regression deliberately does not rely on complete_event having run.
+     * The scheduler must recognise the absolute event end independently.
+     */
+    const eventResult = await pool.query<{
+      status: string;
+    }>(
+      `
+      SELECT
+        "status"
+      FROM
+        "events"
+      WHERE
+        "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    expect(eventResult.rows).toEqual([
+      {
+        status: "open",
+      },
+    ]);
+
+    const auditResult = await pool.query<{
+      count: number;
+    }>(
+      `
+      SELECT
+        COUNT(*)::int AS "count"
+      FROM
+        "audit_logs"
+      WHERE
+        "action" =
+          'scheduler.organiser_missing_at_start'
+        AND
+        "target_id" = $1
+    `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+  });
+
   it("does not post a stale missing-organiser alert when cover is claimed during the guild fetch", async () => {
     // Arrange
     const fixture = await createOpenEventWithDueOrganiserMissingAtStart(pool);
@@ -2302,6 +2523,93 @@ describe("event scheduler", () => {
           "target_id" = $1
       `,
       [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+  });
+
+  it("does not send an overdue organiser warning after the event has already ended", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserWarning(pool);
+
+    await pool.query(
+      `
+      UPDATE "events"
+      SET
+        "starts_at" =
+          NOW() -
+            INTERVAL '2 hours',
+        "ends_at" =
+          NOW() -
+            INTERVAL '1 hour',
+        "status" =
+          'open',
+        "updated_at" =
+          NOW()
+      WHERE
+        "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    expect(
+      organiserNotificationMocks.sendOrganiserPendingWarning,
+    ).not.toHaveBeenCalled();
+
+    const assignmentResult = await pool.query<{
+      status: string;
+
+      is_current: boolean;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current"
+      FROM
+        "event_organiser_assignments"
+      WHERE
+        "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toEqual([
+      {
+        status: "pending",
+
+        is_current: true,
+      },
+    ]);
+
+    const auditResult = await pool.query<{
+      count: number;
+    }>(
+      `
+      SELECT
+        COUNT(*)::int AS "count"
+      FROM
+        "audit_logs"
+      WHERE
+        "action" =
+          'scheduler.organiser_warning'
+        AND
+        "target_id" = $1
+    `,
+      [String(fixture.assignmentId)],
     );
 
     expect(auditResult.rows).toEqual([

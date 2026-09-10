@@ -503,6 +503,8 @@ async function executeOrganiserWarning(
 
       eventStatus: events.status,
 
+      eventEndsAt: events.endsAt,
+
       guildDatabaseId: events.ownerGuildId,
 
       discordGuildId: discordGuilds.discordGuildId,
@@ -528,6 +530,8 @@ async function executeOrganiserWarning(
     return;
   }
 
+  const now = new Date();
+
   if (
     !assignment.organisersEnabled ||
     !assignment.isCurrent ||
@@ -535,7 +539,8 @@ async function executeOrganiserWarning(
     !assignment.activatedAt ||
     !assignment.responseDeadlineAt ||
     assignment.eventStatus === "cancelled" ||
-    assignment.eventStatus === "completed"
+    assignment.eventStatus === "completed" ||
+    (assignment.eventEndsAt !== null && assignment.eventEndsAt <= now)
   ) {
     return;
   }
@@ -553,6 +558,8 @@ async function executeOrganiserWarning(
   const [currentAssignment] = await db
     .select({
       id: eventOrganiserAssignments.id,
+
+      eventEndsAt: events.endsAt,
     })
     .from(eventOrganiserAssignments)
     .innerJoin(events, eq(events.id, eventOrganiserAssignments.eventId))
@@ -581,7 +588,11 @@ async function executeOrganiserWarning(
     )
     .limit(1);
 
-  if (!currentAssignment) {
+  if (
+    !currentAssignment ||
+    (currentAssignment.eventEndsAt !== null &&
+      currentAssignment.eventEndsAt <= new Date())
+  ) {
     return;
   }
 
@@ -693,6 +704,8 @@ async function executeOrganiserWarning(
       isCurrent: eventOrganiserAssignments.isCurrent,
 
       eventStatus: events.status,
+
+      eventEndsAt: events.endsAt,
     })
     .from(eventOrganiserAssignments)
     .innerJoin(events, eq(events.id, eventOrganiserAssignments.eventId))
@@ -704,7 +717,9 @@ async function executeOrganiserWarning(
     !postSendState.isCurrent ||
     postSendState.status !== "pending" ||
     postSendState.eventStatus === "cancelled" ||
-    postSendState.eventStatus === "completed"
+    postSendState.eventStatus === "completed" ||
+    (postSendState.eventEndsAt !== null &&
+      postSendState.eventEndsAt <= new Date())
   ) {
     await reconcileOrganiserPendingWarning({
       guild,
@@ -752,6 +767,8 @@ async function executeOrganiserTimeout(
 
       eventStatus: events.status,
 
+      eventEndsAt: events.endsAt,
+
       guildDatabaseId: events.ownerGuildId,
 
       discordGuildId: discordGuilds.discordGuildId,
@@ -774,7 +791,8 @@ async function executeOrganiserTimeout(
 
   if (
     assignment.eventStatus === "cancelled" ||
-    assignment.eventStatus === "completed"
+    assignment.eventStatus === "completed" ||
+    (assignment.eventEndsAt !== null && assignment.eventEndsAt <= new Date())
   ) {
     return;
   }
@@ -858,16 +876,21 @@ async function executeOrganiserTimeout(
       const [currentEvent] = await transaction
         .select({
           status: events.status,
+
+          endsAt: events.endsAt,
         })
         .from(events)
         .where(eq(events.id, eventId))
         .for("update")
         .limit(1);
 
+      const currentEventNow = new Date();
+
       if (
         !currentEvent ||
         currentEvent.status === "cancelled" ||
-        currentEvent.status === "completed"
+        currentEvent.status === "completed" ||
+        (currentEvent.endsAt !== null && currentEvent.endsAt <= currentEventNow)
       ) {
         transaction.rollback();
       }
@@ -1297,6 +1320,8 @@ async function executeOrganiserMissingAtStart(
 
       startsAt: events.startsAt,
 
+      endsAt: events.endsAt,
+
       organisersEnabled: guildSettings.organisersEnabled,
     })
     .from(events)
@@ -1304,13 +1329,16 @@ async function executeOrganiserMissingAtStart(
     .where(eq(events.id, eventId))
     .limit(1);
 
+  const currentEventNow = new Date();
+
   if (
     !currentEvent ||
     !currentEvent.organisersEnabled ||
     !currentEvent.publishedAt ||
-    currentEvent.startsAt > new Date() ||
+    currentEvent.startsAt > currentEventNow ||
     currentEvent.status === "cancelled" ||
-    currentEvent.status === "completed"
+    currentEvent.status === "completed" ||
+    (currentEvent.endsAt !== null && currentEvent.endsAt <= currentEventNow)
   ) {
     return;
   }
