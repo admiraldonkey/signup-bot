@@ -576,6 +576,136 @@ describe("event scheduler", () => {
     expect(auditResult.rows).toEqual([]);
   });
 
+  it("parks a due role-request opening at its closing boundary while awaiting event publication", async () => {
+    // Arrange
+    const fixture = await createEventWithDueRoleGroupOpen(pool);
+
+    const groupResult = await pool.query<{
+      closes_at: Date;
+    }>(
+      `
+      SELECT
+        "closes_at"
+      FROM
+        "role_request_groups"
+      WHERE
+        "id" = $1
+    `,
+      [fixture.groupId],
+    );
+
+    const closesAt = groupResult.rows[0]?.closes_at;
+
+    if (!closesAt) {
+      throw new Error(
+        "The deferred role-request opening test group has no closing time.",
+      );
+    }
+
+    roleRequestPublicationMocks.publishRoleRequestGroup.mockResolvedValue({
+      ok: false,
+
+      reason: "awaiting-event-publication",
+
+      eventId: fixture.eventId,
+
+      groupId: fixture.groupId,
+    });
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    /*
+     * A publication hold is not a Discord failure.
+     *
+     * Park the durable opening at the group's closing boundary rather than
+     * polling repeatedly or consuming retry attempts.
+     */
+    await waitForScheduledActionDueAt(pool, fixture.actionId, closesAt);
+
+    stopEventScheduler();
+
+    // Assert
+    expect(
+      roleRequestPublicationMocks.publishRoleRequestGroup,
+    ).toHaveBeenCalledTimes(1);
+
+    const actionResult = await pool.query<{
+      status: string;
+
+      due_at: Date;
+
+      attempt_count: number;
+
+      locked_at: Date | null;
+
+      completed_at: Date | null;
+
+      last_error: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "due_at",
+        "attempt_count",
+        "locked_at",
+        "completed_at",
+        "last_error"
+      FROM
+        "scheduled_actions"
+      WHERE
+        "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toEqual([
+      {
+        status: "pending",
+
+        due_at: closesAt,
+
+        attempt_count: 0,
+
+        locked_at: null,
+
+        completed_at: null,
+
+        last_error: null,
+      },
+    ]);
+
+    /*
+     * Deliberately waiting for event publication is neither a successful
+     * opening nor a delivery failure.
+     */
+    const auditResult = await pool.query<{
+      count: number;
+    }>(
+      `
+      SELECT
+        COUNT(*)::int AS "count"
+      FROM
+        "audit_logs"
+      WHERE
+        "target_type" = 'role_request_group'
+        AND
+        "target_id" = $1
+        AND
+        "action" = 'scheduler.role_group_open'
+    `,
+      [String(fixture.groupId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+  });
+
   it("completes a role-request opening action with a failure audit when its snapshotted channel is unavailable", async () => {
     // Arrange
     const fixture = await createEventWithDueRoleGroupOpen(pool);

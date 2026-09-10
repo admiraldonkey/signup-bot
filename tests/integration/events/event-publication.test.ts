@@ -523,6 +523,263 @@ describe("event publication organiser feature", () => {
 
     expect(description).not.toContain(`<@${ORGANISER_USER_ID}>`);
   });
+
+  it("resumes a due deferred role-request opening when the event publishes without pulling future groups forward", async () => {
+    // Arrange
+    const fixture = await createPublicationFixture(pool, {
+      organisersEnabled: false,
+
+      signupsEnabled: false,
+    });
+
+    const now = new Date();
+
+    const dueOpensAt = new Date(now.getTime() - 30 * 60_000);
+
+    const dueClosesAt = new Date(now.getTime() + 45 * 60_000);
+
+    const futureOpensAt = new Date(now.getTime() + 30 * 60_000);
+
+    const futureClosesAt = new Date(now.getTime() + 90 * 60_000);
+
+    const groupResult = await pool.query<{
+      id: number;
+
+      name: string;
+    }>(
+      `
+      INSERT INTO "role_request_groups" (
+        "event_id",
+        "name",
+        "channel_id",
+        "requires_positive_signup",
+        "open_minutes_before_start",
+        "opens_at",
+        "close_minutes_before_start",
+        "closes_at",
+        "created_by_user_id"
+      )
+      VALUES
+        (
+          $1,
+          'Deferred Role Requests',
+          $2,
+          FALSE,
+          150,
+          $3,
+          75,
+          $4,
+          $5
+        ),
+        (
+          $1,
+          'Future Role Requests',
+          $2,
+          FALSE,
+          90,
+          $6,
+          30,
+          $7,
+          $5
+        )
+      RETURNING
+        "id",
+        "name"
+    `,
+      [
+        fixture.eventId,
+        CHANNEL_ID,
+        dueOpensAt,
+        dueClosesAt,
+        ADMIN_USER_ID,
+        futureOpensAt,
+        futureClosesAt,
+      ],
+    );
+
+    const dueGroup = groupResult.rows.find(
+      (group) => group.name === "Deferred Role Requests",
+    );
+
+    const futureGroup = groupResult.rows.find(
+      (group) => group.name === "Future Role Requests",
+    );
+
+    if (!dueGroup || !futureGroup) {
+      throw new Error(
+        "Failed to create both role-request publication test groups.",
+      );
+    }
+
+    /*
+     * Model a group whose normal opening already fired while the event was
+     * held for manual publication.
+     *
+     * Its scheduler action is parked at closesAt until either publication
+     * wakes it or the request window expires.
+     */
+    await pool.query(
+      `
+    INSERT INTO "scheduled_actions" (
+      "event_id",
+      "action_key",
+      "due_at",
+      "status",
+      "attempt_count",
+      "locked_at"
+    )
+    VALUES
+      (
+        $1,
+        $2,
+        $3,
+        'processing',
+        1,
+        NOW()
+      ),
+      (
+        $1,
+        $4,
+        $5,
+        'pending',
+        0,
+        NULL
+      )
+  `,
+      [
+        fixture.eventId,
+        `role_request_group_open:${dueGroup.id}`,
+        dueClosesAt,
+        `role_request_group_open:${futureGroup.id}`,
+        futureOpensAt,
+      ],
+    );
+
+    const { guild } = createPublicationDiscordGuild();
+
+    // Act
+    const result = await publishStoredEvent(guild, fixture.eventId);
+
+    // Assert
+    expect(result).toMatchObject({
+      ok: true,
+
+      eventId: fixture.eventId,
+    });
+
+    const eventResult = await pool.query<{
+      published_at: Date | null;
+    }>(
+      `
+      SELECT
+        "published_at"
+      FROM
+        "events"
+      WHERE
+        "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    const publishedAt = eventResult.rows[0]?.published_at;
+
+    expect(publishedAt).toBeInstanceOf(Date);
+
+    if (!publishedAt) {
+      throw new Error(
+        "The event was not published during the role-request resumption test.",
+      );
+    }
+
+    const actionResult = await pool.query<{
+      action_key: string;
+
+      status: string;
+
+      due_at: Date;
+
+      attempt_count: number;
+
+      locked_at: Date | null;
+
+      completed_at: Date | null;
+
+      last_error: string | null;
+    }>(
+      `
+      SELECT
+        "action_key",
+        "status",
+        "due_at",
+        "attempt_count",
+        "locked_at",
+        "completed_at",
+        "last_error"
+      FROM
+        "scheduled_actions"
+      WHERE
+        "event_id" = $1
+        AND
+        "action_key" IN (
+          $2,
+          $3
+        )
+      ORDER BY
+        "action_key"
+    `,
+      [
+        fixture.eventId,
+        `role_request_group_open:${dueGroup.id}`,
+        `role_request_group_open:${futureGroup.id}`,
+      ],
+    );
+
+    const dueAction = actionResult.rows.find(
+      (action) =>
+        action.action_key === `role_request_group_open:${dueGroup.id}`,
+    );
+
+    const futureAction = actionResult.rows.find(
+      (action) =>
+        action.action_key === `role_request_group_open:${futureGroup.id}`,
+    );
+
+    expect(dueAction).toEqual({
+      action_key: `role_request_group_open:${dueGroup.id}`,
+
+      status: "pending",
+
+      due_at: publishedAt,
+
+      attempt_count: 0,
+
+      locked_at: null,
+
+      completed_at: null,
+
+      last_error: null,
+    });
+
+    /*
+     * Only a group whose opening time has already arrived should wake on
+     * publication. A genuinely future group keeps its original schedule.
+     */
+    expect(futureAction).toEqual({
+      action_key: `role_request_group_open:${futureGroup.id}`,
+
+      status: "pending",
+
+      due_at: futureOpensAt,
+
+      attempt_count: 0,
+
+      locked_at: null,
+
+      completed_at: null,
+
+      last_error: null,
+    });
+  });
 });
 
 function createPublicationDiscordGuild(): {

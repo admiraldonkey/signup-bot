@@ -21,7 +21,7 @@ If this document becomes substantially longer because completed work keeps being
 
 # Current Repository Checkpoint
 
-The most recent completed development slice is the organiser post-end lifecycle and cover-message reconciliation reliability pass.
+The most recent completed development slice is the role-request publication-intent reliability pass.
 
 The implementation has been committed and pushed.
 
@@ -37,15 +37,21 @@ npm run typecheck:test
 
 Relevant focused PostgreSQL integration suites are also green.
 
-Manual Discord smoke testing has confirmed:
+Manual Discord smoke testing confirmed the intended publication behaviour for:
 
-- general cover message creation
-- T+0 missing-organiser escalation
-- older cover-message supersession
-- cover claim reconciliation
-- cancellation reconciliation
-- completion reconciliation
-- button removal after resolution
+```text
+manual-held unpublished event
+    -> due automatic role group remains unpublished
+
+manual publication
+    -> already-due valid role group wakes and posts
+
+future scheduled event publication
+    -> deliberately earlier role group may post first
+
+future role group
+    -> remains scheduled after event publication
+```
 
 Always verify local branch and working-tree state before beginning the next development slice.
 
@@ -53,53 +59,54 @@ Always verify local branch and working-tree state before beginning the next deve
 
 # Current Activity
 
-The organiser reliability pass addressed two related lifecycle problems discovered during manual testing.
+The role-request publication-intent reliability pass addressed an ambiguity discovered during manual preset testing.
 
-First, scheduler catch-up after downtime could execute overdue organiser work before the later `complete_event` action updated the event lifecycle.
+Previously, a preset-derived scheduled role-request group could publish whenever its opening time arrived even if the parent event was being deliberately held for manual publication.
 
-This allowed messages such as:
-
-```text
-Event has started without an organiser
-```
-
-to be posted hours after the event had already ended.
-
-Organiser operational paths now treat the event's absolute `endsAt` as a boundary independently of whether persisted lifecycle completion has caught up.
-
-Second, general-cover and missing-organiser-at-start messages previously had no durable Discord linkage.
-
-They are now tracked through `event_messages` and reconciled when they become obsolete.
-
-Relevant presentation may now resolve after:
-
-- cover claim
-- active organiser assignment
-- T+0 supersession
-- organisers disabled
-- event cancellation
-- event completion
-
-The T+0 workflow stores its new urgent alert before retiring older general-cover messages.
-
-The next intended production slice is the role-request publication-intent behaviour identified during preset manual testing:
+Automatic role-request publication now distinguishes:
 
 ```text
-unpublished event
-+ manual publication
-    -> scheduled preset-derived role groups should not leak out automatically
+event published
+    -> due group may publish
 
-unpublished event
-+ explicit future scheduled publication
-    -> deliberately earlier role groups may still open before the event
+event unpublished
+manual publication required
+    -> automatic group waits
 
-scheduled event publication becomes overdue without succeeding
-    -> later automatic role-group publication should defer until the event publishes
+event unpublished
+future scheduled publication
+    -> deliberately earlier group may publish
+
+event unpublished
+scheduled publication already due
+    -> later groups wait for event publication
 ```
 
-That behaviour is not yet implemented.
+Waiting for event publication is represented as:
 
-After that focused role-request lifecycle slice, the planned feature sequence returns to:
+```text
+awaiting-event-publication
+```
+
+and is treated as deliberate domain deferral rather than scheduler failure.
+
+A deferred opening action is parked at the group's closing boundary with retry state reset.
+
+Successful event publication wakes already-due, still-valid role-group opening actions in the same PostgreSQL transaction as publication.
+
+Future groups retain their existing schedule.
+
+Role-request publication also re-checks event publication intent after Discord message creation.
+
+If the event changes to a manual hold while a message is in flight, the stale Discord candidate is not linked and is deleted where possible.
+
+The next production feature objective is:
+
+```text
+editing existing reusable role-request presets
+```
+
+The intended sequence remains:
 
 ```text
 preset editing
@@ -115,100 +122,106 @@ recurrence
 
 # Most Recently Completed Feature Area
 
-## Reusable role-request preset lifecycle
+## Role-request publication intent
 
-The most recent substantial feature phase completed lifecycle management for:
+Automatic preset-derived role-request publication now respects how the parent event is intended to become public.
 
-```text
-preset
-preset role option
-preset request group
-```
-
-Administrators can now activate or deactivate each level independently.
-
-Current commands include:
+Current behaviour is:
 
 ```text
-/role-preset set-active
-/role-preset option-set-active
-/role-preset group-set-active
+Published event
+    -> due group may post
+
+Manual-held unpublished event
+    -> due automatic group waits
+
+Future scheduled publication
+    -> deliberately earlier due group may post
+
+Scheduled publication overdue
+event still unpublished
+    -> later automatic group waits
 ```
 
-These operations are reversible.
-
-Deactivation does not delete the reusable configuration.
+Manual `/event role-group-post` remains a separate explicit administrator action.
 
 ---
 
-## Parent preset lifecycle
+## Durable deferral
 
-Deactivating a preset:
+Waiting for event publication does not consume scheduler retry attempts.
 
-- prevents future application
-- preserves child role options
-- preserves child request groups
-- preserves each child's independent active state
-- does not alter existing event snapshots
-
-Reactivating the preset restores its availability using the child states that were already stored.
-
-Requesting the state it already has returns an idempotent unchanged result rather than manufacturing a mutation.
-
----
-
-## Preset role-option lifecycle
-
-Deactivating an option:
-
-- excludes it from future event snapshots
-- preserves qualification-role rows
-- preserves request-group mappings
-- preserves its other reusable configuration
-- does not alter events that already contain a snapshot of the option
-
-Reactivation restores the same reusable option.
-
-An option lifecycle change deliberately does not cascade into request-group lifecycle changes.
-
----
-
-## Option-deactivation validity warning
-
-An administrator may deactivate the final active option mapped into an otherwise-active request group.
-
-The lifecycle operation itself succeeds.
-
-It then reports the active groups that have become unusable.
-
-The Discord command warns that:
+Instead:
 
 ```text
-the affected groups remain active
-but now contain no active role options
+due opening
+    |
+    v
+awaiting event publication
+    |
+    v
+opening action parked at closesAt
 ```
 
-Preset application remains the final authoritative validator and rejects that invalid active graph until the administrator repairs it.
+If the parent event publishes while the request window remains valid:
 
-This behaviour is deliberate.
+```text
+event publication
+    |
+    v
+due deferred opening reset to pending
+dueAt = publishedAt
+attemptCount = 0
+```
 
-Do not replace it with hidden cascading deactivation unless the product decision is explicitly reconsidered.
+If the event never publishes, the action eventually reaches the closing boundary and expires naturally.
 
 ---
 
-## Preset request-group lifecycle
+## Publication wake-up
 
-Deactivating a request group:
+The reusable event-publication service wakes already-due deferred role-group openings in the same transaction that commits event publication.
 
-- excludes it from future preset applications
-- preserves its mapped options
-- preserves timing configuration
-- preserves channel configuration
-- preserves notification configuration
-- preserves signup requirements
-- leaves option lifecycle states untouched
+Only groups satisfying:
 
-Reactivation restores the stored group definition.
+```text
+opensAt <= publishedAt < closesAt
+```
+
+are resumed.
+
+Future groups retain their original opening schedule.
+
+The wake-up helper supports both:
+
+```text
+pending
+processing
+```
+
+opening actions.
+
+Resetting a processing action to fresh pending state uses the scheduler's existing attempt/status fencing so a stale worker cannot later overwrite the newer schedule.
+
+---
+
+## Discord in-flight race
+
+Role-group publication re-checks parent-event publication intent after the Discord send and before authoritative linkage.
+
+If publication intent becomes incompatible while Discord is in flight:
+
+```text
+candidate message sent
+
+event changes
+
+linkage rejected
+
+candidate deleted
+```
+
+The Discord send does not become authoritative merely because it completed first.
 
 ---
 
@@ -350,9 +363,7 @@ Do not split those into independent best-effort operations.
 
 # Current Role-Request Scheduling State
 
-Scheduled role-request opening is implemented.
-
-It is no longer future work.
+Scheduled role-request opening and closing are implemented.
 
 Preset-derived groups may have event-relative opening and closing rules.
 
@@ -375,6 +386,28 @@ Closed
 A request group is not considered genuinely open merely because its opening time has arrived.
 
 If its usable Discord message has not successfully been linked yet, it remains pending publication.
+
+Automatic opening also respects event publication intent.
+
+```text
+published event
+    -> normal due publication
+
+manual-held unpublished event
+    -> defer
+
+future scheduled publication
+    -> intentional earlier group may publish
+
+overdue scheduled publication
+    -> defer until event publishes
+```
+
+A deferred opening is parked at `closesAt` without consuming scheduler retry attempts.
+
+Successful event publication wakes already-due groups whose request windows remain valid.
+
+Future groups are not pulled forward.
 
 ---
 
@@ -1280,21 +1313,17 @@ This remains planned.
 
 ---
 
-# Immediate Next Objective After Documentation
+# Immediate Next Objective
 
-After the documentation reconciliation is complete:
-
-```text
-create a fresh feature branch from main
-```
-
-for:
+After this reliability PR is merged, start a fresh feature branch from updated `main` for:
 
 ```text
 reusable role-request preset editing
 ```
 
-Do not continue that feature work on a documentation branch.
+The current preset foundation, application, lifecycle, scheduling, publication-intent, and snapshot behaviour should be treated as established architecture rather than work to redesign casually.
+
+The next feature phase should build on those boundaries.
 
 ---
 
@@ -1902,13 +1931,25 @@ A fresh development session should orient itself in this order.
 At this checkpoint:
 
 ```text
-main is stable
-
 role-request preset foundation is implemented
 
 preset application is implemented
 
 scheduled preset-derived group opening/closing is implemented
+
+automatic role-group publication respects event publication intent
+
+manual-held events do not leak scheduled role groups
+
+intentional pre-publication role groups remain supported
+
+deferred role-group openings do not consume retry attempts
+
+successful event publication wakes due deferred openings
+
+future role groups remain scheduled normally
+
+role-request publication revalidates after Discord side effects
 
 preset parent lifecycle is implemented
 
@@ -1918,11 +1959,9 @@ preset group lifecycle is implemented
 
 message recovery is implemented for core attendance and role-request messages
 
-organiser safety-deadline work is implemented
+organiser safety and cover-message reconciliation are implemented
 
 automated unit/integration/coverage/typechecking is green
-
-documentation reconciliation is in progress
 
 next production feature:
     edit existing reusable role-request presets
@@ -1930,4 +1969,4 @@ next production feature:
 
 Do not resume an older reliability or preset-foundation task simply because an older chat or stale document says it is still pending.
 
-Use the reconciled documentation and current repository state as the starting point.
+Use the current repository and reconciled documentation as the development baseline.

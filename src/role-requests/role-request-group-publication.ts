@@ -84,6 +84,15 @@ export type PublishRoleRequestGroupResult =
   | {
       ok: false;
 
+      reason: "awaiting-event-publication";
+
+      eventId: number;
+
+      groupId: number;
+    }
+  | {
+      ok: false;
+
       reason: "window-expired";
 
       eventId: number;
@@ -108,6 +117,12 @@ type LoadedRoleRequestGroup = {
   eventId: number;
 
   eventStatus: "scheduled" | "open" | "closed" | "cancelled" | "completed";
+
+  eventPublishedAt: Date | null;
+
+  eventPublishMinutesBeforeStart: number | null;
+
+  eventStartsAt: Date;
 
   channelId: string;
 
@@ -338,16 +353,51 @@ export async function publishRoleRequestGroup(
         const [currentEvent] = await transaction
           .select({
             status: events.status,
+
+            publishedAt: events.publishedAt,
+
+            publishMinutesBeforeStart: events.publishMinutesBeforeStart,
+
+            startsAt: events.startsAt,
           })
           .from(events)
           .where(eq(events.id, currentGroup.eventId))
           .for("update")
           .limit(1);
 
+        if (!currentEvent) {
+          transaction.rollback();
+
+          /*
+           * Drizzle rollback throws at runtime, but its TypeScript signature does not
+           * tell the compiler that execution cannot continue. Keep this unreachable
+           * throw so currentEvent is correctly narrowed below.
+           */
+          throw new Error(
+            `Role-request group ${currentGroup.id} lost its parent event while claiming Discord message linkage.`,
+          );
+        }
+
         if (
-          !currentEvent ||
           currentEvent.status === "cancelled" ||
           currentEvent.status === "completed"
+        ) {
+          transaction.rollback();
+        }
+
+        if (
+          isAwaitingEventPublication(
+            {
+              eventPublishedAt: currentEvent.publishedAt,
+
+              eventPublishMinutesBeforeStart:
+                currentEvent.publishMinutesBeforeStart,
+
+              eventStartsAt: currentEvent.startsAt,
+            },
+
+            linkageTime,
+          )
         ) {
           transaction.rollback();
         }
@@ -356,23 +406,41 @@ export async function publishRoleRequestGroup(
       });
     } catch (error) {
       /*
-       * rollback() above represents a deliberate lifecycle race loss rather
-       * than a database failure.
+       * rollback() above represents an authoritative state change winning
+       * while Discord publication was in flight.
+       *
+       * Remove our stale candidate, then classify the latest state rather
+       * than assuming every rollback means terminal event lifecycle.
        */
       if (error instanceof TransactionRollbackError) {
         await deleteUnlinkedMessage(sentMessage, currentGroup.id);
 
         sentMessage = null;
 
-        return {
-          ok: false,
+        const latestGroup = await loadRoleRequestGroup(guild.id, groupId);
 
-          reason: "inactive",
+        if (!latestGroup) {
+          return {
+            ok: false,
 
-          eventId: currentGroup.eventId,
+            reason: "not-found",
+          };
+        }
 
-          groupId: currentGroup.id,
-        };
+        const latestState = classifyUnpublishableState(latestGroup, new Date());
+
+        if (latestState) {
+          return latestState;
+        }
+
+        /*
+         * The state changed again after the rollback and is publishable once
+         * more. Treat that as retryable rather than claiming the stale Discord
+         * candidate we already removed.
+         */
+        throw new Error(
+          `Role-request group ${groupId} became publishable again after losing its in-flight publication claim.`,
+        );
       }
 
       throw error;
@@ -449,6 +517,12 @@ async function loadRoleRequestGroup(
       eventId: roleRequestGroups.eventId,
 
       eventStatus: events.status,
+
+      eventPublishedAt: events.publishedAt,
+
+      eventPublishMinutesBeforeStart: events.publishMinutesBeforeStart,
+
+      eventStartsAt: events.startsAt,
 
       channelId: roleRequestGroups.channelId,
 
@@ -535,7 +609,59 @@ function classifyUnpublishableState(
     };
   }
 
+  if (isAwaitingEventPublication(group, now)) {
+    return {
+      ok: false,
+
+      reason: "awaiting-event-publication",
+
+      eventId: group.eventId,
+
+      groupId: group.id,
+    };
+  }
+
   return null;
+}
+
+function isAwaitingEventPublication(
+  group: Pick<
+    LoadedRoleRequestGroup,
+    "eventPublishedAt" | "eventPublishMinutesBeforeStart" | "eventStartsAt"
+  >,
+  now: Date,
+): boolean {
+  /*
+   * Once the main event is published there is no publication gate left.
+   */
+  if (group.eventPublishedAt !== null) {
+    return false;
+  }
+
+  /*
+   * An unpublished event with no scheduled publication offset is being held
+   * for explicit manual publication.
+   *
+   * Automatic role-request groups must not independently expose that event.
+   */
+  if (group.eventPublishMinutesBeforeStart === null) {
+    return true;
+  }
+
+  const scheduledPublicationAt = new Date(
+    group.eventStartsAt.getTime() -
+      group.eventPublishMinutesBeforeStart * 60_000,
+  );
+
+  /*
+   * A role group may intentionally precede a future scheduled event
+   * publication.
+   *
+   * Once the scheduled event publication time itself has arrived, however,
+   * the main event should be public first. If it is still unpublished, later
+   * automatic role-group publication waits for that problem to resolve.
+   */
+  return scheduledPublicationAt <= now;
 }
 
 async function resolveNotificationDelivery(

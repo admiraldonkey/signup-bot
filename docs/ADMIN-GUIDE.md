@@ -1704,9 +1704,15 @@ The group has a future scheduled opening and no Discord request message yet.
 
 The planned opening time has arrived but the usable Discord message has not yet been linked successfully.
 
-This can happen if Discord publication is delayed or unavailable.
+This may mean:
+
+- Discord publication is delayed or unavailable
+- the event is deliberately being held for manual publication
+- the event's scheduled publication time has arrived but the main event has not yet published
 
 A due opening timestamp alone does not mean the group is genuinely open to members.
+
+For a group waiting on event publication, the bot retains the group and its durable opening work rather than treating the condition as a delivery failure.
 
 ---
 
@@ -1734,11 +1740,15 @@ posted now
 open now
 ```
 
+This is an explicit administrator action.
+
 It has no event-relative future opening rule.
+
+An administrator can therefore deliberately post a manual role-request group while preparing an unpublished event.
 
 ---
 
-## Preset-derived group
+## Preset-derived scheduled group
 
 ```text
 preset applied
@@ -1750,10 +1760,75 @@ event-level group created
 durable opening action scheduled
         |
         v
-message posted when opening arrives
+opening time arrives
 ```
 
-The distinction matters when an event start time changes.
+What happens next depends on the parent event's publication state and intent.
+
+### Event already published
+
+```text
+group due
+    -> post normally
+```
+
+### Event held for manual publication
+
+If the event is unpublished and has no scheduled publication time:
+
+```text
+group due
+    -> wait
+
+administrator publishes event
+    -> already-due valid group wakes
+    -> group posts
+```
+
+This prevents an automatically scheduled role group from exposing part of an event the administrator is deliberately keeping private.
+
+### Event has future scheduled publication
+
+A role-request group may deliberately open before the main event.
+
+Example:
+
+```text
+early command requests: T - 120
+
+main event publication: T - 60
+```
+
+At T-120, the early group may post even though the main event has not yet published.
+
+This supports private or early-interest workflows.
+
+### Scheduled event publication is overdue
+
+If the event's scheduled publication time has already arrived but the event remains unpublished:
+
+```text
+later role-request group due
+    -> wait for main event publication
+```
+
+This avoids exposing later event infrastructure when the main announcement itself has failed or not yet completed.
+
+---
+
+## Event publication resumes due groups
+
+When the event eventually publishes, the bot wakes automatic groups whose opening time has already arrived and whose closing time has not yet passed.
+
+Future groups keep their original schedules.
+
+Expired groups are not suddenly posted late.
+
+---
+
+## Event-time changes
+
+The immediate-versus-scheduled distinction still matters when the event start changes.
 
 A manually-opened group remains historically open from when it was actually posted.
 
@@ -3201,9 +3276,9 @@ A more advanced workflow is:
 publish-now: No
 ```
 
-or create it with scheduled publication.
+or an event may be created with scheduled future publication.
 
-Before publication, administrators can:
+Before the main event is published, administrators can:
 
 - inspect the event
 - edit it
@@ -3211,10 +3286,43 @@ Before publication, administrators can:
 - add reminders
 - add bespoke role options
 - apply a role-request preset
-
-This is intentional.
+- deliberately post a manual role-request group
 
 The event is persistent before the public announcement exists.
+
+Automatic preset-derived role groups respect the event's publication intent.
+
+## Event held for manual publication
+
+If:
+
+```text
+publish-now: No
+```
+
+is used without a scheduled publication time, automatic due role groups remain unpublished.
+
+They do not independently leak part of the prepared event into Discord.
+
+When the administrator later runs:
+
+```text
+/event publish
+```
+
+any already-due scheduled role groups whose request windows remain valid are released.
+
+Future groups keep their original opening times.
+
+## Event with scheduled publication
+
+An automatic role group may intentionally open before the main event's scheduled publication.
+
+This supports workflows such as gathering early command or specialist-role interest before the wider event announcement.
+
+If the main event's scheduled publication time passes without successful publication, later role groups wait for the main event rather than appearing independently.
+
+This distinction is intentional.
 
 ---
 

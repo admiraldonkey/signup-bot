@@ -2054,10 +2054,36 @@ Automated coverage should distinguish expected outcomes such as:
 - already posted
 - inactive
 - not open yet
+- awaiting event publication
 - window expired
 - channel unavailable
 
 Unexpected Discord failures should propagate and allow scheduler retry.
+
+`awaiting-event-publication` is different.
+
+It is an intentional domain deferral and must not consume the scheduler's Discord failure retry budget.
+
+Test the event-publication matrix explicitly:
+
+```text
+published event
+due group
+    -> publish
+
+unpublished event
+manual publication
+    -> wait
+
+unpublished event
+future scheduled publication
+group opens before that publication
+    -> publish
+
+unpublished event
+scheduled publication already due
+    -> wait
+```
 
 Also test:
 
@@ -2067,6 +2093,67 @@ Also test:
 - unmentionable notification role
 - mention suppression on later refresh/recovery
 - concurrent publication producing one authoritative linkage
+- publication intent changing while Discord send is in flight
+- stale candidate cleanup after the in-flight state change
+
+For in-flight publication-intent races, assert that:
+
+```text
+Discord candidate may have been sent
+
+PostgreSQL rejects stale linkage
+
+candidate is deleted
+
+group remains unlinked
+```
+
+---
+
+## Deferred opening scheduler coverage
+
+When automatic role-group publication returns:
+
+```text
+awaiting-event-publication
+```
+
+verify the scheduler changes the claimed opening action to:
+
+```text
+status = pending
+dueAt = closesAt
+attemptCount = 0
+lockedAt = null
+completedAt = null
+lastError = null
+```
+
+Waiting for parent-event publication is not an execution failure.
+
+Also verify successful event publication wakes an already-due, still-valid deferred opening.
+
+The publication-side test should prove:
+
+```text
+due deferred group
+    -> opening action dueAt becomes publishedAt
+
+future group
+    -> original opening dueAt remains unchanged
+```
+
+Include the processing-action companion case.
+
+If event publication wins while an opening action is already:
+
+```text
+processing
+```
+
+the publication transaction may reset that action to fresh pending state.
+
+The stale scheduler worker must then be fenced by the existing status/attempt ownership checks.
 
 ---
 
@@ -2700,9 +2787,13 @@ against both signup-required and non-signup-required groups.
 
 # Scheduled Role-Request Opening Manual Test
 
+Test the publication modes separately.
+
+## Published event
+
 For a preset-derived group due shortly:
 
-1. apply the preset to a fresh event
+1. apply the preset to a published future event
 2. confirm `/event role-group-list` shows it as Planned
 3. allow opening time to arrive
 4. confirm Discord message appears
@@ -2710,7 +2801,74 @@ For a preset-derived group due shortly:
 6. verify notification role is pinged only on initial opening
 7. verify scheduled closing remains correct
 
-If publication fails because the destination is unavailable, verify persistent group state is not deleted.
+If Discord publication fails because the destination is unavailable, verify persistent group state is not deleted.
+
+---
+
+## Manual-held unpublished event
+
+Create an unpublished event with no scheduled publication time.
+
+Apply a preset containing a group which becomes due while the event remains unpublished.
+
+Verify:
+
+```text
+opening time arrives
+
+no Discord role-request message appears
+
+event remains unpublished
+
+group remains stored
+```
+
+Then manually publish the event.
+
+Verify:
+
+```text
+main event publishes
+
+already-due group wakes
+
+role-request message appears shortly afterwards
+```
+
+A future role-request group must retain its original opening time rather than posting immediately.
+
+---
+
+## Intentional pre-publication group
+
+Create an event with explicit future scheduled publication.
+
+Configure a role group to open earlier than that publication.
+
+Verify:
+
+```text
+role group opening arrives
+    -> role group posts
+
+event publication still future
+    -> main event remains unpublished
+
+scheduled publication arrives
+    -> main event publishes
+```
+
+This protects the intended early-command-request workflow.
+
+---
+
+## Overdue event publication
+
+Automated integration coverage is preferred for this failure mode.
+
+If the main event's scheduled publication time has passed but the event is still unpublished, later automatic role groups must wait rather than leaking out independently.
+
+Do not deliberately manufacture Discord outages merely to repeat this case manually when deterministic automated coverage already protects it.
 
 ---
 

@@ -1210,31 +1210,128 @@ messageId = null
 
 the group is pending publication rather than open.
 
+Pending publication can represent several situations, including:
+
+- Discord publication is delayed or temporarily unavailable
+- the parent event is deliberately being held for manual publication
+- the parent event's scheduled publication time has arrived but event publication has not yet succeeded
+
+A role-request group becomes operationally open only after its usable Discord presentation has been successfully created and authoritatively linked.
+
 ### Reason
 
-The external publication step can fail independently from the stored schedule.
+The stored opening schedule and the external Discord presentation are separate concerns.
+
+A due timestamp cannot prove that members actually have a request surface.
+
+The same lifecycle representation can therefore remain accurate whether publication is waiting on Discord or deliberately waiting on the parent event.
 
 ---
 
-## D048 - Role-request publication failure must not delete persistent configuration
+## D048 - Automatic role-request publication must respect event publication intent
 
 **Status: Current**
 
-If a channel is unavailable or notification-role delivery cannot be performed, the request-group plan remains stored.
+Scheduled role-request groups must not expose parts of an event contrary to the administrator's event-publication intent.
 
-Known publication failure must not erase:
+Current automatic publication rules are:
 
-- role options
-- mappings
-- group configuration
-- requests
-- provenance
+```text
+event already published
+    -> due role-request group may publish normally
+
+event unpublished
+manual publication required
+publishMinutesBeforeStart = null
+    -> automatic role-request publication waits
+
+event unpublished
+future scheduled publication still pending
+    -> a deliberately earlier role-request group may publish
+
+event unpublished
+scheduled publication time already reached or passed
+but event publication has not succeeded
+    -> later automatic role-request publication waits
+```
+
+This allows workflows such as:
+
+```text
+early command requests: T - 120
+
+main event publication: T - 60
+
+main role requests: T - 45
+```
+
+where the early command group intentionally appears before the main event.
+
+It prevents this:
+
+```text
+event held for manual publication
+
+role-request opening arrives
+
+role-request group leaks into Discord anyway
+```
+
+and also prevents later role groups from appearing independently when scheduled event publication is overdue or has failed.
+
+Waiting for the parent event is represented as a normal domain outcome:
+
+```text
+awaiting-event-publication
+```
+
+It is not treated as a Discord delivery failure.
+
+The scheduler therefore parks the opening action at the group's closing boundary without consuming the retry budget.
+
+If event publication succeeds while the group window is still valid:
+
+```text
+opensAt <= publishedAt < closesAt
+```
+
+the event-publication transaction wakes the due opening action immediately.
+
+Future groups keep their existing opening schedule.
+
+If the event never publishes, the parked opening eventually reaches the group's closing boundary and becomes obsolete without being exposed.
+
+Publication intent is also re-checked after Discord side effects.
+
+If the event changes to manual publication while a Discord group message is being sent, the stale candidate must not become authoritative and should be deleted where possible.
+
+Explicit administrator use of:
+
+```text
+/event role-group-post
+```
+
+remains an immediate manual action and is not the same workflow as automatic scheduled opening.
 
 ### Reason
 
-Discord delivery failure is a presentation problem.
+An unpublished event may represent either:
 
-It is not proof that the administrator no longer wants the configuration.
+```text
+a deliberately scheduled future announcement
+```
+
+or:
+
+```text
+an event intentionally held for manual release
+```
+
+Those states should not have identical automatic publication behaviour.
+
+Deriving the rule from event publication intent avoids adding another per-group setting while preserving useful early/private request workflows.
+
+Deferral must also remain durable and restart-safe without wasting scheduler retry attempts on a condition that is not an error.
 
 ---
 
@@ -1435,6 +1532,8 @@ role group opening
     -> group may already be posted
     -> opening may have moved
     -> window may have expired
+    -> event may be held for manual publication
+    -> scheduled event publication may be overdue
 
 role group closing
     -> group may already be closed
