@@ -1216,9 +1216,26 @@ Eligible organisers can claim the event.
 
 Where an Event Organiser role is configured, that role is used as part of cover eligibility.
 
-The cover request is updated when someone successfully claims ownership.
+Concurrent claims are resolved through PostgreSQL so only one organiser can become authoritative.
 
-Concurrent claims are resolved through the database so only one can become authoritative.
+General-cover and urgent event-start claim messages are tracked by the bot.
+
+When a cover message is no longer current, the bot updates it where possible and removes the `Claim Event` button.
+
+Examples include:
+
+- someone claims cover
+- an active organiser assignment makes cover unnecessary
+- the T+0 urgent organiser alert supersedes an earlier cover request
+- organisers are disabled
+- the event is cancelled
+- the event completes
+
+When the event reaches T+0 without an organiser, the newer urgent alert becomes the active claim surface.
+
+The bot first sends and tracks that new alert before retiring older general-cover messages, so a failed replacement does not leave the event with no usable claim button.
+
+If a tracked Discord message or channel has been deleted, authoritative event and organiser state remains intact.
 
 ---
 
@@ -1257,9 +1274,15 @@ This prevents a late backup response window from consuming the final useful minu
 
 The bot has a separate organiser safety check at the event's actual start.
 
-If no valid organiser has been established by then, the system can raise a more urgent administrative warning.
+If no valid organiser has been established and the event is still operational, the system can raise a more urgent administrative warning with a `Claim Event` control.
 
 This is separate from the earlier cover deadline.
+
+When the urgent event-start message is successfully posted, older general-cover messages for the event are updated and their claim buttons are removed.
+
+The new event-start alert therefore becomes the current claim surface.
+
+If the bot was offline and does not process the action until after the event has already ended, it does not post a stale "event has started without an organiser" message merely because the later completion action has not run yet.
 
 ---
 
@@ -1275,20 +1298,34 @@ The event moves into the appropriate cover path instead.
 
 # Cover Claims After Event Start
 
-General cover may remain claimable after the event has technically begun.
+General cover may remain claimable after the event has begun.
 
 This is deliberate.
 
 If:
 
-- the event is still operational
+- the event has started but has not ended
 - organisers remain enabled
 - nobody has taken valid organiser ownership
 - general cover is still the active path
 
 then an eligible organiser can still help by claiming it.
 
-The old behaviour of rejecting every post-start cover claim has been superseded.
+Once the event's scheduled end time has passed, new organiser cover is no longer accepted.
+
+This applies even during bot restart/catch-up if the event's stored lifecycle has not yet been changed to `completed`.
+
+The old behaviour of rejecting every post-start cover claim remains superseded.
+
+The current rule is therefore:
+
+```text
+after start, before end
+    -> cover may still be claimed
+
+after end
+    -> cover is obsolete
+```
 
 ---
 

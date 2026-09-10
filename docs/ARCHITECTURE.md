@@ -1126,6 +1126,86 @@ Deleted warning messages or deleted channels are treated as presentation failure
 
 ---
 
+# Organiser Cover Message Tracking and Reconciliation
+
+General-cover requests and urgent missing-organiser-at-start alerts are durable Discord presentation rather than fire-and-forget messages.
+
+Their Discord linkage is stored through:
+
+```text
+event_messages
+```
+
+using message kinds:
+
+```text
+organiser_cover
+organiser_missing_at_start
+```
+
+Tracked rows retain:
+
+```text
+event
+guild
+channel
+message
+message kind
+resolvedAt
+deletedAt
+```
+
+Representative reconciliation service:
+
+```text
+src/events/organiser-cover-reconciliation.ts
+```
+
+The lifecycle is conceptually:
+
+```text
+cover/start message sent
+        |
+        v
+store Discord linkage
+        |
+        v
+message remains actionable
+        |
+        +---- cover claimed
+        |
+        +---- active organiser established
+        |
+        +---- superseded by T+0 alert
+        |
+        +---- organisers disabled
+        |
+        +---- event cancelled
+        |
+        +---- event completed
+                |
+                v
+        edit tracked message
+        remove components
+        mark resolved
+```
+
+If Discord message creation succeeds but the database linkage cannot be stored, the newly-created candidate message is deleted where possible.
+
+This prevents an untracked `Claim Event` button from being left behind while the scheduler later retries and creates another candidate.
+
+The T+0 missing-organiser alert is also ordered deliberately.
+
+An older general-cover message is reconciled only after the new T+0 message has been successfully sent and durably linked.
+
+This ensures the event never loses its only usable claim surface merely because creation of the replacement alert failed.
+
+Known deleted channels or messages are marked as deleted/resolved presentation where appropriate.
+
+Unexpected Discord errors remain errors rather than being treated as proof of deletion.
+
+---
+
 # Organiser Escalation
 
 The normal escalation path is:
@@ -1184,7 +1264,7 @@ This protects against awkward timing combinations where a late publication or sl
 
 A second stable event-level organiser action is due at the event start.
 
-If an organiser is still missing, the bot can issue an urgent administrative alert.
+If an organiser is still missing and the event is still operational, the bot can issue an urgent administrative alert.
 
 This is separate from the earlier general-cover safety deadline.
 
@@ -1196,8 +1276,16 @@ T - cover lead
     -> ensure cover is open
 
 T + 0
-    -> if still unresolved, issue urgent missing-organiser alert
+    -> if still unresolved
+    -> send and track urgent missing-organiser alert
+    -> reconcile older general-cover messages
 ```
+
+The older general-cover message is not retired until the new event-start alert has been successfully sent and durably linked.
+
+If scheduler catch-up occurs after the event has already ended, the missing-at-start action becomes harmless rather than posting a fresh urgent alert.
+
+This check uses the event's absolute end time rather than depending solely on `complete_event` having already updated lifecycle status.
 
 ---
 
@@ -1232,22 +1320,45 @@ The safety service also recalculates the current deadline when executing, so a s
 
 ---
 
-# Cover Claims After Event Start
+# Organiser Operational End Boundary
 
 General organiser cover does not automatically become unclaimable merely because the event's start timestamp has passed.
 
 If:
 
-- the event is still operational
+- the event has started but has not ended
 - organiser functionality remains enabled
 - no valid organiser has been established
 - general cover remains the authoritative path
 
-then an eligible organiser may still claim cover after event start.
+then an eligible organiser may still claim cover.
 
-This behaviour is deliberate.
+The event end is a hard operational boundary for new organiser escalation.
 
-An older rule that rejected all post-start cover claims has been superseded by the safety-deadline workflow.
+Once:
+
+```text
+endsAt <= now
+```
+
+the following paths become obsolete even if persisted event status has not yet reached `completed`:
+
+```text
+organiser warning
+organiser timeout
+organiser safety transition
+missing-organiser-at-start alert
+cover eligibility
+cover claim
+```
+
+This distinction matters during scheduler recovery after downtime.
+
+Overdue actions are processed independently, so an organiser action may be encountered before the later `complete_event` action has updated the event's lifecycle status.
+
+Using `endsAt` prevents that catch-up ordering from generating fresh organiser activity for an event which has already finished.
+
+The older blanket rule rejecting all post-start cover claims remains superseded.
 
 ---
 

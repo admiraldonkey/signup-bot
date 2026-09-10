@@ -21,54 +21,94 @@ If this document becomes substantially longer because completed work keeps being
 
 # Current Repository Checkpoint
 
-The current development baseline is:
+The most recent completed development slice is the organiser post-end lifecycle and cover-message reconciliation reliability pass.
+
+The implementation has been committed and pushed.
+
+Current automated verification is green across:
 
 ```text
-main
+npm run test:unit
+npm run test:integration
+npm run test:coverage
+npm run typecheck
+npm run typecheck:test
 ```
 
-The reusable role-request preset lifecycle work has been completed, reviewed, merged, and pulled back into local `main`.
+Relevant focused PostgreSQL integration suites are also green.
 
-Immediately before this documentation reconciliation pass:
+Manual Discord smoke testing has confirmed:
 
-- targeted lifecycle tests were passing
-- the full unit suite was passing
-- the full PostgreSQL integration suite was passing
-- coverage verification was passing
-- production TypeScript checking was passing
-- test TypeScript checking was passing
-- relevant manual Discord lifecycle testing had been completed
+- general cover message creation
+- T+0 missing-organiser escalation
+- older cover-message supersession
+- cover claim reconciliation
+- cancellation reconciliation
+- completion reconciliation
+- button removal after resolution
 
-The project is therefore at a stable feature checkpoint rather than in the middle of an unresolved production-code change.
-
-Always verify local branch and working-tree state before beginning new feature work.
+Always verify local branch and working-tree state before beginning the next development slice.
 
 ---
 
 # Current Activity
 
-The immediate activity at this checkpoint is a **complete documentation reconciliation pass**.
+The organiser reliability pass addressed two related lifecycle problems discovered during manual testing.
 
-The following documents are being reconciled against the current repository and recent architectural decisions:
+First, scheduler catch-up after downtime could execute overdue organiser work before the later `complete_event` action updated the event lifecycle.
+
+This allowed messages such as:
 
 ```text
-README.md
-docs/ARCHITECTURE.md
-docs/DECISIONS.md
-docs/ROADMAP.md
-docs/CURRENT-WORK.md
-docs/TESTING-GUIDE.md
-docs/ADMIN-GUIDE.md
+Event has started without an organiser
 ```
 
-This documentation pass is intentionally happening before further preset feature development because several older documents still described already-completed work as future functionality and retained superseded organiser and scheduler assumptions.
+to be posted hours after the event had already ended.
 
-No production-code changes are part of this documentation pass.
+Organiser operational paths now treat the event's absolute `endsAt` as a boundary independently of whether persisted lifecycle completion has caught up.
 
-After documentation is reconciled, the next feature objective is:
+Second, general-cover and missing-organiser-at-start messages previously had no durable Discord linkage.
+
+They are now tracked through `event_messages` and reconciled when they become obsolete.
+
+Relevant presentation may now resolve after:
+
+- cover claim
+- active organiser assignment
+- T+0 supersession
+- organisers disabled
+- event cancellation
+- event completion
+
+The T+0 workflow stores its new urgent alert before retiring older general-cover messages.
+
+The next intended production slice is the role-request publication-intent behaviour identified during preset manual testing:
 
 ```text
-editing existing reusable role-request presets
+unpublished event
++ manual publication
+    -> scheduled preset-derived role groups should not leak out automatically
+
+unpublished event
++ explicit future scheduled publication
+    -> deliberately earlier role groups may still open before the event
+
+scheduled event publication becomes overdue without succeeding
+    -> later automatic role-group publication should defer until the event publishes
+```
+
+That behaviour is not yet implemented.
+
+After that focused role-request lifecycle slice, the planned feature sequence returns to:
+
+```text
+preset editing
+    |
+    v
+event templates
+    |
+    v
+recurrence
 ```
 
 ---
@@ -536,13 +576,13 @@ The system must never produce multiple simultaneous current organisers through a
 
 ---
 
-# Organiser Warning Reconciliation
+# Organiser Warning and Cover Reconciliation
 
 Administrative organiser-warning messages are linked back to their assignment.
 
 Once an assignment resolves, the warning is updated where possible.
 
-Current resolved cases include:
+Current warning-resolution cases include:
 
 - confirmed
 - declined
@@ -552,11 +592,26 @@ Current resolved cases include:
 - cancelled event
 - completed event
 
-This avoids leaving stale messages saying somebody has not yet confirmed after the situation has already resolved.
+General-cover and missing-organiser-at-start messages are separately tracked through `event_messages`.
 
-A missing warning message or channel is a presentation issue.
+Outstanding tracked cover presentation is reconciled after relevant states including:
 
-It does not invalidate authoritative organiser state.
+```text
+cover claimed
+active organiser established
+older cover message superseded at event start
+organisers disabled
+event cancelled
+event completed
+```
+
+Reconciliation removes interactive components so old `Claim Event` buttons do not remain apparently usable.
+
+Known deleted Discord messages or channels are recorded as missing presentation without invalidating authoritative organiser state.
+
+Unexpected Discord failures remain distinguishable from deletion.
+
+The event-start supersession path first sends and durably links the new T+0 alert, then resolves older general-cover messages.
 
 ---
 
@@ -1728,7 +1783,13 @@ Unpublished organiser nominees begin dormant.
 
 Organiser nominee flow yields to the event safety deadline.
 
-Cover may remain claimable after event start when still genuinely required.
+Cover may remain claimable after event start while the event is still operational.
+
+Once endsAt has passed, new organiser escalation is obsolete even if completion status has not caught up yet.
+
+Tracked organiser cover/start messages are reconciled when they become obsolete.
+
+A T+0 replacement alert is durably linked before older cover messages are superseded.
 
 Only one organiser assignment may own the event at a time.
 
