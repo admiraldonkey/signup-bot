@@ -21,6 +21,7 @@ import {
   scheduledActions,
   eventReminders,
   eventOrganiserAssignments,
+  eventMessages,
   guildSettings,
   roleRequestGroups,
 } from "../db/schema.js";
@@ -43,6 +44,7 @@ import {
   sendOrganiserCoverRequest,
   sendOrganiserMissingAtStartAlert,
   sendOrganiserPendingWarning,
+  type CoverRequestDelivery,
 } from "../events/organiser-notification.js";
 import { reconcileOrganiserPendingWarning } from "../events/organiser-warning-reconciliation.js";
 import {
@@ -960,6 +962,63 @@ async function executeOrganiserTimeout(
   });
 }
 
+type TrackedOrganiserCoverMessageKind =
+  | "organiser_cover"
+  | "organiser_missing_at_start";
+
+async function persistOrganiserCoverMessage(input: {
+  eventId: number;
+
+  guildDatabaseId: number;
+
+  kind: TrackedOrganiserCoverMessageKind;
+
+  delivery: CoverRequestDelivery;
+}): Promise<"pinged" | "posted_without_ping" | "failed"> {
+  if (input.delivery.kind === "failed") {
+    return input.delivery.delivery;
+  }
+
+  /*
+   * Preserve the narrowed successful delivery across the nested cleanup
+   * callback below. TypeScript does not retain the narrowing on
+   * input.delivery inside that callback.
+   */
+  const sentDelivery = input.delivery;
+
+  try {
+    await db.insert(eventMessages).values({
+      eventId: input.eventId,
+
+      guildId: input.guildDatabaseId,
+
+      channelId: sentDelivery.channelId,
+
+      messageId: sentDelivery.messageId,
+
+      kind: input.kind,
+    });
+  } catch (error) {
+    /*
+     * Discord message creation cannot participate in the PostgreSQL write.
+     *
+     * If durable linkage fails, remove the just-created candidate rather than
+     * leaving an untracked Claim Event button behind and allowing a scheduler
+     * retry to create another one.
+     */
+    await sentDelivery.message.delete().catch((cleanupError: unknown) => {
+      console.error(
+        `Failed to delete untracked organiser cover message ${sentDelivery.messageId} after its database linkage failed:`,
+        cleanupError,
+      );
+    });
+
+    throw error;
+  }
+
+  return sentDelivery.delivery;
+}
+
 async function executeOrganiserCoverDeadline(
   client: Client<true>,
   eventId: number,
@@ -1170,7 +1229,7 @@ async function executeOrganiserCoverDeadline(
     return;
   }
 
-  const delivery = await sendOrganiserCoverRequest({
+  const coverDelivery = await sendOrganiserCoverRequest({
     guild,
 
     eventId: transition.event.id,
@@ -1180,6 +1239,16 @@ async function executeOrganiserCoverDeadline(
     eventAdminChannelId: transition.event.eventAdminChannelId,
 
     eventOrganiserRoleId: transition.event.eventOrganiserRoleId,
+  });
+
+  const delivery = await persistOrganiserCoverMessage({
+    eventId: transition.event.id,
+
+    guildDatabaseId: transition.event.guildDatabaseId,
+
+    kind: "organiser_cover",
+
+    delivery: coverDelivery,
   });
 
   if (delivery === "failed") {
@@ -1374,7 +1443,7 @@ async function executeOrganiserMissingAtStart(
    * This message is the escalation that the event has actually started
    * without anybody taking responsibility.
    */
-  const delivery = await sendOrganiserMissingAtStartAlert({
+  const startAlertDelivery = await sendOrganiserMissingAtStartAlert({
     guild,
 
     eventId: transition.event.id,
@@ -1384,6 +1453,16 @@ async function executeOrganiserMissingAtStart(
     eventAdminChannelId: transition.event.eventAdminChannelId,
 
     eventOrganiserRoleId: transition.event.eventOrganiserRoleId,
+  });
+
+  const delivery = await persistOrganiserCoverMessage({
+    eventId: transition.event.id,
+
+    guildDatabaseId: transition.event.guildDatabaseId,
+
+    kind: "organiser_missing_at_start",
+
+    delivery: startAlertDelivery,
   });
 
   if (delivery === "failed") {
@@ -1604,7 +1683,7 @@ async function executeOrganiserCoverRequest(
     return;
   }
 
-  const delivery = await sendOrganiserCoverRequest({
+  const coverDelivery = await sendOrganiserCoverRequest({
     guild,
 
     eventId: event.id,
@@ -1614,6 +1693,16 @@ async function executeOrganiserCoverRequest(
     eventAdminChannelId: event.eventAdminChannelId,
 
     eventOrganiserRoleId: event.eventOrganiserRoleId,
+  });
+
+  const delivery = await persistOrganiserCoverMessage({
+    eventId: event.id,
+
+    guildDatabaseId: event.guildDatabaseId,
+
+    kind: "organiser_cover",
+
+    delivery: coverDelivery,
   });
 
   if (delivery === "failed") {

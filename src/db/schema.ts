@@ -38,6 +38,8 @@ export const eventMessageKindEnum = pgEnum("event_message_kind", [
   "role_request",
   "reminder",
   "admin_summary",
+  "organiser_cover",
+  "organiser_missing_at_start",
 ]);
 
 export const scheduledActionStatusEnum = pgEnum("scheduled_action_status", [
@@ -849,6 +851,10 @@ export const eventMessages = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+
+    resolvedAt: timestamp("resolved_at", {
+      withTimezone: true,
+    }),
 
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
   },

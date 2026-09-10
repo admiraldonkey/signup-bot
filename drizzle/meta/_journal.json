@@ -134,6 +134,13 @@
       "when": 1788898032522,
       "tag": "0018_chunky_runaways",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1789056019445,
+      "tag": "0019_bizarre_brother_voodoo",
+      "breakpoints": true
     }
   ]
 }

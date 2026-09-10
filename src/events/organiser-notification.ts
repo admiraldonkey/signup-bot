@@ -5,6 +5,7 @@ import {
   ChannelType,
   PermissionFlagsBits,
   type Guild,
+  type Message,
 } from "discord.js";
 import { isDiscordErrorCode } from "../discord/discord-errors.js";
 import type {
@@ -309,7 +310,23 @@ export async function sendOrganiserPendingWarning(input: {
   }
 }
 
-export type CoverRequestDelivery = "pinged" | "posted_without_ping" | "failed";
+export type CoverRequestDelivery =
+  | {
+      kind: "sent";
+
+      delivery: "pinged" | "posted_without_ping";
+
+      channelId: string;
+
+      messageId: string;
+
+      message: Message<true>;
+    }
+  | {
+      kind: "failed";
+
+      delivery: "failed";
+    };
 
 type OrganiserCoverMessageInput = {
   guild: Guild;
@@ -331,7 +348,11 @@ async function sendOrganiserCoverMessage(
   input: OrganiserCoverMessageInput,
 ): Promise<CoverRequestDelivery> {
   if (!input.eventAdminChannelId || !input.eventOrganiserRoleId) {
-    return "failed";
+    return {
+      kind: "failed",
+
+      delivery: "failed",
+    };
   }
 
   try {
@@ -347,7 +368,11 @@ async function sendOrganiserCoverMessage(
       !channel.isSendable() ||
       !role
     ) {
-      return "failed";
+      return {
+        kind: "failed",
+
+        delivery: "failed",
+      };
     }
 
     const botMember =
@@ -358,7 +383,7 @@ async function sendOrganiserCoverMessage(
     const canPingRole =
       role.mentionable || permissions.has(PermissionFlagsBits.MentionEveryone);
 
-    await channel.send({
+    const coverMessage = await channel.send({
       content: [
         canPingRole ? `<@&${role.id}>` : `**${role.name}**`,
 
@@ -394,14 +419,28 @@ async function sendOrganiserCoverMessage(
           },
     });
 
-    return canPingRole ? "pinged" : "posted_without_ping";
+    return {
+      kind: "sent",
+
+      delivery: canPingRole ? "pinged" : "posted_without_ping",
+
+      channelId: channel.id,
+
+      messageId: coverMessage.id,
+
+      message: coverMessage,
+    };
   } catch (error: unknown) {
     /*
      * A deleted Event Administration channel is a permanently unusable
      * destination rather than a transient scheduler failure.
      */
     if (isDiscordErrorCode(error, 10003)) {
-      return "failed";
+      return {
+        kind: "failed",
+
+        delivery: "failed",
+      };
     }
 
     /*

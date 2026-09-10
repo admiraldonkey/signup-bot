@@ -53,9 +53,33 @@ const organiserNotificationMocks = vi.hoisted(() => ({
 
   reconcileOrganiserPendingWarning: vi.fn().mockResolvedValue(true),
 
-  sendOrganiserCoverRequest: vi.fn().mockResolvedValue("pinged"),
+  sendOrganiserCoverRequest: vi.fn().mockResolvedValue({
+    kind: "sent",
 
-  sendOrganiserMissingAtStartAlert: vi.fn().mockResolvedValue("pinged"),
+    delivery: "pinged",
+
+    channelId: "300000000000000005",
+
+    messageId: "300000000000000030",
+
+    message: {
+      delete: vi.fn().mockResolvedValue(undefined),
+    },
+  }),
+
+  sendOrganiserMissingAtStartAlert: vi.fn().mockResolvedValue({
+    kind: "sent",
+
+    delivery: "pinged",
+
+    channelId: "300000000000000005",
+
+    messageId: "300000000000000031",
+
+    message: {
+      delete: vi.fn().mockResolvedValue(undefined),
+    },
+  }),
 }));
 
 vi.mock("../../../src/events/organiser-notification.js", () => ({
@@ -2096,6 +2120,81 @@ describe("event scheduler", () => {
     ]);
   });
 
+  it("tracks the organiser cover message created at the safety deadline", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserCoverDeadline(pool);
+
+    const deleteMessage = vi.fn().mockResolvedValue(undefined);
+
+    organiserNotificationMocks.sendOrganiserCoverRequest.mockResolvedValueOnce({
+      kind: "sent",
+
+      delivery: "pinged",
+
+      channelId: "300000000000000005",
+
+      messageId: "300000000000000020",
+
+      message: {
+        delete: deleteMessage,
+      },
+    });
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const messageResult = await pool.query<{
+      channel_id: string;
+
+      message_id: string;
+
+      kind: string;
+
+      resolved_at: Date | null;
+
+      deleted_at: Date | null;
+    }>(
+      `
+      SELECT
+        "channel_id",
+        "message_id",
+        "kind"::text AS "kind",
+        "resolved_at",
+        "deleted_at"
+      FROM
+        "event_messages"
+      WHERE
+        "event_id" = $1
+        AND
+        "kind"::text = 'organiser_cover'
+    `,
+      [fixture.eventId],
+    );
+
+    expect(messageResult.rows).toEqual([
+      {
+        channel_id: "300000000000000005",
+
+        message_id: "300000000000000020",
+
+        kind: "organiser_cover",
+
+        resolved_at: null,
+
+        deleted_at: null,
+      },
+    ]);
+
+    expect(deleteMessage).not.toHaveBeenCalled();
+  });
+
   it("does not send stale general cover when an organiser becomes confirmed during the cover-deadline guild fetch", async () => {
     // Arrange
     const fixture = await createOpenEventWithDueOrganiserCoverDeadline(pool);
@@ -2327,6 +2426,83 @@ describe("event scheduler", () => {
         prior_cover_state: "cover_already_requested",
       },
     ]);
+  });
+
+  it("tracks the urgent missing-organiser message created at event start", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserMissingAtStart(pool);
+
+    const deleteMessage = vi.fn().mockResolvedValue(undefined);
+
+    organiserNotificationMocks.sendOrganiserMissingAtStartAlert.mockResolvedValueOnce(
+      {
+        kind: "sent",
+
+        delivery: "pinged",
+
+        channelId: "300000000000000005",
+
+        messageId: "300000000000000021",
+
+        message: {
+          delete: deleteMessage,
+        },
+      },
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const messageResult = await pool.query<{
+      channel_id: string;
+
+      message_id: string;
+
+      kind: string;
+
+      resolved_at: Date | null;
+
+      deleted_at: Date | null;
+    }>(
+      `
+      SELECT
+        "channel_id",
+        "message_id",
+        "kind"::text AS "kind",
+        "resolved_at",
+        "deleted_at"
+      FROM
+        "event_messages"
+      WHERE
+        "event_id" = $1
+        AND
+        "kind"::text = 'organiser_missing_at_start'
+    `,
+      [fixture.eventId],
+    );
+
+    expect(messageResult.rows).toEqual([
+      {
+        channel_id: "300000000000000005",
+
+        message_id: "300000000000000021",
+
+        kind: "organiser_missing_at_start",
+
+        resolved_at: null,
+
+        deleted_at: null,
+      },
+    ]);
+
+    expect(deleteMessage).not.toHaveBeenCalled();
   });
 
   it("does not post a missing-organiser alert after the event has already ended when completion has not caught up yet", async () => {
@@ -3709,13 +3885,90 @@ describe("event scheduler", () => {
     ]);
   });
 
+  it("tracks the organiser cover message created by normal escalation", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserCoverRequest(pool);
+
+    const deleteMessage = vi.fn().mockResolvedValue(undefined);
+
+    organiserNotificationMocks.sendOrganiserCoverRequest.mockResolvedValueOnce({
+      kind: "sent",
+
+      delivery: "pinged",
+
+      channelId: "300000000000000005",
+
+      messageId: "300000000000000022",
+
+      message: {
+        delete: deleteMessage,
+      },
+    });
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const messageResult = await pool.query<{
+      channel_id: string;
+
+      message_id: string;
+
+      kind: string;
+
+      resolved_at: Date | null;
+
+      deleted_at: Date | null;
+    }>(
+      `
+      SELECT
+        "channel_id",
+        "message_id",
+        "kind"::text AS "kind",
+        "resolved_at",
+        "deleted_at"
+      FROM
+        "event_messages"
+      WHERE
+        "event_id" = $1
+        AND
+        "kind"::text = 'organiser_cover'
+    `,
+      [fixture.eventId],
+    );
+
+    expect(messageResult.rows).toEqual([
+      {
+        channel_id: "300000000000000005",
+
+        message_id: "300000000000000022",
+
+        kind: "organiser_cover",
+
+        resolved_at: null,
+
+        deleted_at: null,
+      },
+    ]);
+
+    expect(deleteMessage).not.toHaveBeenCalled();
+  });
+
   it("does not retry an organiser cover request when delivery is definitively unavailable", async () => {
     // Arrange
     const fixture = await createOpenEventWithDueOrganiserCoverRequest(pool);
 
-    organiserNotificationMocks.sendOrganiserCoverRequest.mockResolvedValueOnce(
-      "failed",
-    );
+    organiserNotificationMocks.sendOrganiserCoverRequest.mockResolvedValueOnce({
+      kind: "failed",
+
+      delivery: "failed",
+    });
 
     const client = createSchedulerClient();
 
