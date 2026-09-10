@@ -12,9 +12,13 @@ const EVENT_ORGANISER_ROLE_ID = "990000000000000002";
 
 describe("organiser notification", () => {
   it("posts an urgent claimable alert when an event starts without an organiser", async () => {
-    const send = vi.fn().mockResolvedValue({
+    const sentMessage = {
       id: "990000000000000003",
-    });
+
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const send = vi.fn().mockResolvedValue(sentMessage);
 
     const channel = {
       id: EVENT_ADMIN_CHANNEL_ID,
@@ -64,7 +68,17 @@ describe("organiser notification", () => {
       eventOrganiserRoleId: EVENT_ORGANISER_ROLE_ID,
     });
 
-    expect(result).toBe("pinged");
+    expect(result).toEqual({
+      kind: "sent",
+
+      delivery: "pinged",
+
+      channelId: EVENT_ADMIN_CHANNEL_ID,
+
+      messageId: "990000000000000003",
+
+      message: sentMessage,
+    });
 
     expect(send).toHaveBeenCalledTimes(1);
 

@@ -6,6 +6,7 @@ import {
   memberCanManageEvents,
 } from "../auth/event-admin.js";
 import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
+import { reconcileOrganiserCoverMessages } from "../events/organiser-cover-reconciliation.js";
 import {
   type OrganiserNotificationDelivery,
   sendOrganiserAssignmentNotification,
@@ -170,6 +171,25 @@ export async function setEventOrganiser(
   const activePrimary = slot === "primary" && assignment.activatedAt !== null;
 
   if (activePrimary) {
+    await reconcileOrganiserCoverMessages({
+      guild: interaction.guild,
+
+      eventId: event.id,
+
+      resolution: {
+        kind: "active_assignment",
+      },
+    }).catch((error: unknown) => {
+      /*
+       * The newly-assigned primary is already authoritative. Cover-message
+       * cleanup is secondary Discord presentation.
+       */
+      console.error(
+        `Failed to reconcile organiser cover messages after assigning primary organiser for event ${event.id}:`,
+        error,
+      );
+    });
+
     try {
       notification = await sendOrganiserAssignmentNotification({
         guild: interaction.guild,

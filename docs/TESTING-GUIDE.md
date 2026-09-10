@@ -1590,12 +1590,68 @@ Test:
 - competing claims
 - backup confirmation racing cover claim
 - stale cover request
-- cover remains possible after event start when still genuinely required
+- cover remains possible after event start while the event has not ended
+- cover is rejected after `endsAt` even if persisted lifecycle still says `open`
 - event cancellation
 - event completion
 - organisers disabled
 
 Do not reintroduce the obsolete assertion that every post-start cover claim must fail.
+
+The important distinction is:
+
+```text
+startsAt < now < endsAt
+    -> cover may still be useful
+
+endsAt <= now
+    -> new organiser cover is obsolete
+```
+
+---
+
+# Organiser cover-message reconciliation
+
+Direct reconciliation coverage should verify:
+
+```text
+cover claim
+    -> every outstanding tracked cover/start message resolves
+
+T+0 missing-organiser alert
+    -> older organiser_cover messages resolve
+    -> new organiser_missing_at_start message remains live
+
+known deleted message
+    -> resolvedAt set
+    -> deletedAt set
+
+unexpected Discord failure
+    -> error propagates
+    -> tracked message remains unresolved
+
+already-resolved message
+    -> Discord is not fetched again
+```
+
+Scheduler and interaction wiring should separately prove that reconciliation is invoked after the authoritative domain transition.
+
+Important ordering regressions include:
+
+```text
+T+0 alert sent
+    -> T+0 linkage persisted
+    -> older cover messages reconciled
+```
+
+and:
+
+```text
+event completion committed
+    -> cover messages reconciled
+```
+
+This keeps Discord cleanup secondary to PostgreSQL authority.
 
 ---
 
@@ -1623,7 +1679,37 @@ The event-start action should:
 - recognise an already-confirmed organiser
 - alert when still unresolved
 - avoid duplicate current ownership
+- track the urgent Discord message
+- supersede older general-cover presentation only after the new alert is durably linked
 - remain safe after cancellation/completion
+- become harmless when scheduler catch-up occurs after `endsAt`
+
+---
+
+## Post-end organiser scheduler catch-up
+
+Explicitly test overdue organiser actions where:
+
+```text
+endsAt < now
+status = open
+complete_event has not yet caught up
+```
+
+Relevant paths include:
+
+```text
+organiser warning
+organiser timeout
+organiser safety deadline
+missing organiser at start
+cover claim context
+authoritative cover claim
+```
+
+These regressions exist to prove that action ordering during restart cannot create new operational organiser state for an event that has already finished.
+
+Keep positive companion coverage showing that organiser cover still works after `startsAt` but before `endsAt`.
 
 ---
 
@@ -2384,11 +2470,34 @@ Verify transition to general cover.
 Verify:
 
 - eligible organiser can claim
-- message updates
 - one organiser becomes current
 - stale second claim fails cleanly
+- all tracked outstanding cover/start messages update after the claim
+- `Claim Event` components disappear from resolved messages
 
-If testing near event start, also verify the current intended rule that cover can remain claimable after start when the event still lacks an organiser.
+If testing near event start, verify:
+
+```text
+after start but before end
+    -> claim may still succeed
+
+after event end
+    -> claim is rejected
+```
+
+Also verify where practical:
+
+```text
+T+0 urgent alert
+    -> older general-cover message becomes superseded
+    -> older Claim Event button disappears
+
+event cancellation
+    -> outstanding Claim Event buttons disappear
+
+automatic completion
+    -> outstanding Claim Event buttons disappear
+```
 
 ---
 

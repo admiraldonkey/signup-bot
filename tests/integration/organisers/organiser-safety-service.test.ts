@@ -330,6 +330,121 @@ describe("organiser safety service", () => {
     ]);
   });
 
+  it("does not open organiser cover after the event has already ended when completion has not caught up yet", async () => {
+    // Arrange
+    const fixture = await createSafetyFixture(pool, {
+      organisersEnabled: true,
+
+      confirmedPrimary: false,
+
+      existingCoverRequest: false,
+    });
+
+    /*
+     * Keep the event lifecycle deliberately non-terminal while moving the
+     * absolute event window fully into the past.
+     *
+     * This models scheduler catch-up before complete_event has updated status.
+     */
+    await pool.query(
+      `
+      UPDATE "events"
+      SET
+        "starts_at" =
+          NOW() -
+            INTERVAL '2 hours',
+        "ends_at" =
+          NOW() -
+            INTERVAL '1 hour',
+        "status" =
+          'open',
+        "updated_at" =
+          NOW()
+      WHERE
+        "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    // Act
+    const result = await openOrganiserCoverAtSafetyDeadline({
+      eventId: fixture.eventId,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "event_inactive",
+    });
+
+    /*
+     * The stale safety action must not retire nominees simply because the
+     * completion action has not run yet.
+     */
+    const assignments = await pool.query<{
+      status: string;
+
+      is_current: boolean;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current"
+      FROM
+        "event_organiser_assignments"
+      WHERE
+        "event_id" = $1
+      ORDER BY
+        "id"
+    `,
+      [fixture.eventId],
+    );
+
+    expect(assignments.rows).toEqual([
+      {
+        status: "pending",
+
+        is_current: true,
+      },
+      {
+        status: "pending",
+
+        is_current: true,
+      },
+    ]);
+
+    const actions = await pool.query<{
+      action_key: string;
+
+      status: string;
+    }>(
+      `
+      SELECT
+        "action_key",
+        "status"
+      FROM
+        "scheduled_actions"
+      WHERE
+        "event_id" = $1
+      ORDER BY
+        "action_key"
+    `,
+      [fixture.eventId],
+    );
+
+    expect(actions.rows).toEqual([
+      {
+        action_key: `organiser_timeout:${fixture.primaryAssignmentId}`,
+
+        status: "pending",
+      },
+      {
+        action_key: `organiser_warning:${fixture.primaryAssignmentId}`,
+
+        status: "pending",
+      },
+    ]);
+  });
+
   it("does nothing when organisers are disabled", async () => {
     // Arrange
     const fixture = await createSafetyFixture(pool, {

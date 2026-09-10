@@ -17,6 +17,7 @@ import {
   sendOrganiserPendingWarning,
 } from "../../../src/events/organiser-notification.js";
 import { reconcileOrganiserPendingWarning } from "../../../src/events/organiser-warning-reconciliation.js";
+import { reconcileOrganiserCoverMessages } from "../../../src/events/organiser-cover-reconciliation.js";
 import {
   createIntegrationPool,
   resetIntegrationDatabase,
@@ -611,6 +612,432 @@ describe("organiser notification reconciliation", () => {
       },
     ]);
   });
+
+  describe("organiser cover message reconciliation", () => {
+    it("resolves every outstanding organiser cover message after cover is claimed", async () => {
+      // Arrange
+      const fixture = await createOrganiserCoverMessageFixture(pool);
+
+      const editCover = vi.fn().mockResolvedValue(undefined);
+
+      const editStartAlert = vi.fn().mockResolvedValue(undefined);
+
+      const fetchMessage = vi.fn(async (messageId: string) => {
+        if (messageId === fixture.coverMessageId) {
+          return {
+            id: messageId,
+
+            edit: editCover,
+          };
+        }
+
+        if (messageId === fixture.startAlertMessageId) {
+          return {
+            id: messageId,
+
+            edit: editStartAlert,
+          };
+        }
+
+        throw new Error(`Unexpected message ID: ${messageId}`);
+      });
+
+      const channel = {
+        id: fixture.channelId,
+
+        type: ChannelType.GuildText,
+
+        messages: {
+          fetch: fetchMessage,
+        },
+      };
+
+      const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+      const guild = {
+        id: DISCORD_GUILD_ID,
+
+        channels: {
+          fetch: fetchChannel,
+        },
+      } as unknown as Guild;
+
+      // Act
+      const result = await reconcileOrganiserCoverMessages({
+        guild,
+
+        eventId: fixture.eventId,
+
+        resolution: {
+          kind: "claimed",
+
+          organiserUserId: ORGANISER_USER_ID,
+        },
+      });
+
+      // Assert
+      expect(result).toBe(2);
+
+      expect(fetchChannel).toHaveBeenCalledTimes(2);
+
+      expect(fetchChannel).toHaveBeenNthCalledWith(1, fixture.channelId);
+
+      expect(fetchChannel).toHaveBeenNthCalledWith(2, fixture.channelId);
+
+      expect(fetchMessage).toHaveBeenCalledTimes(2);
+
+      expect(fetchMessage).toHaveBeenCalledWith(fixture.coverMessageId);
+
+      expect(fetchMessage).toHaveBeenCalledWith(fixture.startAlertMessageId);
+
+      expect(editCover).toHaveBeenCalledTimes(1);
+
+      expect(editStartAlert).toHaveBeenCalledTimes(1);
+
+      for (const editMessage of [editCover, editStartAlert]) {
+        expect(editMessage).toHaveBeenCalledWith(
+          expect.objectContaining({
+            components: [],
+
+            allowedMentions: {
+              parse: [],
+            },
+
+            content: expect.stringContaining(
+              `Cover was claimed by <@${ORGANISER_USER_ID}>`,
+            ),
+          }),
+        );
+      }
+
+      const messageRows = await pool.query<{
+        kind: string;
+
+        resolved_at: Date | null;
+
+        deleted_at: Date | null;
+      }>(
+        `
+        SELECT
+          "kind"::text AS "kind",
+          "resolved_at",
+          "deleted_at"
+        FROM
+          "event_messages"
+        WHERE
+          "event_id" = $1
+        ORDER BY
+          "id"
+      `,
+        [fixture.eventId],
+      );
+
+      expect(messageRows.rows).toHaveLength(2);
+
+      expect(messageRows.rows[0]).toEqual({
+        kind: "organiser_cover",
+
+        resolved_at: expect.any(Date),
+
+        deleted_at: null,
+      });
+
+      expect(messageRows.rows[1]).toEqual({
+        kind: "organiser_missing_at_start",
+
+        resolved_at: expect.any(Date),
+
+        deleted_at: null,
+      });
+    });
+
+    it("can resolve only older general-cover messages when the event-start alert supersedes them", async () => {
+      // Arrange
+      const fixture = await createOrganiserCoverMessageFixture(pool);
+
+      const editCover = vi.fn().mockResolvedValue(undefined);
+
+      const fetchMessage = vi.fn().mockResolvedValue({
+        id: fixture.coverMessageId,
+
+        edit: editCover,
+      });
+
+      const channel = {
+        id: fixture.channelId,
+
+        type: ChannelType.GuildText,
+
+        messages: {
+          fetch: fetchMessage,
+        },
+      };
+
+      const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+      const guild = {
+        id: DISCORD_GUILD_ID,
+
+        channels: {
+          fetch: fetchChannel,
+        },
+      } as unknown as Guild;
+
+      // Act
+      const result = await reconcileOrganiserCoverMessages({
+        guild,
+
+        eventId: fixture.eventId,
+
+        resolution: {
+          kind: "superseded_at_start",
+        },
+
+        scope: "cover_only",
+      });
+
+      // Assert
+      expect(result).toBe(1);
+
+      expect(fetchMessage).toHaveBeenCalledTimes(1);
+
+      expect(fetchMessage).toHaveBeenCalledWith(fixture.coverMessageId);
+
+      expect(editCover).toHaveBeenCalledWith(
+        expect.objectContaining({
+          components: [],
+
+          content: expect.stringContaining(
+            "superseded by the event-start organiser alert",
+          ),
+
+          allowedMentions: {
+            parse: [],
+          },
+        }),
+      );
+
+      const messageRows = await pool.query<{
+        kind: string;
+
+        resolved_at: Date | null;
+      }>(
+        `
+        SELECT
+          "kind"::text AS "kind",
+          "resolved_at"
+        FROM
+          "event_messages"
+        WHERE
+          "event_id" = $1
+        ORDER BY
+          "id"
+      `,
+        [fixture.eventId],
+      );
+
+      expect(messageRows.rows).toEqual([
+        {
+          kind: "organiser_cover",
+
+          resolved_at: expect.any(Date),
+        },
+        {
+          kind: "organiser_missing_at_start",
+
+          resolved_at: null,
+        },
+      ]);
+    });
+
+    it("marks a deleted organiser cover message as resolved and deleted", async () => {
+      // Arrange
+      const fixture = await createOrganiserCoverMessageFixture(pool, {
+        includeStartAlert: false,
+      });
+
+      const unknownMessageError = {
+        code: 10008,
+
+        message: "Unknown Message",
+      };
+
+      const fetchMessage = vi.fn().mockRejectedValue(unknownMessageError);
+
+      const channel = {
+        id: fixture.channelId,
+
+        type: ChannelType.GuildText,
+
+        messages: {
+          fetch: fetchMessage,
+        },
+      };
+
+      const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+      const guild = {
+        id: DISCORD_GUILD_ID,
+
+        channels: {
+          fetch: fetchChannel,
+        },
+      } as unknown as Guild;
+
+      // Act
+      const result = await reconcileOrganiserCoverMessages({
+        guild,
+
+        eventId: fixture.eventId,
+
+        resolution: {
+          kind: "event_completed",
+        },
+      });
+
+      // Assert
+      expect(result).toBe(1);
+
+      const messageResult = await pool.query<{
+        resolved_at: Date | null;
+
+        deleted_at: Date | null;
+      }>(
+        `
+        SELECT
+          "resolved_at",
+          "deleted_at"
+        FROM
+          "event_messages"
+        WHERE
+          "message_id" = $1
+      `,
+        [fixture.coverMessageId],
+      );
+
+      expect(messageResult.rows).toEqual([
+        {
+          resolved_at: expect.any(Date),
+
+          deleted_at: expect.any(Date),
+        },
+      ]);
+    });
+
+    it("propagates an unexpected Discord failure and leaves the message unresolved", async () => {
+      // Arrange
+      const fixture = await createOrganiserCoverMessageFixture(pool, {
+        includeStartAlert: false,
+      });
+
+      const transientError = new Error("Temporary Discord failure.");
+
+      const fetchMessage = vi.fn().mockRejectedValue(transientError);
+
+      const channel = {
+        id: fixture.channelId,
+
+        type: ChannelType.GuildText,
+
+        messages: {
+          fetch: fetchMessage,
+        },
+      };
+
+      const fetchChannel = vi.fn().mockResolvedValue(channel);
+
+      const guild = {
+        id: DISCORD_GUILD_ID,
+
+        channels: {
+          fetch: fetchChannel,
+        },
+      } as unknown as Guild;
+
+      // Act / Assert
+      await expect(
+        reconcileOrganiserCoverMessages({
+          guild,
+
+          eventId: fixture.eventId,
+
+          resolution: {
+            kind: "event_cancelled",
+          },
+        }),
+      ).rejects.toBe(transientError);
+
+      const messageResult = await pool.query<{
+        resolved_at: Date | null;
+
+        deleted_at: Date | null;
+      }>(
+        `
+        SELECT
+          "resolved_at",
+          "deleted_at"
+        FROM
+          "event_messages"
+        WHERE
+          "message_id" = $1
+      `,
+        [fixture.coverMessageId],
+      );
+
+      expect(messageResult.rows).toEqual([
+        {
+          resolved_at: null,
+
+          deleted_at: null,
+        },
+      ]);
+    });
+
+    it("does not fetch organiser messages which have already been resolved", async () => {
+      // Arrange
+      const fixture = await createOrganiserCoverMessageFixture(pool, {
+        includeStartAlert: false,
+      });
+
+      await pool.query(
+        `
+        UPDATE
+          "event_messages"
+        SET
+          "resolved_at" = NOW()
+        WHERE
+          "message_id" = $1
+      `,
+        [fixture.coverMessageId],
+      );
+
+      const fetchChannel = vi.fn();
+
+      const guild = {
+        id: DISCORD_GUILD_ID,
+
+        channels: {
+          fetch: fetchChannel,
+        },
+      } as unknown as Guild;
+
+      // Act
+      const result = await reconcileOrganiserCoverMessages({
+        guild,
+
+        eventId: fixture.eventId,
+
+        resolution: {
+          kind: "event_completed",
+        },
+      });
+
+      // Assert
+      expect(result).toBe(0);
+
+      expect(fetchChannel).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe("organiser assignment notification delivery", () => {
@@ -1087,7 +1514,11 @@ describe("organiser cover-request delivery", () => {
     });
 
     // Assert
-    expect(result).toBe("failed");
+    expect(result).toEqual({
+      kind: "failed",
+
+      delivery: "failed",
+    });
 
     expect(fetchChannel).toHaveBeenCalledTimes(1);
 
@@ -1165,7 +1596,11 @@ describe("organiser cover-request delivery", () => {
     });
 
     // Assert
-    expect(result).toBe("failed");
+    expect(result).toEqual({
+      kind: "failed",
+
+      delivery: "failed",
+    });
 
     expect(fetchChannel).toHaveBeenCalledTimes(1);
 
@@ -1304,7 +1739,11 @@ describe("organiser cover-request delivery", () => {
     });
 
     // Assert
-    expect(result).toBe("failed");
+    expect(result).toEqual({
+      kind: "failed",
+
+      delivery: "failed",
+    });
 
     expect(fetchChannel).toHaveBeenCalledTimes(1);
 
@@ -1371,9 +1810,13 @@ describe("organiser cover-request delivery", () => {
 
   it("posts a cover request without pinging when the organiser role is not mentionable", async () => {
     // Arrange
-    const sendCoverRequest = vi.fn().mockResolvedValue({
+    const sentCoverRequest = {
       id: "820000000000000008",
-    });
+
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const sendCoverRequest = vi.fn().mockResolvedValue(sentCoverRequest);
 
     const permissions = {
       has: vi.fn().mockReturnValue(false),
@@ -1437,7 +1880,17 @@ describe("organiser cover-request delivery", () => {
     });
 
     // Assert
-    expect(result).toBe("posted_without_ping");
+    expect(result).toEqual({
+      kind: "sent",
+
+      delivery: "posted_without_ping",
+
+      channelId: WARNING_CHANNEL_ID,
+
+      messageId: "820000000000000008",
+
+      message: sentCoverRequest,
+    });
 
     expect(sendCoverRequest).toHaveBeenCalledTimes(1);
 
@@ -1596,5 +2049,175 @@ async function createConfirmedAssignmentWithWarning(pool: Pool): Promise<{
   return {
     eventId,
     assignmentId,
+  };
+}
+
+async function createOrganiserCoverMessageFixture(
+  pool: Pool,
+  options: {
+    includeStartAlert?: boolean;
+  } = {},
+): Promise<{
+  eventId: number;
+
+  channelId: string;
+
+  coverMessageId: string;
+
+  startAlertMessageId: string;
+}> {
+  const includeStartAlert = options.includeStartAlert ?? true;
+
+  const channelId = "820000000000000020";
+
+  const coverMessageId = "820000000000000021";
+
+  const startAlertMessageId = "820000000000000022";
+
+  const guildResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "discord_guilds" (
+        "discord_guild_id",
+        "name",
+        "timezone",
+        "enabled"
+      )
+      VALUES (
+        $1,
+        'Organiser Cover Reconciliation Guild',
+        'Europe/London',
+        TRUE
+      )
+      RETURNING "id"
+    `,
+    [DISCORD_GUILD_ID],
+  );
+
+  const guildDatabaseId = guildResult.rows[0]?.id;
+
+  if (!guildDatabaseId) {
+    throw new Error("Failed to create organiser cover reconciliation guild.");
+  }
+
+  const eventTypeResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "event_types" (
+        "owner_guild_id",
+        "code",
+        "name",
+        "role_requests_enabled",
+        "active"
+      )
+      VALUES (
+        $1,
+        'naval',
+        'Naval',
+        TRUE,
+        TRUE
+      )
+      RETURNING "id"
+    `,
+    [guildDatabaseId],
+  );
+
+  const eventTypeId = eventTypeResult.rows[0]?.id;
+
+  if (!eventTypeId) {
+    throw new Error("Failed to create organiser cover reconciliation type.");
+  }
+
+  const eventResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "events" (
+        "owner_guild_id",
+        "event_type_id",
+        "name",
+        "starts_at",
+        "ends_at",
+        "timezone",
+        "status",
+        "signups_enabled",
+        "published_at",
+        "created_by_user_id"
+      )
+      VALUES (
+        $1,
+        $2,
+        'Organiser Cover Reconciliation Test',
+        NOW() + INTERVAL '30 minutes',
+        NOW() + INTERVAL '90 minutes',
+        'Europe/London',
+        'open',
+        TRUE,
+        NOW(),
+        $3
+      )
+      RETURNING "id"
+    `,
+    [guildDatabaseId, eventTypeId, ADMIN_USER_ID],
+  );
+
+  const eventId = eventResult.rows[0]?.id;
+
+  if (!eventId) {
+    throw new Error("Failed to create organiser cover reconciliation event.");
+  }
+
+  await pool.query(
+    `
+      INSERT INTO "event_messages" (
+        "event_id",
+        "guild_id",
+        "channel_id",
+        "message_id",
+        "kind"
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        $4,
+        'organiser_cover'
+      )
+    `,
+    [eventId, guildDatabaseId, channelId, coverMessageId],
+  );
+
+  if (includeStartAlert) {
+    await pool.query(
+      `
+        INSERT INTO "event_messages" (
+          "event_id",
+          "guild_id",
+          "channel_id",
+          "message_id",
+          "kind"
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          'organiser_missing_at_start'
+        )
+      `,
+      [eventId, guildDatabaseId, channelId, startAlertMessageId],
+    );
+  }
+
+  return {
+    eventId,
+
+    channelId,
+
+    coverMessageId,
+
+    startAlertMessageId,
   };
 }

@@ -488,13 +488,15 @@ The authoritative row must be re-checked or locked at the transition boundary.
 
 ---
 
-## D019 - Organiser warning messages must be reconciled after resolution
+## D019 - Organiser warning and cover presentation must be reconciled after resolution
 
 **Status: Current**
 
-When an organiser warning has already been posted, later organiser resolution should update that warning where possible.
+Organiser warning messages and claimable organiser-cover messages are Discord projections of authoritative organiser state.
 
-Relevant resolution states include:
+They must not remain misleading or actionable after the underlying organiser situation has resolved.
+
+Pending organiser warnings retain their Discord location on the assignment so they can be reconciled after states including:
 
 - confirmed
 - declined
@@ -504,29 +506,57 @@ Relevant resolution states include:
 - event cancelled
 - event completed
 
-The warning message location is stored so it can be reconciled.
+General-cover and missing-organiser-at-start messages are tracked separately through `event_messages` using message kinds including:
+
+```text
+organiser_cover
+organiser_missing_at_start
+```
+
+Tracked organiser-cover presentation records retain their Discord channel/message linkage and a resolution timestamp.
+
+Outstanding cover presentation is reconciled when appropriate after:
+
+- cover is claimed
+- an active organiser assignment supersedes cover
+- the event-start alert supersedes an earlier general-cover message
+- organisers are disabled
+- the event is cancelled
+- the event completes
+
+When the event-start alert supersedes an earlier general-cover message, the older message must not be retired until the new T+0 alert has been successfully sent and durably linked.
 
 ### Reason
 
-Leaving a visible warning stating that someone "has not yet confirmed" after they have confirmed is operationally misleading.
+A visible Discord button which is no longer valid is operationally misleading even when the authoritative interaction handler would eventually reject it.
 
 Presentation should follow authoritative state.
 
+Tracking the exact Discord messages also allows several historical cover requests for one event to be reconciled instead of leaving stale Claim Event controls scattered through the administration channel.
+
 ---
 
-## D020 - Deleted organiser warning presentation must not roll back organiser state
+## D020 - Missing organiser presentation must not roll back authoritative state
 
 **Status: Current**
 
-If the warning message or its channel has disappeared, authoritative organiser state remains valid.
+If an organiser warning, general-cover message, missing-at-start message, or its Discord channel has disappeared, authoritative organiser state remains valid.
 
 Known deleted-message or deleted-channel conditions are presentation failures.
 
-Unexpected Discord errors should still propagate to the appropriate error boundary.
+For tracked organiser-cover presentation, a definitively missing Discord message or channel may be marked resolved and deleted in `event_messages`.
+
+Unexpected Discord failures must not be silently reclassified as deletion.
+
+Where organiser ownership, cancellation, completion, or another domain transition has already committed successfully, later Discord reconciliation failure must not roll that transition back.
 
 ### Reason
 
-A missing message cannot be allowed to undo a valid domain transition.
+Discord presentation is external and fallible.
+
+A missing or temporarily inaccessible message cannot be allowed to undo a valid PostgreSQL transition.
+
+Likewise, an unexpected Discord outage should remain distinguishable from a message that is known to have been deleted.
 
 ---
 
@@ -641,15 +671,15 @@ organiser_missing_at_start:<eventId>
 
 ---
 
-## D025 - General organiser cover may remain claimable after event start
+## D025 - Organiser escalation may continue after event start but ends at the event's operational end
 
 **Status: Current, superseding the older blanket post-start rejection**
 
-Passing the event start timestamp does not automatically invalidate a general-cover claim.
+Passing the event start timestamp does not automatically invalidate organiser escalation or a general-cover claim.
 
 If:
 
-- the event remains operational
+- the event has started but has not ended
 - organisers remain enabled
 - the event still has no valid organiser
 - general cover remains the authoritative path
@@ -657,9 +687,39 @@ If:
 
 then cover may still be claimed after start.
 
+The event's absolute end time is different.
+
+Once:
+
+```text
+endsAt <= now;
+```
+
+new organiser operational work is obsolete.
+
+This applies even if the persisted lifecycle still temporarily says:
+
+```text
+open
+```
+
+or:
+
+```text
+closed
+```
+
+because an overdue `complete_event` action has not yet caught up after downtime.
+
+After the event end, organiser warning, timeout, safety-deadline, missing-at-start, cover-eligibility, and cover-claim paths must not create fresh operational escalation.
+
 ### Reason
 
-Once an event has begun without an organiser, finding a valid organiser is more useful than refusing help because the clock crossed an arbitrary boundary.
+Finding an organiser after an event begins can still be useful.
+
+Finding one after the event has already finished is not.
+
+Using `endsAt` as an independent operational boundary also prevents scheduler catch-up order after downtime from producing stale organiser messages before the later completion action has had a chance to update lifecycle status.
 
 ---
 

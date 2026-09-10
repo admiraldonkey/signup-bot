@@ -21,6 +21,7 @@ import {
   scheduledActions,
   eventReminders,
   eventOrganiserAssignments,
+  eventMessages,
   guildSettings,
   roleRequestGroups,
 } from "../db/schema.js";
@@ -43,8 +44,10 @@ import {
   sendOrganiserCoverRequest,
   sendOrganiserMissingAtStartAlert,
   sendOrganiserPendingWarning,
+  type CoverRequestDelivery,
 } from "../events/organiser-notification.js";
 import { reconcileOrganiserPendingWarning } from "../events/organiser-warning-reconciliation.js";
+import { reconcileOrganiserCoverMessages } from "../events/organiser-cover-reconciliation.js";
 import {
   ROLE_REQUEST_GROUP_OPEN_ACTION_PREFIX,
   ROLE_REQUEST_GROUP_CLOSE_ACTION_PREFIX,
@@ -503,6 +506,8 @@ async function executeOrganiserWarning(
 
       eventStatus: events.status,
 
+      eventEndsAt: events.endsAt,
+
       guildDatabaseId: events.ownerGuildId,
 
       discordGuildId: discordGuilds.discordGuildId,
@@ -528,6 +533,8 @@ async function executeOrganiserWarning(
     return;
   }
 
+  const now = new Date();
+
   if (
     !assignment.organisersEnabled ||
     !assignment.isCurrent ||
@@ -535,7 +542,8 @@ async function executeOrganiserWarning(
     !assignment.activatedAt ||
     !assignment.responseDeadlineAt ||
     assignment.eventStatus === "cancelled" ||
-    assignment.eventStatus === "completed"
+    assignment.eventStatus === "completed" ||
+    (assignment.eventEndsAt !== null && assignment.eventEndsAt <= now)
   ) {
     return;
   }
@@ -553,6 +561,8 @@ async function executeOrganiserWarning(
   const [currentAssignment] = await db
     .select({
       id: eventOrganiserAssignments.id,
+
+      eventEndsAt: events.endsAt,
     })
     .from(eventOrganiserAssignments)
     .innerJoin(events, eq(events.id, eventOrganiserAssignments.eventId))
@@ -581,7 +591,11 @@ async function executeOrganiserWarning(
     )
     .limit(1);
 
-  if (!currentAssignment) {
+  if (
+    !currentAssignment ||
+    (currentAssignment.eventEndsAt !== null &&
+      currentAssignment.eventEndsAt <= new Date())
+  ) {
     return;
   }
 
@@ -693,6 +707,8 @@ async function executeOrganiserWarning(
       isCurrent: eventOrganiserAssignments.isCurrent,
 
       eventStatus: events.status,
+
+      eventEndsAt: events.endsAt,
     })
     .from(eventOrganiserAssignments)
     .innerJoin(events, eq(events.id, eventOrganiserAssignments.eventId))
@@ -704,7 +720,9 @@ async function executeOrganiserWarning(
     !postSendState.isCurrent ||
     postSendState.status !== "pending" ||
     postSendState.eventStatus === "cancelled" ||
-    postSendState.eventStatus === "completed"
+    postSendState.eventStatus === "completed" ||
+    (postSendState.eventEndsAt !== null &&
+      postSendState.eventEndsAt <= new Date())
   ) {
     await reconcileOrganiserPendingWarning({
       guild,
@@ -752,6 +770,8 @@ async function executeOrganiserTimeout(
 
       eventStatus: events.status,
 
+      eventEndsAt: events.endsAt,
+
       guildDatabaseId: events.ownerGuildId,
 
       discordGuildId: discordGuilds.discordGuildId,
@@ -774,7 +794,8 @@ async function executeOrganiserTimeout(
 
   if (
     assignment.eventStatus === "cancelled" ||
-    assignment.eventStatus === "completed"
+    assignment.eventStatus === "completed" ||
+    (assignment.eventEndsAt !== null && assignment.eventEndsAt <= new Date())
   ) {
     return;
   }
@@ -858,16 +879,21 @@ async function executeOrganiserTimeout(
       const [currentEvent] = await transaction
         .select({
           status: events.status,
+
+          endsAt: events.endsAt,
         })
         .from(events)
         .where(eq(events.id, eventId))
         .for("update")
         .limit(1);
 
+      const currentEventNow = new Date();
+
       if (
         !currentEvent ||
         currentEvent.status === "cancelled" ||
-        currentEvent.status === "completed"
+        currentEvent.status === "completed" ||
+        (currentEvent.endsAt !== null && currentEvent.endsAt <= currentEventNow)
       ) {
         transaction.rollback();
       }
@@ -935,6 +961,63 @@ async function executeOrganiserTimeout(
 
     trigger: "timed_out",
   });
+}
+
+type TrackedOrganiserCoverMessageKind =
+  | "organiser_cover"
+  | "organiser_missing_at_start";
+
+async function persistOrganiserCoverMessage(input: {
+  eventId: number;
+
+  guildDatabaseId: number;
+
+  kind: TrackedOrganiserCoverMessageKind;
+
+  delivery: CoverRequestDelivery;
+}): Promise<"pinged" | "posted_without_ping" | "failed"> {
+  if (input.delivery.kind === "failed") {
+    return input.delivery.delivery;
+  }
+
+  /*
+   * Preserve the narrowed successful delivery across the nested cleanup
+   * callback below. TypeScript does not retain the narrowing on
+   * input.delivery inside that callback.
+   */
+  const sentDelivery = input.delivery;
+
+  try {
+    await db.insert(eventMessages).values({
+      eventId: input.eventId,
+
+      guildId: input.guildDatabaseId,
+
+      channelId: sentDelivery.channelId,
+
+      messageId: sentDelivery.messageId,
+
+      kind: input.kind,
+    });
+  } catch (error) {
+    /*
+     * Discord message creation cannot participate in the PostgreSQL write.
+     *
+     * If durable linkage fails, remove the just-created candidate rather than
+     * leaving an untracked Claim Event button behind and allowing a scheduler
+     * retry to create another one.
+     */
+    await sentDelivery.message.delete().catch((cleanupError: unknown) => {
+      console.error(
+        `Failed to delete untracked organiser cover message ${sentDelivery.messageId} after its database linkage failed:`,
+        cleanupError,
+      );
+    });
+
+    throw error;
+  }
+
+  return sentDelivery.delivery;
 }
 
 async function executeOrganiserCoverDeadline(
@@ -1147,7 +1230,7 @@ async function executeOrganiserCoverDeadline(
     return;
   }
 
-  const delivery = await sendOrganiserCoverRequest({
+  const coverDelivery = await sendOrganiserCoverRequest({
     guild,
 
     eventId: transition.event.id,
@@ -1157,6 +1240,16 @@ async function executeOrganiserCoverDeadline(
     eventAdminChannelId: transition.event.eventAdminChannelId,
 
     eventOrganiserRoleId: transition.event.eventOrganiserRoleId,
+  });
+
+  const delivery = await persistOrganiserCoverMessage({
+    eventId: transition.event.id,
+
+    guildDatabaseId: transition.event.guildDatabaseId,
+
+    kind: "organiser_cover",
+
+    delivery: coverDelivery,
   });
 
   if (delivery === "failed") {
@@ -1297,6 +1390,8 @@ async function executeOrganiserMissingAtStart(
 
       startsAt: events.startsAt,
 
+      endsAt: events.endsAt,
+
       organisersEnabled: guildSettings.organisersEnabled,
     })
     .from(events)
@@ -1304,13 +1399,16 @@ async function executeOrganiserMissingAtStart(
     .where(eq(events.id, eventId))
     .limit(1);
 
+  const currentEventNow = new Date();
+
   if (
     !currentEvent ||
     !currentEvent.organisersEnabled ||
     !currentEvent.publishedAt ||
-    currentEvent.startsAt > new Date() ||
+    currentEvent.startsAt > currentEventNow ||
     currentEvent.status === "cancelled" ||
-    currentEvent.status === "completed"
+    currentEvent.status === "completed" ||
+    (currentEvent.endsAt !== null && currentEvent.endsAt <= currentEventNow)
   ) {
     return;
   }
@@ -1346,7 +1444,7 @@ async function executeOrganiserMissingAtStart(
    * This message is the escalation that the event has actually started
    * without anybody taking responsibility.
    */
-  const delivery = await sendOrganiserMissingAtStartAlert({
+  const startAlertDelivery = await sendOrganiserMissingAtStartAlert({
     guild,
 
     eventId: transition.event.id,
@@ -1356,6 +1454,16 @@ async function executeOrganiserMissingAtStart(
     eventAdminChannelId: transition.event.eventAdminChannelId,
 
     eventOrganiserRoleId: transition.event.eventOrganiserRoleId,
+  });
+
+  const delivery = await persistOrganiserCoverMessage({
+    eventId: transition.event.id,
+
+    guildDatabaseId: transition.event.guildDatabaseId,
+
+    kind: "organiser_missing_at_start",
+
+    delivery: startAlertDelivery,
   });
 
   if (delivery === "failed") {
@@ -1391,6 +1499,27 @@ async function executeOrganiserMissingAtStart(
 
     return;
   }
+
+  await reconcileOrganiserCoverMessages({
+    guild,
+
+    eventId: transition.event.id,
+
+    resolution: {
+      kind: "superseded_at_start",
+    },
+
+    scope: "cover_only",
+  }).catch((error: unknown) => {
+    /*
+     * The T+0 message is already tracked and remains the active claim surface.
+     * Failure to tidy an older cover message must not invalidate it.
+     */
+    console.error(
+      `Failed to reconcile earlier organiser cover messages after the event-start alert for event ${transition.event.id}:`,
+      error,
+    );
+  });
 
   await writeAuditLog({
     guildId: transition.event.guildDatabaseId,
@@ -1576,7 +1705,7 @@ async function executeOrganiserCoverRequest(
     return;
   }
 
-  const delivery = await sendOrganiserCoverRequest({
+  const coverDelivery = await sendOrganiserCoverRequest({
     guild,
 
     eventId: event.id,
@@ -1586,6 +1715,16 @@ async function executeOrganiserCoverRequest(
     eventAdminChannelId: event.eventAdminChannelId,
 
     eventOrganiserRoleId: event.eventOrganiserRoleId,
+  });
+
+  const delivery = await persistOrganiserCoverMessage({
+    eventId: event.id,
+
+    guildDatabaseId: event.guildDatabaseId,
+
+    kind: "organiser_cover",
+
+    delivery: coverDelivery,
   });
 
   if (delivery === "failed") {
@@ -2346,6 +2485,25 @@ async function executeCompleteEvent(
       );
     });
   }
+
+  await reconcileOrganiserCoverMessages({
+    guild: completedGuild,
+
+    eventId,
+
+    resolution: {
+      kind: "event_completed",
+    },
+  }).catch((error: unknown) => {
+    /*
+     * Completion is already authoritative. A Discord cleanup failure must not
+     * turn successful lifecycle completion into a scheduler retry.
+     */
+    console.error(
+      `Failed to reconcile organiser cover messages after completing event ${eventId}:`,
+      error,
+    );
+  });
 
   await refreshRoleRequestMessages(completedGuild, eventId);
 

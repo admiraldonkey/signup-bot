@@ -2,6 +2,7 @@ import { type ButtonInteraction, MessageFlags } from "discord.js";
 
 import { writeAuditLog } from "../audit/audit-log.js";
 import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
+import { reconcileOrganiserCoverMessages } from "../events/organiser-cover-reconciliation.js";
 import {
   parseOrganiserCoverClaimCustomId,
   parseOrganiserResponseCustomId,
@@ -170,6 +171,25 @@ async function handleAssignmentResponse(
     });
 
     if (parsed.action === "confirm") {
+      await reconcileOrganiserCoverMessages({
+        guild,
+
+        eventId: assignment.eventId,
+
+        resolution: {
+          kind: "active_assignment",
+        },
+      }).catch((error: unknown) => {
+        /*
+         * Confirmation is authoritative. Cover presentation cleanup is
+         * deliberately best-effort.
+         */
+        console.error(
+          `Failed to reconcile organiser cover messages after organiser confirmation for event ${assignment.eventId}:`,
+          error,
+        );
+      });
+
       await refreshAttendanceMessage(guild, assignment.eventId).catch(
         (error: unknown) => {
           console.error(
@@ -356,6 +376,27 @@ async function handleCoverClaim(
     case "claimed":
       break;
   }
+
+  await reconcileOrganiserCoverMessages({
+    guild: interaction.guild,
+
+    eventId: event.id,
+
+    resolution: {
+      kind: "claimed",
+
+      organiserUserId: interaction.user.id,
+    },
+  }).catch((error: unknown) => {
+    /*
+     * The cover claim is already authoritative. Discord cleanup cannot undo
+     * organiser ownership.
+     */
+    console.error(
+      `Failed to reconcile organiser cover messages after event ${event.id} was claimed:`,
+      error,
+    );
+  });
 
   await interaction.message
     .edit({
