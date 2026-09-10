@@ -1,1170 +1,855 @@
 # Holdfast Event Bot
 
-A TypeScript/Discord event-management bot designed for organised gaming communities, originally built for a large **Holdfast: Nations at War** regiment.
+A database-backed Discord event-management bot built for organised gaming communities, originally designed around regiment events in **Holdfast: Nations At War**.
 
-The project began as a replacement for simple reaction-based event sign-ups and has grown into a more general event-management system supporting attendance, organisers, reminders, role volunteering, qualification rules, draft events and durable scheduling.
+The project replaces fragile reaction-based event sign-ups and manual organiser coordination with persistent event state, attendance tracking, organiser escalation, role requests, reusable role-request presets, reminders, audit logging, and durable scheduled work.
 
-> **Project status:** Active development / community testing  
-> The bot is currently being tested in a real Discord community while its architecture and workflows continue to evolve.
+The bot is under active development and community testing. It is not presented as a generic production-ready SaaS product, but the codebase is deliberately structured around reliable domain behaviour, PostgreSQL-backed state, automated regression testing, and reusable subsystem boundaries.
 
----
+## Why this project exists
 
-## Overview
+Discord is an excellent interaction surface, but a Discord message is a poor place to store authoritative event state.
 
-Organising recurring community events through Discord can quickly become awkward when attendance, reminders, specialist roles and organiser availability are all managed through unrelated messages and manual processes.
+Messages can be deleted. Channels can change. Administrators can race with scheduled jobs. Users can click old buttons. Events can be edited after work has already been scheduled. A bot that treats the visible message as the source of truth quickly becomes difficult to reason about.
 
-This project aims to provide a structured system while keeping Discord as the primary interaction surface.
+This project instead treats PostgreSQL as authoritative.
 
-Current functionality includes:
+Discord messages are projections of persistent event state. Scheduled work is stored durably. User interactions re-check current database state before making changes. External Discord side effects are ordered around authoritative database decisions so stale operations do not quietly overwrite newer ones.
 
-- Configurable event types and regions
-- Optional attendance sign-ups
-- Attending / Tentative / Not Attending responses
-- Event editing, cancellation and reopening
-- Actual attendance recording
-- Signup-versus-attendance reporting
-- Primary and backup event organisers
-- Automatic organiser escalation
-- Role volunteering and qualification tracking
-- Early/private role-request workflows
-- Persistent reminders and scheduled actions
-- Draft/unpublished events
-- Manual or automatic scheduled publication
-- Administrative audit logging
+That design has become increasingly important as the project has grown from simple attendance buttons into event publication, organiser escalation, role-request scheduling, message recovery, reusable configuration, and concurrency-sensitive workflows.
 
-The system is designed around a PostgreSQL database as the authoritative source of state, allowing Discord messages to be rebuilt rather than treated as the application's database.
+## Current capabilities
 
----
+### Event creation and lifecycle
 
-# Key Features
+Administrators can create and manage one-off events with:
 
-## Event Management
+- event type
+- region and timezone
+- event name and description
+- start date and time
+- configurable duration
+- one or more ping roles
+- optional attendance sign-ups
+- configurable sign-up closure
+- optional detailed-response deadlines
+- optional primary and backup organisers
+- immediate, manual, or scheduled publication
+- automatic completion
+- event editing after creation
 
-Administrators can create and manage one-off events with configurable:
+Events are persistent database records before they are published.
 
-- Event type
-- Region/audience
-- Date and time
-- Timezone
-- Duration
-- Description
-- Discord notification roles
-- Attendance sign-ups
-- Signup closing deadline
-- Organisers
-- Publication timing
+Publication state is intentionally separate from event lifecycle state. An event may therefore be a real scheduled event in PostgreSQL while still being unpublished in Discord.
 
-Events can be edited after creation, with dependent scheduled actions updated where required.
+Supported lifecycle states include:
 
----
+- `scheduled`
+- `open`
+- `closed`
+- `cancelled`
+- `completed`
 
-## Optional Attendance Sign-Ups
+Cancellation is final. Later scheduled work must not revive a cancelled event or replace its final state.
 
-Events can either use normal attendance responses:
+### Publication and message recovery
 
-- **Attending**
-- **Tentative**
-- **Not Attending**
+An event can be:
 
-or operate without sign-ups entirely.
+- published immediately when created
+- created unpublished and published manually later
+- scheduled for automatic publication relative to its start time
 
-This allows the same event system to support different workflows, such as:
+The intended publication channel is snapshotted onto the event so later changes to guild defaults do not unexpectedly move an already-configured event.
 
-- Naval events
-- Linebattles
-- Competitions
-- Informational announcements
-- Events where attendance is recorded but advance signup is unnecessary
+Manual and scheduled publication use database-backed race protection. If two publication attempts overlap, only one can become authoritative.
 
-No-signup events are excluded from signup reliability calculations so they cannot create false walk-in or no-show results.
+Where the destination is still known unambiguously, deleted event attendance messages and role-request group messages can be recreated. Recovery avoids replaying role pings and uses conditional linkage so concurrent recovery attempts cannot leave multiple messages authoritative.
 
----
+If the destination channel itself is unavailable, the bot fails safely rather than guessing another location.
 
-## Draft and Scheduled Events
+### Attendance sign-ups
 
-Creating an event does not have to immediately notify the entire server.
+Events can optionally expose attendance buttons for:
 
-Events can exist internally before their normal public announcement, allowing administrators to:
+- Attending
+- Tentative
+- Not attending
 
-1. Create the event and receive its ID
-2. Configure organisers
-3. Add role options
-4. Run early/private role requests
-5. Edit the event
-6. Publish it later
-
-Publication can be:
-
-- Immediate
-- Manual
-- Automatically scheduled relative to event start
-
-For example:
-
-```text
-Event starts:
-Sunday 20:00
-
-Publish:
-1440 minutes before start
-
-Announcement:
-Saturday 20:00
-```
-
-Manual publication can still override an existing automatic schedule.
-
----
-
-## Event Organiser Workflow
-
-Events may have:
-
-- **Primary Organiser**
-- **Backup Organiser**
-- **Cover Organiser**
-
-When an event becomes public, the primary organiser receives a private confirmation request.
-
-If direct messages cannot be delivered, the request falls back to a configured private Event Administration channel.
-
-The organiser can:
-
-```text
-Confirm
-Decline
-```
-
-Response deadlines and warning periods are configurable.
-
----
-
-## Automatic Organiser Escalation
-
-If an organiser declines or does not respond in time, the system can automatically escalate responsibility:
-
-```text
-Primary Organiser
-        |
-        +---- confirms
-        |
-        +---- declines / times out
-                |
-                v
-          Backup Organiser
-                |
-                +---- confirms
-                |
-                +---- declines / times out
-                        |
-                        v
-                   Cover Request
-                        |
-                        v
-              Eligible organiser
-                 can Claim Event
-```
-
-The workflow is database-backed and survives bot restarts.
-
----
-
-## Role Requests
-
-Members can volunteer for event-specific roles.
-
-Examples for a naval event might include:
-
-```text
-Captain
-Supervisor
-2-Gun Gunner
-Gunboat Gunner
-Carpenter
-```
-
-Role requests represent **willingness**, not automatic assignment.
-
-Final selection remains with the event organiser.
-
----
-
-## Multi-Role Volunteering
-
-Members may volunteer for several roles simultaneously.
-
-For example, the same user may request:
-
-```text
-Captain
-Carpenter
-Gunboat Gunner
-```
-
-Requests are independent rather than ranked preferences.
-
-Members manage withdrawals explicitly through a private **Manage My Requests** interface, preventing an accidental second click from silently removing an existing request.
-
----
-
-## Shared Role Pools
-
-The same logical role can appear in multiple Discord request messages.
-
-For example:
-
-```text
-Early Command Interest
-    Captain
-    Supervisor
-
-Main Role Requests
-    Captain
-    Supervisor
-    Carpenter
-    Gunboat Gunner
-```
-
-Both Captain entries refer to the same underlying event-level volunteer pool.
-
-This allows early/private planning and later general volunteering without creating duplicate role systems.
-
----
-
-## Qualification Tracking
-
-Roles can optionally require qualification.
-
-Qualification may be based on configurable Discord roles and currently supports concepts such as:
-
-```text
-Qualified
-Supervision required
-Unqualified
-```
-
-For example:
-
-```text
-Captain
-
-Experienced Captain role
-    -> Qualified
-
-Trainee / Midshipman role
-    -> Supervision required
-```
-
-A member requiring supervision may still volunteer where permitted, while the organiser receives the additional context needed to make the final decision.
-
-The implementation avoids hardcoding regiment-specific Discord role names into the business logic.
-
----
-
-## Flexible Role-Request Groups
-
-Different request groups can be configured for different audiences or phases of event preparation.
-
-A group may specify:
-
-- Which event roles are available
-- Which Discord channel it appears in
-- Whether positive attendance signup is required
-- When requests close
-- An optional notification role
-
-Groups can close:
-
-- Before event start
-- At event start
-- After event start
-
-This supports workflows such as collecting command volunteers early while leaving general requests open until shortly after the event begins.
-
----
-
-## Actual Attendance
-
-Signup intention and actual attendance are stored separately.
-
-This allows the system to distinguish:
-
-```text
-What somebody planned to do
-```
-
-from:
-
-```text
-What actually happened
-```
+Sign-up state is persisted independently of the Discord message.
 
 Administrators can:
 
-- Record an event's actual attendance
-- Add individual attendees
-- Remove individual attendees
-- Compare attendance with signup responses
+- inspect event responses
+- close sign-ups
+- reopen sign-ups where lifecycle rules permit it
+- refresh the public event message
 
----
+Events can also be created with sign-ups disabled. This is useful for announcement-oriented events where attendance collection is unnecessary.
 
-## Attendance Reporting
+### Actual attendance and reliability reporting
 
-Signup-enabled events can identify situations such as:
+Signup intention and actual participation are separate concepts.
 
-- Attended as expected
-- Signed up but did not attend
-- Attended without signing up
-- Attended despite selecting Not Attending
+The bot can record actual attendance after an event and compare it with the earlier sign-up state. Administrators can:
 
-Tentative responses are retained as useful context without automatically being treated as no-shows.
+- replace an event's recorded attendance
+- add or remove individual attendees
+- compare sign-ups with actual attendance
+- inspect a member's attendance history
+- identify attendance/sign-up mismatches
 
-Historical reports can also examine an individual member's attendance/sign-up history.
+These reports are informational. A future participation-context model may provide richer distinctions between event roles, reserves, excused absence, observation, technical problems, or other legitimate cases.
 
-The reports are deliberately **informational rather than punitive**. The bot does not automatically discipline users or restrict future participation based on attendance statistics.
+### Organiser workflow
 
----
+Events can optionally have a primary and backup organiser.
 
-## Persistent Scheduling
+Organiser assignment is deliberately separate from event creation. The person who creates an event is not implicitly treated as its organiser.
 
-Important future actions are stored in PostgreSQL rather than relying on long-lived JavaScript timers.
+For unpublished events, nominated organisers remain dormant until the workflow should become active. Normal activation occurs around publication, while event-start safety deadlines prevent very late publication from starting an obsolete response window.
 
-The scheduler currently handles workflows including:
+The organiser workflow supports:
 
-```text
-Event publication
-Attendance closure
-Event completion
-Event reminders
-Organiser warnings
-Organiser timeouts
-Organiser escalation
-Role-request group closure
-```
+- primary organiser nomination
+- backup organiser nomination
+- confirmation and decline buttons
+- configurable primary and backup response periods
+- warning messages shortly before timeout
+- escalation from primary to backup
+- general cover requests when nominations fail
+- claimable organiser cover
+- a configurable safety deadline before event start
+- urgent missing-organiser notification at event start
+- cover claims after the event begins when the event still genuinely lacks an organiser
+- reconciliation of previously-posted warning messages after the organiser state changes
+- assignment history rather than destructive overwriting
 
-Scheduled actions support:
+Organiser assignment notifications can try Discord DM first and fall back to the configured private Event Administration channel.
 
-- Persistent database state
-- Action claiming
-- Processing locks
-- Stale-lock recovery
-- Retries
-- Increasing retry delays
-- Failure tracking
+The server can independently disable:
 
-This allows scheduled work to survive:
+- the organiser subsystem
+- organiser DM-first delivery
 
-- Bot restarts
-- Deployments
-- Temporary failures
-- Process interruption
+Disabling organiser functionality participates in the same database locking contract as organiser operations, preventing an in-flight organiser action from succeeding against stale feature configuration.
 
----
+### Event role requests
 
-## Reminders and Announcements
+Role requests are modelled as event-level domain data rather than message-level reactions.
 
-Administrators can send immediate event announcements or create scheduled reminders.
+An event can define logical role options such as:
 
-Reminder timing can currently be relative to:
+- Captain
+- Supervisor
+- Gunner
+- Carpenter
 
-```text
-Event start
-Signup closure
-```
+A role option may be:
 
-If a reminder remains pending until its useful reference point has already passed, it is recorded as missed rather than sending a misleading late notification.
+- open to requests
+- restricted to members with qualifying Discord roles
+- capacity-limited
 
----
+Qualification rules can distinguish between:
 
-## Audit Logging
+- fully qualified members
+- members who may perform the role with supervision
 
-Administrative activity is written to PostgreSQL.
+Qualification and notification audience are separate concepts. A Discord role used to identify qualified members does not automatically become the role pinged when a request group opens.
 
-Audit records include information such as:
+Members may request multiple independent roles for the same event.
 
-- Actor
-- Guild
-- Action
-- Outcome
-- Target
-- Timestamp
-- Structured context
+A request is an expression of willingness, not an assignment or guarantee of selection.
 
-Scheduler activity can also create audit entries.
+### Role-request groups
 
-A Discord audit channel may optionally mirror this activity, but the database remains the authoritative audit record.
+Role options can be presented through one or more request groups.
 
----
+A group controls presentation and workflow concerns such as:
 
-# Architecture
+- which event role options it displays
+- destination channel
+- optional notification role
+- whether a positive attendance signup is required
+- opening time relative to event start
+- closing time relative to event start
 
-The project follows several core architectural principles.
+The same logical role option may appear in multiple groups.
 
-## PostgreSQL is authoritative
+Those groups share the same underlying volunteer pool. A member requesting Captain through one group has requested the event-level Captain option, not a separate group-specific copy.
 
-Discord messages are treated as views of database state.
-
-Where practical, message state can therefore be rebuilt from PostgreSQL.
-
----
-
-## Publication is separate from event status
-
-An event can be valid and internally scheduled without yet being public.
-
-For example:
-
-```text
-status = scheduled
-publishedAt = null
-```
-
-represents an unpublished event being prepared by administrators.
-
----
-
-## Important scheduled work is durable
-
-Persistent scheduler records are used for important future operations rather than assuming the Node.js process will remain continuously alive.
-
----
-
-## Business logic should remain portable
-
-The project is gradually moving toward clearer separation between:
-
-```text
-Discord interaction handling
-        |
-        v
-Domain / service logic
-        |
-        +---- PostgreSQL persistence
-        |
-        +---- Discord rendering
-        |
-        +---- notifications
-        |
-        +---- scheduling
-```
-
-This is particularly important because some functionality may eventually be integrated into another existing community bot.
-
----
-
-# Technology Stack
-
-| Area              | Technology   |
-| ----------------- | ------------ |
-| Language          | TypeScript   |
-| Runtime           | Node.js      |
-| Discord API       | discord.js   |
-| Database          | PostgreSQL   |
-| ORM               | Drizzle ORM  |
-| Schema/migrations | drizzle-kit  |
-| Date/time         | Luxon        |
-| Containers        | Docker       |
-| Current hosting   | Northflank   |
-| Version control   | Git / GitHub |
-
----
-
-# Project Structure
-
-The exact structure will continue to evolve as the current refactoring phase progresses, but major areas include:
-
-```text
-src/
-├── audit/
-│   └── Administrative audit logging
-│
-├── auth/
-│   └── Event-management authorisation
-│
-├── commands/
-│   └── Discord slash-command adapters
-│
-├── db/
-│   ├── Database client
-│   └── Drizzle schema
-│
-├── events/
-│   ├── Event publication
-│   ├── Attendance message rendering
-│   ├── Attendance refresh/recovery
-│   └── Organiser presentation/notifications
-│
-├── interactions/
-│   └── Discord button interaction handlers
-│
-├── organisers/
-│   ├── Organiser lifecycle
-│   ├── Scheduling
-│   └── Escalation
-│
-├── reminders/
-│   └── Reminder scheduling
-│
-├── role-requests/
-│   ├── Role-request message rendering
-│   └── Role-request scheduling
-│
-├── scheduler/
-│   ├── Durable scheduler
-│   └── Scheduled-action maintenance
-│
-└── time/
-    └── Timezone handling
-```
-
-See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for a more detailed technical overview.
-
----
-
-# Database Model
-
-The schema includes areas such as:
-
-```text
-Discord guilds and configuration
-Event types and audiences
-Event templates
-Events
-Event publication/message links
-Ping roles
-Attendance responses
-Actual attendance
-Role options
-Role qualifications
-Role-request groups
-Role requests
-Organiser assignments
-Scheduled actions
-Reminders
-Audit logs
-```
-
-The authoritative current schema is:
-
-```text
-src/db/schema.ts
-```
-
-Database migrations are managed using Drizzle.
-
----
-
-# Timezone Handling
-
-Event scheduling uses IANA timezone identifiers such as:
-
-```text
-Europe/London
-America/New_York
-America/Chicago
-America/Los_Angeles
-```
-
-Absolute event timestamps remain authoritative in the database.
-
-The event timezone is retained for organiser-facing editing and interpretation.
-
-Discord timestamps are used for member-facing displays so users normally see event times in their own local timezone.
-
-Ambiguous local times around daylight-saving clock transitions are rejected rather than guessed.
-
----
-
-# Discord Commands
-
-The exact command surface is still evolving.
-
-Representative administrative commands currently include:
-
-## Server configuration
-
-```text
-/setup initialise
-/setup configure
-/setup regions
-/setup logging
-/setup logging-disable
-/setup status
-```
-
-## Event management
-
-```text
-/event create
-/event list
-/event edit
-/event publish
-/event close
-/event reopen
-/event cancel
-/event refresh
-/event responses
-```
-
-## Organisers
-
-```text
-/event organiser-set
-/event organiser-clear
-```
-
-## Role requests
-
-```text
-/event role-option-add
-/event role-option-list
-/event role-group-post
-/event role-group-list
-/event role-group-close
-/event role-requests
-```
-
-## Reminders / announcements
-
-```text
-/event reminder-add
-/event reminder-edit
-/event reminder-list
-/event reminder-remove
-/event announce
-```
-
-## Actual attendance
-
-```text
-/attendance record
-/attendance add
-/attendance remove
-/attendance compare
-/attendance user
-/attendance issues
-```
-
-## Audit
-
-```text
-/audit recent
-```
-
-> The `/event` command is becoming large and is likely to be reorganised before additional major command groups are added.
-
----
-
-# Documentation
-
-More detailed project, administrator and testing documentation is available in [`docs/`](./docs/).
-
-### [`ARCHITECTURE.md`](./docs/ARCHITECTURE.md)
-
-Describes:
-
-- Current system architecture
-- Major subsystems
-- Database/state model
-- Scheduler
-- Publication
-- Attendance
-- Organisers
-- Role requests
-- Portability goals
-- Known structural pressure points
-
-### [`DECISIONS.md`](./docs/DECISIONS.md)
-
-Records important domain and architectural decisions which may not be obvious from the implementation.
+Role requests are independent and multi-select rather than toggle-based. Explicit withdrawal is handled separately so an accidental repeat click cannot silently erase an existing request.
+
+Attendance availability and role-request willingness are also distinct. For example, a retained role request can become unavailable while the member is marked Not Attending and become available again if their attendance state returns to an eligible value.
+
+### Scheduled role-request groups
+
+Preset-derived role-request groups can open and close automatically relative to event start.
+
+The durable scheduler stores separate opening and closing actions.
+
+Administrative lifecycle output distinguishes between:
+
+- Planned
+- Pending publication
+- Open
+- Closed
+
+Changing an event's start time recalculates applicable future role-request windows.
+
+Important distinctions are preserved:
+
+- a planned group with an event-relative opening rule is rescheduled
+- an already-published group is not artificially reopened
+- a manually-created immediate group does not acquire a synthetic opening schedule
+- closed groups remain closed
+- authoritative rescheduling resets stale retry state
+
+Discord publication performs its own current-state and permission checks. Persistent database configuration is not discarded merely because Discord publication temporarily fails.
+
+### Reusable role-request presets
+
+Guild administrators can create reusable role-request presets for event formats that repeatedly use the same role-request structure.
+
+A preset can contain:
+
+- reusable logical role options
+- request restrictions
+- capacities
+- qualification-role snapshots
+- supervision-required qualification rules
+- multiple request groups
+- ordered option mappings
+- optional fixed channels
+- apply-time default-channel resolution
+- optional notification roles
+- signup requirements
+- event-relative opening and closing rules
+
+Current preset commands support:
+
+- creating a preset
+- listing presets
+- inspecting a complete preset definition
+- adding role options
+- adding request groups
+- applying a preset to an existing event
+- activating or deactivating a preset
+- activating or deactivating individual preset role options
+- activating or deactivating individual preset request groups
+
+Applying a preset creates an **event-level snapshot**.
+
+After application, runtime behaviour does not depend on the source preset. Later preset changes therefore do not modify events that already received that preset.
+
+This allows each event to remain independently configurable and prevents reusable source configuration from becoming a live dependency for historical or already-scheduled events.
+
+Preset application also creates the required durable role-request opening and closing actions in the same database transaction as the event-level snapshot.
+
+Lifecycle controls are non-destructive:
+
+- deactivating a preset prevents future application but preserves its children
+- deactivating an option preserves qualification rows and group mappings
+- deactivating a group preserves its option mappings and configuration
+- reactivation restores the stored configuration
+- existing event snapshots are unaffected
+
+Deactivating an option can intentionally leave an active group with no active mapped options. The bot warns the administrator rather than silently changing neighbouring configuration. Preset application remains the final authoritative validator and rejects an unusable active configuration.
+
+Editing existing preset fields and mappings is the next planned preset-management phase and is not yet exposed as a complete administrator workflow.
+
+### Announcements and reminders
+
+Administrators can send immediate event announcements and configure persistent reminders.
+
+Reminders can be scheduled relative to:
+
+- event start
+- signup close
+
+Multiple reminders can exist for the same event.
+
+Pending reminder timing is recalculated when relevant event timing changes. Reminders that have become too late to be useful can be marked missed rather than delivered out of context.
+
+Reminder definitions are stored independently from Discord messages and are executed by the durable scheduler.
+
+### Audit trail
+
+Administrative activity is recorded in PostgreSQL.
+
+The audit system records structured information such as:
+
+- guild
+- actor
+- action
+- outcome
+- target
+- details
+- timestamp
+
+An optional Discord log channel can mirror useful administrative activity, but the database audit trail remains authoritative.
+
+The `/audit recent` command provides a lightweight administrative view of recent actions.
+
+## Reliability and architecture highlights
+
+### PostgreSQL is authoritative
+
+Discord state is treated as external and fallible.
+
+When database state and Discord presentation disagree, the bot resolves behaviour from the database rather than assuming the visible message represents the current domain state.
+
+### Durable scheduled work
+
+Scheduled work is stored in PostgreSQL rather than only in process memory.
+
+The scheduler currently coordinates work including:
+
+- scheduled event publication
+- attendance closure
+- automatic event completion
+- event reminders
+- organiser warnings
+- organiser timeouts
+- organiser cover escalation
+- organiser safety deadlines
+- missing-organiser-at-start checks
+- role-request group opening
+- role-request group closing
+
+Scheduler processing includes:
+
+- persistent action state
+- action claiming
+- processing locks
+- stale-lock recovery
+- bounded retry with backoff
+- terminal failure handling
+- cancellation
+- idempotent rescheduling
+- stale-worker completion fencing
+
+A worker that loses ownership of an action cannot later overwrite a newer retry or authoritative reschedule with stale completion state.
+
+### Database-first concurrency control
+
+Race-sensitive workflows use PostgreSQL locking and conditional updates rather than relying on Discord timing.
 
 Examples include:
 
-- Role requests are event-level rather than message-level
-- Role requests are multi-select
-- Qualification and notification audience are separate
-- Event creation and public publication are separate lifecycle concepts
-- Organiser response timing begins at publication
-- Attendance discrepancies are informational rather than punitive
+- manual publication racing scheduled publication
+- organiser confirmation racing timeout
+- organiser cover claims
+- event cancellation racing scheduled work
+- deleted-message recovery
+- role-request publication
+- preset application racing preset mutation
 
-### [`ROADMAP.md`](./docs/ROADMAP.md)
+The project favours deterministic database ownership boundaries and authoritative re-checks over timing assumptions.
 
-Contains:
+### Discord side effects are deliberately ordered
 
-- Refactoring priorities
-- Reliability work
-- Planned template support
-- Participation-aware attendance
-- Feature flags
-- Role-request improvements
-- Portal/integration ideas
-- Future testing requirements
+External calls cannot participate in PostgreSQL transactions.
 
-### [`CURRENT-WORK.md`](./docs/CURRENT-WORK.md)
+The code therefore separates authoritative state transitions from Discord side effects and, where necessary, re-checks state after returning from Discord.
 
-Provides a development handoff describing:
+This is particularly important for publication, organiser notifications, recovery, and role-request messages.
 
-- The current implementation checkpoint
-- Recently completed features
-- Known technical debt
-- Immediate priorities
-- Important behaviours which must survive refactoring
+### Snapshot semantics
 
-### [`ADMIN-GUIDE.md`](./docs/ADMIN-GUIDE.md)
+Configuration that must remain stable for an existing event is generally copied into event-level state.
 
-Provides practical guidance for server administrators using the bot.
+Examples include:
 
-Covers:
+- publication destination
+- ping-role snapshots
+- organiser assignments
+- applied role-request presets
+- role qualification snapshots
+- role-request group destinations and notification metadata
 
-- Initial server setup and configuration
-- Event creation and publication options
-- Event editing, cancellation and refresh workflows
-- Attendance and signup management
-- Organiser assignment and escalation controls
-- Role-option and role-request group management
-- Reminders and announcements
-- Actual attendance recording and reporting
-- Audit commands
-- Typical command usage and workflow examples
+This keeps historical and already-configured events independent from later changes to reusable configuration.
 
-### [`TESTING-GUIDE.md`](./docs/TESTING-GUIDE.md)
+### Timezones are explicit
 
-Provides a manual testing and public-test workflow for validating bot behaviour in Discord.
+Event input uses named IANA timezones.
 
-Covers:
+Ambiguous or invalid local times around daylight-saving transitions are rejected rather than silently interpreted.
 
-- The expected event lifecycle from creation through completion
-- Attendance signup and closure behaviour
-- Recording and correcting actual attendance
-- Signup-versus-attendance comparison
-- Organiser and role-request workflows
-- Scheduled actions and reminder behaviour
-- Important regression scenarios
-- What information to include when reporting bugs
-- Use of event IDs and audit records when diagnosing problems
+The authoritative event start is stored as an absolute timestamp while retaining the event timezone needed for display and editing.
 
----
+## Technology stack
 
-# Development Setup
+| Area                         | Technology                       |
+| ---------------------------- | -------------------------------- |
+| Runtime                      | Node.js                          |
+| Language                     | TypeScript                       |
+| Discord                      | discord.js 14                    |
+| Database                     | PostgreSQL                       |
+| ORM and schema               | Drizzle ORM                      |
+| Migrations                   | drizzle-kit and Drizzle migrator |
+| Date and timezone handling   | Luxon                            |
+| Unit and integration testing | Vitest                           |
+| Database integration testing | Testcontainers                   |
+| Coverage                     | V8 coverage through Vitest       |
+| Local database               | PostgreSQL 17 in Docker Compose  |
+| Container deployment         | Docker                           |
 
-The project uses separate development infrastructure so experimental code does not operate against the public/testing Discord environment.
+The production container currently uses Node 22.
 
-A typical development environment requires:
+The exact dependency versions are defined in `package.json` and the lockfile.
 
-- Node.js
-- npm
-- PostgreSQL
-- A Discord application/bot
-- A development Discord server
-- Appropriate environment variables
+## Testing
 
----
+The project has an automated unit and PostgreSQL-backed integration test suite.
 
-## 1. Clone the repository
+Integration tests use disposable real PostgreSQL instances through Testcontainers rather than replacing database behaviour with an in-memory approximation.
+
+This matters because several important correctness properties depend on PostgreSQL itself, including:
+
+- row locking
+- transactions
+- uniqueness constraints
+- migration behaviour
+- concurrency ordering
+- scheduler claims
+- race resolution
+
+The normal full verification gate is:
 
 ```bash
-git clone <repository-url>
-cd <repository-directory>
+npm run test:unit
+npm run test:integration
+npm run test:coverage
+npm run typecheck
+npm run typecheck:test
 ```
 
----
+During development, focused tests are run first for faster feedback.
 
-## 2. Install dependencies
+The project follows a regression-first approach for bugs and concurrency failures:
+
+1. reproduce the problem
+2. add a regression test that fails for the intended reason
+3. implement the narrow production correction
+4. add positive or companion coverage where useful
+5. run the affected subsystem tests
+6. run the complete verification gate before the work is considered ready
+
+Failing regression code is normally demonstrated locally rather than committed as a permanent red revision.
+
+Concurrency tests prefer deterministic database locks and controlled barriers over arbitrary sleeps.
+
+Manual Discord smoke testing is still used when behaviour genuinely depends on Discord itself, particularly:
+
+- slash-command registration
+- Discord channel and role selectors
+- permissions
+- mentions
+- DMs and fallback delivery
+- deleted-message behaviour
+- end-to-end button workflows
+
+See [docs/TESTING-GUIDE.md](docs/TESTING-GUIDE.md) for the complete testing workflow.
+
+## Running locally
+
+### Prerequisites
+
+You will need:
+
+- Node.js and npm
+- Docker with Docker Compose support
+- a Discord bot token
+- a Discord server where the bot can be installed and tested
+
+The repository includes a local PostgreSQL 17 Compose service.
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/admiraldonkey/signup-bot.git
+cd signup-bot
+```
+
+### 2. Install dependencies
 
 ```bash
 npm install
 ```
 
----
+### 3. Create the environment file
 
-## 3. Configure environment variables
+Copy the example:
 
-Create a local environment file based on the supplied example configuration, where available.
-
-Typical values include:
-
-```text
-Discord bot token
-Discord application/client ID
-Development guild ID
-PostgreSQL connection string
-Database TLS configuration
+```bash
+cp .env.example .env
 ```
 
-Never commit real secrets.
+The current configuration is:
 
----
-
-## 4. Start PostgreSQL
-
-A local PostgreSQL instance is required.
-
-Docker may be used for development if preferred.
-
-The development database should remain separate from any public or production/testing database.
-
----
-
-## 5. Apply database migrations
-
-Apply the repository's Drizzle migrations before starting the bot.
-
-Check the scripts in `package.json` for the current project commands, as development scripts may evolve.
-
----
-
-## 6. Register Discord commands
-
-Slash commands must be registered against the intended development application/guild.
-
-Guild-specific registration is recommended while developing because changes propagate more quickly than global command registration.
-
----
-
-## 7. Start the bot
-
-Run the current development/start script defined in:
-
-```text
-package.json
+```dotenv
+DISCORD_TOKEN=
+DATABASE_URL=postgresql://holdfast_bot:local_development_only@127.0.0.1:5432/holdfast_events
+DATABASE_TLS=false
 ```
 
-The bot should connect to both Discord and PostgreSQL before event-management functionality is tested.
+Set `DISCORD_TOKEN` to the token for your development bot.
 
----
+The included database URL matches the local Docker Compose configuration.
 
-# Environment and Secrets
+`DATABASE_TLS=false` is appropriate for the included local database. Hosted PostgreSQL environments can enable TLS where required.
 
-Secrets must be stored outside source control.
+Do not commit a populated `.env` file.
 
-Do not commit:
+### 4. Start PostgreSQL
 
-```text
-.env
-Discord tokens
-database passwords
-API credentials
-webhook secrets
-hosting credentials
+```bash
+docker compose up -d database
 ```
 
-An `.env.example` containing placeholder configuration is safe and useful.
+The database is exposed only on local loopback by the supplied Compose configuration.
 
-If a secret is accidentally committed, removing it from the latest file is **not sufficient** because it may remain in Git history.
+### 5. Start the bot
 
-Rotate the credential and remove it from repository history before making the repository public.
-
----
-
-# Testing
-
-Changes should be tested against the dedicated development environment before being deployed to community testers.
-
-At minimum, substantial changes should include:
-
-1. TypeScript/typechecking
-2. Automated test suite
-3. Database migration verification where applicable
-4. Bot startup against the development database
-5. Targeted Discord interaction tests
-6. Scheduler/lifecycle testing where relevant
-
-Particular care is required around asynchronous lifecycle transitions such as:
-
-```text
-Scheduled publication
-Manual publication
-Cancellation
-Attendance closure
-Event completion
-Organiser timeout
-Organiser escalation
-Role-request closure
+```bash
+npm run dev
 ```
 
----
+On startup the application:
 
-# Example Event Workflow
+1. checks and applies versioned database migrations
+2. logs into Discord
+3. registers the current guild command definitions in connected guilds
+4. starts the durable event scheduler
 
-A more advanced event can follow a preparation workflow such as:
+There is no separate application-ID or development-guild environment variable required by the current startup implementation.
 
-```text
-Create unpublished event
-        |
-        v
-Assign primary / backup organiser
-        |
-        v
-Configure event role options
-        |
-        v
-Open private early command requests
-        |
-        v
-Edit/finalise event details
-        |
-        v
-Automatically publish public event message
-        |
-        v
-Members submit attendance responses
-        |
-        v
-Open general role requests
-        |
-        v
-Send reminders
-        |
-        v
-Attendance closes
-        |
-        v
-Run event
-        |
-        v
-Record actual attendance
-        |
-        v
-Compare signup intention with attendance
+### Production-style build
+
+Compile TypeScript:
+
+```bash
+npm run build
 ```
 
-Simpler events can skip most of these stages.
+Run the compiled application:
 
----
-
-# Current Development Priorities
-
-The next phase of development is intentionally focused on **quality and modularity**, not merely adding more commands.
-
-Priorities include:
-
-- Repository-wide architecture review
-- Refactoring large command handlers
-- Extracting reusable service/domain logic
-- Improving automated tests
-- Reviewing scheduler race conditions
-- Improving error recovery
-- Strengthening comments/documentation
-- Adding server-level feature flags
-- Improving portability to another bot
-- Participation-aware attendance records
-- Confirmed-organiser unavailability handling
-- Preparing for recurring event templates
-
-See [`docs/ROADMAP.md`](./docs/ROADMAP.md) for the full roadmap.
-
----
-
-# Planned Recurring Event Templates
-
-Recurring event templates are a major planned feature.
-
-Rather than publishing directly from a template, the intended architecture is:
-
-```text
-Recurring template
-        |
-        v
-Generate unpublished event occurrence
-        |
-        +---- organiser preparation
-        +---- early role requests
-        +---- admin edits
-        |
-        v
-Scheduled public publication
-        |
-        v
-Normal event lifecycle
+```bash
+npm start
 ```
 
-This allows recurring automation without removing administrator control.
+## Initial Discord setup
 
----
+The bot must be initialised and configured for each Discord guild before event-management commands can be used.
 
-# Potential Integration With Another Community Bot
-
-Another bot already used by the community provides:
-
-- Automatic actual attendance recording
-- PostgreSQL-backed event data
-- Statistics/reporting
-- Web portal functionality
-
-It also uses:
-
-- TypeScript
-- discord.js
-- PostgreSQL
-
-There is therefore potential for useful functionality from this project to eventually be integrated into that existing system.
-
-This has influenced the architecture of the project.
-
-Major subsystems should increasingly be portable rather than tightly coupled to one command tree or Discord message format.
-
-Likely high-value reusable areas include:
+The administrator-facing workflow begins with:
 
 ```text
-Organiser assignment and escalation
-Durable scheduling
-Event publication lifecycle
-Role-request domain logic
-Qualification handling
-Attendance comparison
-Audit behaviour
+/setup initialise
 ```
 
-Database migrations should not simply be copied between projects. Domain concepts and identifiers must first be mapped to the destination system.
+and then:
 
----
+```text
+/setup configure
+```
 
-# Contributing
+Configuration includes the server's event administration role and default attendance and role-request channels.
 
-The project is currently primarily developed for a specific community, but code review, bug reports and technically grounded suggestions are welcome.
+Optional organiser configuration includes:
 
-Before making substantial changes, please read:
+- organiser role
+- private Event Administration channel
+- organiser response timings
+- warning timing
+- general-cover safety timing
 
-1. [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)
-2. [`docs/DECISIONS.md`](./docs/DECISIONS.md)
-3. [`docs/ROADMAP.md`](./docs/ROADMAP.md)
-4. [`docs/CURRENT-WORK.md`](./docs/CURRENT-WORK.md)
+Additional setup commands configure regions, audit logging, feature controls, and status inspection.
 
-Some apparently unusual behaviours are deliberate domain decisions.
+See [docs/ADMIN-GUIDE.md](docs/ADMIN-GUIDE.md) for current command-level guidance.
 
-For example:
+## Command overview
 
-- Role requests are multi-select
-- The same role shown in multiple groups shares one request pool
-- A role request is not an allocation
-- Organiser countdown begins on publication
-- Publication and event status are separate
-- Attendance reports are informational rather than punitive
+The bot currently registers these top-level slash commands:
 
-Please avoid changing these behaviours accidentally while refactoring adjacent code.
+| Command        | Purpose                                                          |
+| -------------- | ---------------------------------------------------------------- |
+| `/ping`        | Check whether the bot is responding                              |
+| `/dbcheck`     | Administrative PostgreSQL connectivity check                     |
+| `/setup`       | Initialise and configure guild event management                  |
+| `/event`       | Create, publish, edit, inspect, and administer events            |
+| `/role-preset` | Create, inspect, apply, and manage reusable role-request presets |
+| `/attendance`  | Record and analyse actual attendance                             |
+| `/audit`       | Inspect recent administrative audit activity                     |
 
----
+`/event` contains the majority of event-specific administration, including attendance response management, organisers, event-level role requests, reminders, announcements, publication, and lifecycle changes.
 
-# Development Guidelines
+`/role-preset` manages reusable source configuration. Applying a preset copies its relevant configuration into an ordinary event.
 
-When contributing:
+The complete current command reference belongs in [docs/ADMIN-GUIDE.md](docs/ADMIN-GUIDE.md), not in this README.
 
-- Use TypeScript types rather than unnecessary `any`
-- Keep Discord handlers thin where practical
-- Keep database state authoritative
-- Use persistent scheduling for important future work
-- Preserve auditability
-- Validate guild ownership on administrative operations
-- Avoid hidden/destructive behaviour
-- Avoid hardcoding server-specific Discord role names
-- Prefer incremental refactoring over unnecessary rewrites
-- Add tests for lifecycle-sensitive behaviour
-- Keep secrets out of source control
+## Database and migrations
 
----
+The schema is defined in:
 
-# Security Considerations
+```text
+src/db/schema.ts
+```
 
-The bot is intended to operate in sizeable Discord communities, so administrative boundaries matter.
+Versioned migrations live in:
 
-Current/future security principles include:
+```text
+drizzle/
+```
 
-- Runtime Event Admin authorisation
-- Guild ownership checks
-- Restricted Discord mention handling
-- Least-privilege bot permissions
-- PostgreSQL constraints for important invariants
-- Auditing of administrative actions
-- Environment-based secrets
-- Private administrative fallback channels
-- Careful authentication and authorisation for any future portal
+After an intentional schema change, generate a migration with:
 
-Security issues should not be posted publicly if doing so would expose exploitable details against an active deployment.
+```bash
+npm run db:generate
+```
 
----
+Generated SQL should be reviewed before it is applied.
 
-# Privacy
+The full migration chain is exercised by PostgreSQL-backed integration testing, and migrations are applied automatically during normal application startup.
 
-The bot stores information associated with Discord users, including attendance responses and role volunteering.
+Applied migrations should be treated as immutable history. A new correction should normally be represented by a new migration rather than rewriting a migration that may already exist in another environment.
 
-The application should only collect information useful to event administration.
+PostgreSQL identifier length also matters when introducing long generated constraint names. Explicit constraint names should be used where generated names risk colliding after PostgreSQL's identifier truncation.
 
-Attendance analytics are intended to support human decision-making rather than automated punishment.
+## Repository structure
 
-Future development should formalise:
+```text
+.
+├── docs/
+├── drizzle/
+├── src/
+│   ├── attendance/
+│   ├── audit/
+│   ├── auth/
+│   ├── commands/
+│   ├── db/
+│   ├── discord/
+│   ├── events/
+│   ├── interactions/
+│   ├── organisers/
+│   ├── reminders/
+│   ├── role-requests/
+│   ├── scheduler/
+│   ├── time/
+│   └── index.ts
+├── tests/
+│   ├── integration/
+│   ├── support/
+│   └── unit/
+├── compose.yaml
+├── Dockerfile
+├── package.json
+└── README.md
+```
 
-- Data-retention policies
-- Member data deletion
-- Historical reporting visibility
-- Portal permissions
-- Export permissions
-- Audit retention
+The directory structure reflects domain and infrastructure boundaries rather than putting all Discord interaction logic into one command file.
 
----
+Not every subsystem has reached its final shape. Some older command modules remain larger than ideal, and reducing unnecessary coupling remains an ongoing goal.
 
-# Deployment
+## Development principles
 
-The current public/testing deployment is containerised and hosted on **Northflank** with PostgreSQL.
+The project currently follows several recurring engineering principles.
 
-The application is not architecturally tied to Northflank and should be deployable to other suitable Node.js/container hosting environments.
+### Preserve domain behaviour over message behaviour
 
-A persistent PostgreSQL database is required.
+A Discord message should not define whether an event, signup, organiser assignment, or role request exists.
 
----
+### Prefer explicit state
 
-# Project Motivation
+Important transitions should be represented directly in persistent data rather than inferred from the presence or absence of a message.
 
-The original workflow relied heavily on Discord messages and manual coordination.
+### Re-check after races
 
-Typical problems included:
+An operation that was valid before waiting on a lock or external API call may no longer be valid afterwards.
 
-- People attending without signing up
-- Signups not accurately reflecting actual turnout
-- Organisers needing to manually chase volunteers
-- Specialist event roles being coordinated separately
-- Reminder messages requiring manual timing
-- Difficulty preparing events privately before announcing them
-- Historical information being scattered across Discord messages
+### Keep scheduled work durable
 
-Rather than trying to replace Discord, the project aims to make those workflows more structured while keeping Discord as the familiar interface members already use.
+A process restart should not erase future publication, reminder, escalation, closure, or completion work.
 
----
+### Keep cancellation final
 
-# What This Project Demonstrates
+Old scheduled work must become harmless once an event is cancelled.
 
-From a software engineering perspective, the project includes practical examples of:
+### Use narrow service boundaries
 
-- TypeScript application architecture
-- Discord API integration
-- PostgreSQL relational modelling
-- Drizzle ORM
-- Database migrations
-- Persistent job scheduling
-- Retry/recovery strategies
-- Race-condition handling
-- Role-based authorisation
-- State-machine-like lifecycle management
-- Timezone-aware scheduling
-- Audit logging
-- Domain modelling
-- Incremental feature development
-- Refactoring toward reusable service boundaries
-- Designing software around real user/community requirements
+Command handlers should coordinate Discord input and output.
 
-The project is developed against genuine community workflows rather than as a purely hypothetical demonstration application.
+Reusable domain and persistence behaviour should increasingly live in services that can be exercised directly by integration tests and potentially reused from another interface.
 
----
+### Avoid speculative abstraction
 
-# Disclaimer
+Portability matters, but abstractions are introduced when they improve real boundaries and clarity rather than merely making the code look more framework-like.
 
-This is a community developed project and is not an official **Holdfast: Nations at War** product or service.
+### Treat tests as behavioural documentation
 
-Game and product names remain the property of their respective owners.
+Regression tests are used to preserve non-obvious race handling and domain invariants, particularly where a superficially simpler refactor could reintroduce an earlier bug.
 
----
+## Current development status
 
-# Licence
+The following substantial areas are implemented:
 
-The repository licence should be consulted before reusing or redistributing the project.
+- persistent event lifecycle
+- immediate and scheduled publication
+- optional attendance sign-ups
+- actual attendance tracking and comparison
+- organiser nomination and escalation
+- organiser feature controls
+- organiser safety deadlines and cover workflow
+- event reminders and announcements
+- event-level role requests
+- qualification and supervision rules
+- durable role-request opening and closing
+- core Discord message recovery
+- reusable role-request presets
+- preset application with snapshot semantics
+- reversible preset, option, and group lifecycle controls
+- PostgreSQL-backed audit logging
+- durable scheduled actions
+- automated unit and integration testing
 
-If no licence has yet been added, source availability should **not** be interpreted as automatically granting permission to reuse, modify or redistribute the code.
+### Immediate development direction
+
+The next planned area is **editing existing reusable role-request presets**.
+
+The current preset subsystem can create and deactivate or reactivate configuration, but a complete administrator workflow for editing existing preset metadata, option definitions, qualification rules, group settings, and group-option mappings is not yet implemented.
+
+### Event templates
+
+Event templates are planned after preset administration is complete.
+
+There is early template-related schema scaffolding in the repository, but this should not be mistaken for a complete template feature.
+
+The intended direction is for a template to provide reusable defaults such as:
+
+- event type
+- region
+- timezone
+- duration
+- publication timing
+- signup behaviour
+- ping roles
+- organiser defaults
+- role-request configuration
+- reminder defaults
+
+Generated occurrences should become ordinary independent events.
+
+Template-derived configuration should be snapshotted so an administrator can customise an individual occurrence without changing the template or neighbouring events.
+
+Later template edits should affect newly generated occurrences rather than silently rewriting events that already exist, unless a separate explicit propagation feature is designed in the future.
+
+### Recurring events
+
+Recurring event generation is also planned rather than currently available.
+
+The current design direction includes:
+
+- standards-based recurrence representation, likely RFC 5545 compatible rules
+- a rolling future-generation horizon rather than unbounded event creation
+- immutable occurrence identity separate from mutable event start time
+- ordinary event rows for generated occurrences
+- independent editing and cancellation of individual occurrences
+
+These decisions are architectural direction, not claims of implemented functionality.
+
+## Portability
+
+Although the project originated around one Holdfast community, the architecture is deliberately moving towards reusable event-management boundaries.
+
+Potentially portable areas include:
+
+- event lifecycle services
+- attendance state
+- organiser escalation
+- role-request modelling
+- reusable role-request presets
+- reminder scheduling
+- durable scheduled actions
+- audit concepts
+
+Portability does **not** mean copying this repository's migrations or database schema blindly into another bot.
+
+A future integration should map:
+
+- guild identity
+- user identity
+- event identity
+- event lifecycle
+- permissions
+- destination channels
+- existing community data
+
+into the host application's model and create migrations for that destination deliberately.
+
+Discord remains the primary interaction surface for this project. A future web or community portal could consume the same underlying domain services where collaboration makes that worthwhile.
+
+## Deployment
+
+The application is containerised and designed to run as a persistent Node.js service with PostgreSQL.
+
+The current project deployment uses Northflank with PostgreSQL-backed persistent state.
+
+The durable scheduler does not depend on one uninterrupted process lifetime for its future work. Scheduled actions remain in PostgreSQL and can be recovered after process restart according to their stored state and locking rules.
+
+Deployment credentials and environment-specific secrets do not belong in the repository.
+
+## Security and privacy considerations
+
+The bot stores operational Discord identifiers and event-management data required for its workflows.
+
+The design avoids treating transient Discord message content as the sole source of truth.
+
+Administrative operations use configured Discord permissions and event-administration roles.
+
+Audit information is intended for administrative accountability and debugging rather than public exposure.
+
+Secrets such as:
+
+- Discord bot tokens
+- database credentials
+- hosted service credentials
+
+must be supplied through environment configuration and must not be committed.
+
+## Documentation
+
+More detailed project documentation is available in:
+
+- [Architecture](docs/ARCHITECTURE.md)  
+  Current subsystem design, data flow, persistence, scheduling, concurrency, and structural boundaries.
+
+- [Decisions](docs/DECISIONS.md)  
+  Durable product and engineering decisions, including the reasons behind non-obvious invariants.
+
+- [Roadmap](docs/ROADMAP.md)  
+  Planned work separated from functionality that already exists.
+
+- [Current Work](docs/CURRENT-WORK.md)  
+  The current development checkpoint and handoff context.
+
+- [Testing Guide](docs/TESTING-GUIDE.md)  
+  Automated and manual testing workflow, regression practices, PostgreSQL integration tests, and verification gates.
+
+- [Administrator Guide](docs/ADMIN-GUIDE.md)  
+  Current Discord setup, commands, workflows, and administrator-facing behaviour.
+
+When documentation and implementation appear to disagree, `docs/DECISIONS.md` should be checked before simplifying behaviour. Some apparently unusual implementation choices exist specifically to preserve concurrency, recovery, or domain guarantees established by earlier regressions.
+
+## Licence
+
+The package is currently marked:
+
+```text
+UNLICENSED
+```
+
+Public repository visibility does not itself grant a licence to copy, modify, or redistribute the software.
+
+A formal open-source licence can be added later if the project owner chooses to make those permissions explicit.
