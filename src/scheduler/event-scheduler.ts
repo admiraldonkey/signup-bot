@@ -1810,8 +1810,9 @@ async function executeRoleRequestGroupOpen(
 
       eventName: events.name,
 
-      guildDatabaseId: events.ownerGuildId,
+      closesAt: roleRequestGroups.closesAt,
 
+      guildDatabaseId: events.ownerGuildId,
       discordGuildId: discordGuilds.discordGuildId,
     })
     .from(roleRequestGroups)
@@ -1915,6 +1916,70 @@ async function executeRoleRequestGroupOpen(
 
       console.log(
         `Rescheduled role-request group ${group.id} opening to ${result.opensAt.toISOString()}.`,
+      );
+
+      return;
+    }
+
+    /*
+     * Waiting for the parent event to be published is deliberate deferral,
+     * not a Discord delivery failure.
+     *
+     * Park this action at the request group's closing boundary. Successful
+     * event publication will wake it earlier if the window is still valid.
+     *
+     * If the event is never published, the action naturally wakes at closesAt
+     * and the publication service classifies the group as window-expired.
+     *
+     * Reset attemptCount because waiting for administrator/publication state
+     * must not consume the scheduler's delivery retry budget.
+     */
+    if (result.reason === "awaiting-event-publication") {
+      const now = new Date();
+
+      await db
+        .update(scheduledActions)
+        .set({
+          status: "pending",
+
+          dueAt: group.closesAt,
+
+          attemptCount: 0,
+
+          lockedAt: null,
+
+          completedAt: null,
+
+          lastError: null,
+
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(scheduledActions.id, actionId),
+
+            eq(scheduledActions.eventId, eventId),
+
+            eq(
+              scheduledActions.actionKey,
+              makeRoleRequestGroupOpenActionKey(groupId),
+            ),
+
+            /*
+             * Preserve scheduler ownership fencing.
+             *
+             * If publication, stale recovery or another authoritative
+             * reschedule has already replaced this attempt, this worker must
+             * not overwrite the newer state.
+             */
+            eq(scheduledActions.status, "processing"),
+
+            eq(scheduledActions.attemptCount, attemptCount),
+          ),
+        );
+
+      console.log(
+        `Deferred role-request group ${group.id} opening until event publication or ${group.closesAt.toISOString()}.`,
       );
 
       return;

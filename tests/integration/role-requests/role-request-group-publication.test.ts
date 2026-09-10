@@ -315,6 +315,306 @@ describe("role-request group publication service", () => {
     );
   });
 
+  it("does not automatically publish a due group while its event is held for manual publication", async () => {
+    // Arrange
+    const fixture = await createPlannedRoleRequestGroup(pool);
+
+    /*
+     * An unpublished event with no publication offset is deliberately being
+     * held for manual publication.
+     *
+     * Scheduled role-request groups must not independently expose part of that
+     * event merely because their opening time has arrived.
+     */
+    await pool.query(
+      `
+      UPDATE "events"
+      SET
+        "published_at" = NULL,
+        "publish_minutes_before_start" = NULL,
+        "status" = 'scheduled',
+        "updated_at" = NOW()
+      WHERE
+        "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    const sentMessage = {
+      id: FIRST_MESSAGE_ID,
+
+      url: `https://discord.test/messages/${FIRST_MESSAGE_ID}`,
+
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const sendMessage = vi.fn().mockResolvedValue(sentMessage);
+
+    const guild = createGuild({
+      sendMessage,
+    });
+
+    // Act
+    const result = await publishRoleRequestGroup(guild, fixture.groupId);
+
+    // Assert
+    expect(result).toEqual({
+      ok: false,
+
+      reason: "awaiting-event-publication",
+
+      eventId: fixture.eventId,
+
+      groupId: fixture.groupId,
+    });
+
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    await expectGroupUnlinked(pool, fixture.groupId);
+  });
+
+  it("does not automatically publish a due group when scheduled event publication is already overdue", async () => {
+    // Arrange
+    const fixture = await createPlannedRoleRequestGroup(pool);
+
+    /*
+     * The fixture starts two hours from now.
+     *
+     * A publication offset of 180 minutes therefore means the event itself
+     * should already have been published roughly one hour ago.
+     *
+     * If that publication has not succeeded, later role-request groups should
+     * not leak out independently.
+     */
+    await pool.query(
+      `
+      UPDATE "events"
+      SET
+        "published_at" = NULL,
+        "publish_minutes_before_start" = 180,
+        "status" = 'scheduled',
+        "updated_at" = NOW()
+      WHERE
+        "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    const sentMessage = {
+      id: FIRST_MESSAGE_ID,
+
+      url: `https://discord.test/messages/${FIRST_MESSAGE_ID}`,
+
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const sendMessage = vi.fn().mockResolvedValue(sentMessage);
+
+    const guild = createGuild({
+      sendMessage,
+    });
+
+    // Act
+    const result = await publishRoleRequestGroup(guild, fixture.groupId);
+
+    // Assert
+    expect(result).toEqual({
+      ok: false,
+
+      reason: "awaiting-event-publication",
+
+      eventId: fixture.eventId,
+
+      groupId: fixture.groupId,
+    });
+
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    await expectGroupUnlinked(pool, fixture.groupId);
+  });
+
+  it("allows a due group to publish before an explicitly scheduled future event publication", async () => {
+    // Arrange
+    const fixture = await createPlannedRoleRequestGroup(pool);
+
+    /*
+     * The fixture starts two hours from now.
+     *
+     * Publishing 60 minutes before start means the main event publication is
+     * still roughly one hour in the future. The role-request group is already
+     * due, so this is an intentional pre-publication workflow rather than a
+     * failed event publication.
+     */
+    await pool.query(
+      `
+      UPDATE "events"
+      SET
+        "published_at" = NULL,
+        "publish_minutes_before_start" = 60,
+        "status" = 'scheduled',
+        "updated_at" = NOW()
+      WHERE
+        "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    const sentMessage = {
+      id: FIRST_MESSAGE_ID,
+
+      url: `https://discord.test/messages/${FIRST_MESSAGE_ID}`,
+
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const sendMessage = vi.fn().mockResolvedValue(sentMessage);
+
+    const guild = createGuild({
+      sendMessage,
+    });
+
+    // Act
+    const result = await publishRoleRequestGroup(guild, fixture.groupId);
+
+    // Assert
+    expect(result).toMatchObject({
+      ok: true,
+
+      eventId: fixture.eventId,
+
+      groupId: fixture.groupId,
+
+      messageId: FIRST_MESSAGE_ID,
+    });
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+
+    const groupResult = await pool.query<{
+      message_id: string | null;
+    }>(
+      `
+      SELECT
+        "message_id"
+      FROM
+        "role_request_groups"
+      WHERE
+        "id" = $1
+    `,
+      [fixture.groupId],
+    );
+
+    expect(groupResult.rows).toEqual([
+      {
+        message_id: FIRST_MESSAGE_ID,
+      },
+    ]);
+  });
+
+  it("deletes an in-flight Discord message when the event changes to manual publication before linkage", async () => {
+    // Arrange
+    const fixture = await createPlannedRoleRequestGroup(pool);
+
+    /*
+     * Begin with an intentional future publication schedule.
+     *
+     * The event starts two hours from now, so publishing 60 minutes before
+     * start leaves the main event publication roughly one hour in the future.
+     * The already-due role group is therefore initially allowed to publish.
+     */
+    await pool.query(
+      `
+      UPDATE "events"
+      SET
+        "published_at" = NULL,
+        "publish_minutes_before_start" = 60,
+        "status" = 'scheduled',
+        "updated_at" = NOW()
+      WHERE
+        "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    const sentMessage = {
+      id: FIRST_MESSAGE_ID,
+
+      url: `https://discord.test/messages/${FIRST_MESSAGE_ID}`,
+
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+
+    let signalSendStarted: (() => void) | undefined;
+
+    const sendStarted = new Promise<void>((resolve) => {
+      signalSendStarted = resolve;
+    });
+
+    let releaseSend: (() => void) | undefined;
+
+    const allowSendToFinish = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+
+    const sendMessage = vi.fn(async () => {
+      signalSendStarted?.();
+
+      await allowSendToFinish;
+
+      return sentMessage;
+    });
+
+    const guild = createGuild({
+      sendMessage,
+    });
+
+    // Act
+    const publicationPromise = publishRoleRequestGroup(guild, fixture.groupId);
+
+    /*
+     * Wait until the Discord send has definitely begun.
+     *
+     * Changing publication intent here crosses the external Discord boundary
+     * and proves the later database linkage does not rely on the earlier read.
+     */
+    await sendStarted;
+
+    await pool.query(
+      `
+      UPDATE "events"
+      SET
+        "publish_minutes_before_start" = NULL,
+        "updated_at" = NOW()
+      WHERE
+        "id" = $1
+    `,
+      [fixture.eventId],
+    );
+
+    releaseSend?.();
+
+    const result = await publicationPromise;
+
+    // Assert
+    expect(result).toEqual({
+      ok: false,
+
+      reason: "awaiting-event-publication",
+
+      eventId: fixture.eventId,
+
+      groupId: fixture.groupId,
+    });
+
+    /*
+     * Discord accepted the stale candidate before the event changed.
+     *
+     * PostgreSQL must refuse to link it and the candidate must be cleaned up.
+     */
+    expect(sentMessage.delete).toHaveBeenCalledTimes(1);
+
+    await expectGroupUnlinked(pool, fixture.groupId);
+  });
+
   it("does not post a group which already has an authoritative Discord message", async () => {
     // Arrange
     const fixture = await createPlannedRoleRequestGroup(pool);

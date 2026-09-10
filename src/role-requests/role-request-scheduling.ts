@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, isNull, lte } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 
@@ -263,6 +263,91 @@ export async function rescheduleRoleRequestGroupsForEventStart(
 }
 
 type DatabaseTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+export async function resumeDueRoleRequestGroupOpeningsAfterPublication(
+  transaction: DatabaseTransaction,
+  eventId: number,
+  publishedAt: Date,
+): Promise<number> {
+  /*
+   * Only event-relative automatic groups participate in this wake-up.
+   *
+   * A manually-created immediate group has no relative opening rule and
+   * should never be manufactured into scheduled work merely because the main
+   * event was published later.
+   */
+  const dueGroups = await transaction
+    .select({
+      id: roleRequestGroups.id,
+    })
+    .from(roleRequestGroups)
+    .where(
+      and(
+        eq(roleRequestGroups.eventId, eventId),
+
+        isNull(roleRequestGroups.messageId),
+
+        isNull(roleRequestGroups.closedAt),
+
+        isNotNull(roleRequestGroups.openMinutesBeforeStart),
+
+        lte(roleRequestGroups.opensAt, publishedAt),
+
+        gt(roleRequestGroups.closesAt, publishedAt),
+      ),
+    );
+
+  if (dueGroups.length === 0) {
+    return 0;
+  }
+
+  const actionKeys = dueGroups.map((group) =>
+    makeRoleRequestGroupOpenActionKey(group.id),
+  );
+
+  /*
+   * Event publication is an authoritative rescheduling event.
+   *
+   * A due role-group opening may currently be:
+   *
+   * - parked at closesAt while awaiting publication
+   * - still processing in another scheduler worker
+   *
+   * Resetting both states to a fresh pending action fences any stale worker
+   * through the scheduler's existing status/attempt ownership predicates.
+   */
+  const resumedActions = await transaction
+    .update(scheduledActions)
+    .set({
+      status: "pending",
+
+      dueAt: publishedAt,
+
+      attemptCount: 0,
+
+      lockedAt: null,
+
+      completedAt: null,
+
+      lastError: null,
+
+      updatedAt: publishedAt,
+    })
+    .where(
+      and(
+        eq(scheduledActions.eventId, eventId),
+
+        inArray(scheduledActions.actionKey, actionKeys),
+
+        inArray(scheduledActions.status, ["pending", "processing"]),
+      ),
+    )
+    .returning({
+      id: scheduledActions.id,
+    });
+
+  return resumedActions.length;
+}
 
 async function upsertRoleRequestGroupAction(
   transaction: DatabaseTransaction,
