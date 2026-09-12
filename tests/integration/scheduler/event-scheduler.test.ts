@@ -128,7 +128,7 @@ describe("event scheduler", () => {
   });
 
   beforeEach(async () => {
-    stopEventScheduler();
+    await stopEventScheduler();
     await resetIntegrationDatabase(pool);
 
     roleRequestPublicationMocks.publishRoleRequestGroup.mockReset();
@@ -146,15 +146,86 @@ describe("event scheduler", () => {
     );
   });
 
-  afterEach(() => {
-    stopEventScheduler();
+  afterEach(async () => {
+    await stopEventScheduler();
   });
 
   afterAll(async () => {
-    stopEventScheduler();
+    await stopEventScheduler();
 
     await pool.end();
     await applicationPool.end();
+  });
+
+  it("waits for an active scheduler tick to finish before stop resolves", async () => {
+    // Arrange
+    const client = createSchedulerClient();
+
+    const lockClient = await pool.connect();
+
+    try {
+      /*
+       * Block the scheduler's first stale-action recovery UPDATE.
+       *
+       * This gives us a deterministic in-flight scheduler tick without
+       * relying on timing or an arbitrary sleep.
+       */
+      await lockClient.query("BEGIN");
+
+      await lockClient.query(`
+        LOCK TABLE "scheduled_actions"
+        IN ACCESS EXCLUSIVE MODE
+      `);
+
+      startEventScheduler(client);
+
+      await waitForBlockedSchedulerRecoveryUpdate(pool);
+
+      let stopResolved = false;
+
+      /*
+       * Promise.resolve() deliberately supports both the current synchronous
+       * stopEventScheduler() implementation and the intended asynchronous
+       * implementation.
+       *
+       * Before the fix, stopEventScheduler() returns immediately even though
+       * the scheduler tick remains blocked inside PostgreSQL.
+       */
+      const stopPromise = Promise.resolve(stopEventScheduler()).then(() => {
+        stopResolved = true;
+      });
+
+      /*
+       * Allow promise continuations to run.
+       *
+       * A correctly draining scheduler stop must still be waiting for the
+       * blocked tick at this point.
+       */
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+
+      // Assert
+      expect(stopResolved).toBe(false);
+
+      /*
+       * Allow the active scheduler tick to finish, after which the stop
+       * operation should be able to resolve normally.
+       */
+      await lockClient.query("COMMIT");
+
+      await stopPromise;
+
+      expect(stopResolved).toBe(true);
+    } catch (error) {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+
+      throw error;
+    } finally {
+      lockClient.release();
+
+      await Promise.resolve(stopEventScheduler());
+    }
   });
 
   it("does not report a successful automatic attendance close after losing the event-state race", async () => {
@@ -5185,6 +5256,40 @@ function createBlockedGuildFetchSchedulerClient(): {
       resolveFetch?.();
     },
   };
+}
+
+async function waitForBlockedSchedulerRecoveryUpdate(
+  pool: Pool,
+): Promise<void> {
+  const timeoutAt = Date.now() + 3_000;
+
+  while (Date.now() < timeoutAt) {
+    const result = await pool.query<{
+      blocked: boolean;
+    }>(`
+      SELECT EXISTS (
+        SELECT 1
+        FROM pg_stat_activity
+        WHERE
+          datname = current_database()
+          AND state = 'active'
+          AND wait_event_type = 'Lock'
+          AND query ILIKE '%update "scheduled_actions"%'
+      ) AS blocked
+    `);
+
+    if (result.rows[0]?.blocked) {
+      return;
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+
+  throw new Error(
+    "Timed out waiting for scheduler recovery to block on the scheduled-actions table.",
+  );
 }
 
 async function waitForBlockedSchedulerEventUpdate(pool: Pool): Promise<void> {

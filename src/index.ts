@@ -166,7 +166,11 @@ async function shutDown(signal: string): Promise<void> {
 
   console.log(`Received ${signal}; shutting down cleanly.`);
 
-  stopEventScheduler();
+  /*
+   * Stop scheduling new work and allow any tick which is already using
+   * PostgreSQL or Discord to finish before those shared resources are closed.
+   */
+  await stopEventScheduler();
 
   client.destroy();
 
