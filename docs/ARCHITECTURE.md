@@ -2577,6 +2577,44 @@ A final interrupted attempt must not be recovered into an impermissible extra ex
 
 ---
 
+# Scheduler Process Shutdown
+
+Stopping future polling is not sufficient to stop the scheduler safely.
+
+A scheduler tick which has already started may still be using:
+
+- PostgreSQL
+- Discord
+- authoritative scheduled-action state
+- external Discord side effects
+
+The scheduler therefore tracks the currently active tick.
+
+Graceful application shutdown follows this order:
+
+```text
+stop future scheduler intervals
+        |
+        v
+wait for any active scheduler tick to finish
+        |
+        v
+destroy the Discord client
+        |
+        v
+close the PostgreSQL pool
+```
+
+`stopEventScheduler()` is therefore an asynchronous drain boundary rather than only a timer-cancellation operation.
+
+The active tick is allowed to finish normally rather than being cancelled midway through database or Discord work.
+
+This prevents process shutdown from closing shared resources underneath in-flight scheduler work.
+
+Abrupt process loss remains a separate case. Durable scheduled-action state, stale-processing recovery, retry limits, and worker-ownership fencing continue to provide recovery when the process cannot shut down gracefully.
+
+---
+
 # Stale-Worker Completion Fencing
 
 A worker may become stale, lose ownership, and later resume.

@@ -71,7 +71,7 @@ const MAX_ATTEMPTS = 5;
 
 let schedulerTimer: NodeJS.Timeout | null = null;
 
-let schedulerRunning = false;
+let schedulerTickPromise: Promise<void> | null = null;
 
 export function startEventScheduler(client: Client<true>): void {
   if (schedulerTimer) {
@@ -83,10 +83,10 @@ export function startEventScheduler(client: Client<true>): void {
   /*
    * Run immediately rather than waiting for the first interval.
    */
-  void runSchedulerTickSafely(client);
+  void requestSchedulerTick(client);
 
   schedulerTimer = setInterval(() => {
-    void runSchedulerTickSafely(client);
+    void requestSchedulerTick(client);
   }, POLL_INTERVAL_MS);
 
   /*
@@ -95,39 +95,73 @@ export function startEventScheduler(client: Client<true>): void {
   schedulerTimer.unref();
 }
 
-export function stopEventScheduler(): void {
-  if (!schedulerTimer) {
-    return;
+export async function stopEventScheduler(): Promise<void> {
+  /*
+   * Stop future ticks first.
+   *
+   * Clearing the interval does not cancel a tick which has already started,
+   * so shutdown must separately wait for any currently-running tick below.
+   */
+  const timer = schedulerTimer;
+
+  if (timer) {
+    clearInterval(timer);
+    schedulerTimer = null;
   }
 
-  clearInterval(schedulerTimer);
+  /*
+   * A scheduler tick may still be using PostgreSQL or Discord after its
+   * interval has been cleared. Drain that work before allowing shutdown to
+   * close those shared resources.
+   */
+  const activeTick = schedulerTickPromise;
 
-  schedulerTimer = null;
+  if (activeTick) {
+    await activeTick;
+  }
 
-  console.log("Event scheduler stopped.");
+  if (timer) {
+    console.log("Event scheduler stopped.");
+  }
 }
 
-async function runSchedulerTickSafely(client: Client<true>): Promise<void> {
+async function requestSchedulerTick(client: Client<true>): Promise<void> {
   /*
    * Prevent overlapping polling cycles if a previous tick takes longer
    * than the normal polling interval.
+   *
+   * Keeping the active promise also gives graceful shutdown a deterministic
+   * way to wait for the current tick to finish.
    */
-  if (schedulerRunning) {
+  if (schedulerTickPromise) {
     return;
   }
 
-  schedulerRunning = true;
+  const tickPromise = runSchedulerTickSafely(client);
+
+  schedulerTickPromise = tickPromise;
 
   try {
-    await recoverStaleActions();
+    await tickPromise;
+  } finally {
+    /*
+     * Only clear the promise we started. This keeps the ownership explicit
+     * if scheduler lifecycle behaviour becomes more complex in future.
+     */
+    if (schedulerTickPromise === tickPromise) {
+      schedulerTickPromise = null;
+    }
+  }
+}
 
+async function runSchedulerTickSafely(client: Client<true>): Promise<void> {
+  try {
+    await recoverStaleActions();
     await failExhaustedPendingActions();
 
     await processDueActions(client);
   } catch (error) {
     console.error("Event scheduler tick failed:", error);
-  } finally {
-    schedulerRunning = false;
   }
 }
 

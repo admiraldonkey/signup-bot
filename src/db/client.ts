@@ -35,8 +35,38 @@ export const pool = new Pool({
   idleTimeoutMillis: 30_000,
 });
 
+function readErrorStringField(
+  value: unknown,
+  field: "message" | "code",
+): string | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+
+  const fieldValue = Reflect.get(value, field);
+
+  return typeof fieldValue === "string" ? fieldValue : undefined;
+}
+
+function readErrorCause(value: unknown): unknown {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+
+  return Reflect.get(value, "cause");
+}
+
 pool.on("error", (error) => {
-  console.error("Unexpected PostgreSQL pool error:", error);
+  const cause = readErrorCause(error);
+
+  console.error("Unexpected PostgreSQL pool error:", {
+    message:
+      readErrorStringField(error, "message") ??
+      "Unknown PostgreSQL pool error.",
+    code: readErrorStringField(error, "code"),
+    causeMessage: readErrorStringField(cause, "message"),
+    causeCode: readErrorStringField(cause, "code"),
+  });
 });
 
 export const db = drizzle({

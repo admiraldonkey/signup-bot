@@ -1,6 +1,6 @@
 # Current Development State
 
-**Last reconciled:** 10 September 2026
+**Last reconciled:** 12 September 2026
 
 This document is the short-form handoff for the current development checkpoint.
 
@@ -19,11 +19,45 @@ If this document becomes substantially longer because completed work keeps being
 
 ---
 
-# Current Repository Checkpoint
+## Current Repository Checkpoint
 
-The most recent completed development slice is the role-request publication-intent reliability pass.
+The most recent completed development slice is the database-disruption resilience pass.
 
-The implementation has been committed and pushed.
+It addressed two application-level weaknesses discovered while investigating PostgreSQL availability incidents:
+
+```text
+graceful process shutdown
+    -> wait for an already-running scheduler tick before closing shared resources
+
+PostgreSQL pool error logging
+    -> preserve useful diagnostics without logging the complete pg error/client object
+```
+
+The scheduler shutdown contract is now:
+
+```text
+stop future polling
+    |
+    v
+drain active scheduler tick
+    |
+    v
+destroy Discord client
+    |
+    v
+close PostgreSQL pool
+```
+
+PostgreSQL pool errors now log only the useful diagnostic fields:
+
+```text
+message
+code
+cause message
+cause code
+```
+
+rather than passing the raw error object to `console.error()`.
 
 Current automated verification is green across:
 
@@ -35,23 +69,11 @@ npm run typecheck
 npm run typecheck:test
 ```
 
-Relevant focused PostgreSQL integration suites are also green.
+`git diff --check` is also clean.
 
-Manual Discord smoke testing confirmed the intended publication behaviour for:
+The scheduler shutdown regression uses a deterministic PostgreSQL table lock to prove that `stopEventScheduler()` does not resolve while a scheduler tick remains active.
 
-```text
-manual-held unpublished event
-    -> due automatic role group remains unpublished
-
-manual publication
-    -> already-due valid role group wakes and posts
-
-future scheduled event publication
-    -> deliberately earlier role group may post first
-
-future role group
-    -> remains scheduled after event publication
-```
+No scheduler retry-policy changes were made as part of this work.
 
 Always verify local branch and working-tree state before beginning the next development slice.
 
@@ -59,48 +81,86 @@ Always verify local branch and working-tree state before beginning the next deve
 
 # Current Activity
 
-The role-request publication-intent reliability pass addressed an ambiguity discovered during manual preset testing.
+The database-disruption resilience pass followed investigation of two PostgreSQL availability incidents on 11 September 2026.
 
-Previously, a preset-derived scheduled role-request group could publish whenever its opening time arrived even if the parent event was being deliberately held for manual publication.
+Northflank PostgreSQL addon logs showed the database process itself being shut down and restarted.
 
-Automatic role-request publication now distinguishes:
+During those incidents the application first received PostgreSQL administrator-shutdown errors and then connection refusal/timeouts while the database was unavailable.
 
-```text
-event published
-    -> due group may publish
-
-event unpublished
-manual publication required
-    -> automatic group waits
-
-event unpublished
-future scheduled publication
-    -> deliberately earlier group may publish
-
-event unpublished
-scheduled publication already due
-    -> later groups wait for event publication
-```
-
-Waiting for event publication is represented as:
+The observed sequence included:
 
 ```text
-awaiting-event-publication
+PostgreSQL shutdown
+    -> existing application connection terminated with 57P01
+    -> database unavailable
+    -> ECONNREFUSED / connection timeout
+    -> PostgreSQL addon restarted
+    -> PostgreSQL recovered and became available again
 ```
 
-and is treated as deliberate domain deferral rather than scheduler failure.
+Read-only production diagnostics subsequently confirmed:
 
-A deferred opening action is parked at the group's closing boundary with retry state reset.
+```text
+database migrations
+    -> current
 
-Successful event publication wakes already-due, still-valid role-group opening actions in the same PostgreSQL transaction as publication.
+scheduled actions
+    -> completed or cancelled only
 
-Future groups retain their existing schedule.
+pending actions
+    -> none
 
-Role-request publication also re-checks event publication intent after Discord message creation.
+processing actions
+    -> none
 
-If the event changes to a manual hold while a message is in flight, the stale Discord candidate is not linked and is deleted where possible.
+failed actions
+    -> none
 
-The next production feature objective is:
+maximum observed attempt count
+    -> 1
+```
+
+There was therefore no evidence that the outage exhausted scheduled-action retries or left scheduler work stranded.
+
+The repeated scheduler-maintenance SQL containing:
+
+```text
+attempt_count >= 5
+```
+
+was not evidence that a particular action had reached five attempts.
+
+That predicate is part of normal stale/exhausted-action maintenance and appeared in the logs because the maintenance query itself could not reach PostgreSQL while the database was unavailable.
+
+The PostgreSQL addon also emits recurring Patroni/Kubernetes `ObjectCache.run ProtocolError` messages. These currently appear to recover automatically and have not normally coincided with application-visible database outages. They are an infrastructure concern to monitor or raise with Northflank rather than something to compensate for in application scheduler logic.
+
+The investigation did expose a separate application shutdown race.
+
+Previously:
+
+```text
+SIGTERM
+    -> stop scheduler interval
+    -> destroy Discord client
+    -> close PostgreSQL pool
+
+already-running scheduler tick
+    -> could continue after the pool had been closed
+```
+
+This had previously produced:
+
+```text
+Cannot use a pool after calling end on the pool
+```
+
+The scheduler now tracks and drains its active tick before shared Discord and PostgreSQL resources are closed.
+
+The investigation also showed that raw PostgreSQL pool errors could include large nested `pg.Client` structures and connection details in application logs.
+
+Pool-error logging now emits only sanitised diagnostic fields rather than the raw object.
+
+The next production feature objective remains:
 
 ```text
 editing existing reusable role-request presets
@@ -1960,6 +2020,12 @@ preset group lifecycle is implemented
 message recovery is implemented for core attendance and role-request messages
 
 organiser safety and cover-message reconciliation are implemented
+
+graceful shutdown drains active scheduler work before Discord and PostgreSQL teardown
+
+PostgreSQL pool error logging is sanitised and does not emit raw pg client internals
+
+11 September database outages were diagnosed as PostgreSQL addon restarts with no observed scheduler-state damage
 
 automated unit/integration/coverage/typechecking is green
 
