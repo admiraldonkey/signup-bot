@@ -135,33 +135,9 @@ Recurrence should not be built before template-generated one-off events are reli
 
 Complete the administrator workflow for maintaining an existing reusable role-request preset without requiring it to be recreated.
 
-The current preset-management foundation is established, and preset metadata editing is implemented.
+The current preset-management foundation, parent metadata editing, and core role-option definition editing are implemented.
 
-The remaining work is editing the stored child definitions themselves, including role options, qualifications, request groups, and mappings.
-
----
-
-## P0.2 - Preset role-option editing
-
-Add editing for existing reusable role options.
-
-Candidate editable fields include:
-
-- display name
-- description
-- request restriction
-- capacity
-- qualification-role configuration
-
-The logical key needs deliberate treatment.
-
-Before exposing key editing, decide whether:
-
-1. the key should remain stable after creation
-2. the key can be changed when it does not conflict
-3. changing it should be treated as a more explicit operation
-
-Do not accidentally make a human-readable rename also change the logical identity used for event-level conflict detection.
+The remaining work is qualification-role replacement, request-group editing, group-option mapping editing, and final administrator UX review.
 
 ---
 
@@ -364,7 +340,7 @@ Important cases include:
 - duplicate qualification role
 - invalid group window
 - invalid channel/notification input where applicable
-- option-key conflict where key editing is supported
+- logical key remains unchanged when a role-option display name is edited
 - concurrent application versus editing
 - rollback of a multi-row edit after validation failure
 

@@ -1279,17 +1279,19 @@ The following work is deliberately unfinished.
 
 ## Preset editing
 
-Immediate next feature phase.
+Preset editing is the immediate feature phase.
 
-The current system can create and lifecycle-manage presets but does not yet provide a complete administrator workflow for editing existing definitions.
+Implemented editing currently includes:
 
-Planned areas include:
+- preset name/description metadata
+- role-option display name
+- role-option description
+- role-option request restriction
+- role-option capacity
 
-- preset name/description editing
-- option metadata editing
-- request restriction editing
-- capacity editing
-- qualification-role editing
+Remaining areas include:
+
+- qualification-role replacement
 - request-group metadata editing
 - destination editing
 - notification-role editing
@@ -1297,7 +1299,7 @@ Planned areas include:
 - opening/closing timing editing
 - group-option mapping editing
 
-This work must preserve the current preset mutation lock.
+All remaining work must preserve the current preset mutation lock and event snapshot independence.
 
 ---
 
@@ -1375,38 +1377,52 @@ This remains planned.
 
 # Immediate Next Objective
 
-The first preset-editing slice is now implemented:
+The first two preset-editing slices are now implemented:
 
 ```text
 preset metadata editing
+preset role-option editing
 ```
 
-This includes:
+Current administrator commands include:
 
 ```text
 /role-preset edit
     -> rename preset
-    -> replace description
-    -> explicitly clear description
+    -> replace or clear description
+
+/role-preset option-edit
+    -> rename displayed role
+    -> replace or clear description
+    -> change request restriction
+    -> replace or clear capacity
 ```
 
-The service preserves:
+Preset role-option logical keys remain immutable after creation.
+
+A display-name edit therefore preserves logical identity.
+
+The role-option edit service also preserves:
 
 - guild ownership
-- unique preset naming
+- child ownership
 - inactive-preset editability
 - idempotent no-op behaviour
-- child configuration
+- qualification rows
 - existing event snapshots
 - the preset parent locking contract
 
-A deterministic PostgreSQL concurrency regression verifies that preset application holding:
+Changing an option to `qualified_only` requires existing qualification rows.
+
+Changing it back to `open` preserves those rows.
+
+Deterministic PostgreSQL concurrency coverage verifies that preset application holding:
 
 ```text
 role_request_presets FOR SHARE
 ```
 
-serialises correctly against metadata editing requesting:
+serialises correctly against role-option editing requesting:
 
 ```text
 role_request_presets FOR UPDATE
@@ -1415,10 +1431,9 @@ role_request_presets FOR UPDATE
 The next implementation slice is:
 
 ```text
-preset role-option editing
+P0.3
+qualification-role replacement
 ```
-
-Before exposing logical-key editing, decide deliberately whether the logical key remains immutable or becomes a separately validated editable field.
 
 ---
 
@@ -1508,26 +1523,6 @@ Preset application must still validate the complete graph itself.
 # Next Likely Preset-Editing Decisions
 
 A few questions should be answered deliberately when implementation reaches them.
-
----
-
-## Logical option key editing
-
-Decide whether a preset role option's logical key should:
-
-```text
-remain immutable
-```
-
-or:
-
-```text
-be editable with conflict validation
-```
-
-Display-name editing does not necessarily imply identity-key editing.
-
-Avoid conflating the two.
 
 ---
 
