@@ -17,6 +17,7 @@ import {
   addPresetRequestGroup,
   addPresetRoleOption,
   createRoleRequestPreset,
+  editRoleRequestPreset,
   setRoleRequestPresetActive,
   setRoleRequestPresetGroupActive,
   setRoleRequestPresetOptionActive,
@@ -65,6 +66,11 @@ export async function handleRolePresetCommand(
   switch (subcommand) {
     case "create":
       await createPreset(interaction, configuration.guildId);
+
+      return;
+
+    case "edit":
+      await editPreset(interaction, configuration.guildId);
 
       return;
 
@@ -279,6 +285,144 @@ async function createPreset(
       await interaction.editReply({
         content:
           "This server's stored configuration changed while the command was being processed. Run `/setup initialise` and try again.",
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
+}
+
+async function editPreset(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const presetId = interaction.options.getInteger("preset-id", true);
+
+  const name = interaction.options.getString("name") ?? undefined;
+
+  const suppliedDescription = interaction.options.getString("description");
+
+  const clearDescription =
+    interaction.options.getBoolean("clear-description") ?? false;
+
+  /*
+   * Keep clearing explicit rather than silently preferring one conflicting
+   * option over the other.
+   */
+  if (suppliedDescription !== null && clearDescription) {
+    await interaction.editReply({
+      content:
+        "Choose either `description` or `clear-description:true`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const description = clearDescription
+    ? null
+    : (suppliedDescription ?? undefined);
+
+  const result = await editRoleRequestPreset({
+    guildDatabaseId,
+
+    presetId,
+
+    name,
+
+    description,
+  });
+
+  switch (result.kind) {
+    case "updated": {
+      await interaction.editReply({
+        content: [
+          `✅ Updated role-request preset **${result.preset.name}** (#${result.preset.id}).`,
+          result.preset.description
+            ? `**Description:** ${result.preset.description}`
+            : "**Description:** None",
+          `**Status:** ${result.preset.active ? "Active" : "Inactive"}`,
+        ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: guildDatabaseId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "role_preset.edit",
+
+        outcome: "success",
+
+        summary: `Updated role-request preset "${result.preset.name}" (#${result.preset.id}).`,
+
+        targetType: "role_request_preset",
+
+        targetId: String(result.preset.id),
+
+        details: {
+          name: result.preset.name,
+
+          description: result.preset.description,
+
+          active: result.preset.active,
+        },
+      });
+
+      return;
+    }
+
+    case "unchanged":
+      await interaction.editReply({
+        content: `Role-request preset **${result.preset.name}** (#${result.preset.id}) already has the requested metadata. No changes were made.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "preset_not_found":
+      await interaction.editReply({
+        content: `Role-request preset #${presetId} was not found in this server.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "name_conflict":
+      await interaction.editReply({
+        content: `A role-request preset named **${result.name}** already exists in this server.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "invalid_input":
+      await interaction.editReply({
+        content:
+          result.reason === "no_changes_requested"
+            ? "Supply at least one metadata change: `name`, `description`, or `clear-description:true`."
+            : "The preset name is invalid. Use a non-empty name of no more than 100 characters.",
 
         allowedMentions: {
           parse: [],

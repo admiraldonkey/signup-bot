@@ -16,6 +16,8 @@ const authMocks = vi.hoisted(() => ({
 const adminServiceMocks = vi.hoisted(() => ({
   createRoleRequestPreset: vi.fn(),
 
+  editRoleRequestPreset: vi.fn(),
+
   addPresetRoleOption: vi.fn(),
 
   addPresetRequestGroup: vi.fn(),
@@ -119,6 +121,7 @@ describe("/role-preset command", () => {
 
     expect(definition?.options?.map((option) => option.name)).toEqual([
       "create",
+      "edit",
       "list",
       "show",
       "option-add",
@@ -203,6 +206,333 @@ describe("/role-preset command", () => {
         targetId: "7",
       }),
     );
+  });
+
+  it("edits preset metadata through the administration service and audits the mutation", async () => {
+    // Arrange
+    adminServiceMocks.editRoleRequestPreset.mockResolvedValue({
+      kind: "updated",
+
+      preset: {
+        id: 7,
+
+        name: "Naval Operations",
+
+        description: "Updated reusable naval roles.",
+
+        active: false,
+      },
+    });
+
+    const interaction = createInteraction({
+      subcommand: "edit",
+
+      strings: {
+        name: "Naval Operations",
+
+        description: "Updated reusable naval roles.",
+      },
+
+      integers: {
+        "preset-id": 7,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.editRoleRequestPreset).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      presetId: 7,
+
+      name: "Naval Operations",
+
+      description: "Updated reusable naval roles.",
+    });
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: [
+        "✅ Updated role-request preset **Naval Operations** (#7).",
+        "**Description:** Updated reusable naval roles.",
+        "**Status:** Inactive",
+      ].join("\n"),
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        guildId: 42,
+
+        actorUserId: ADMIN_USER_ID,
+
+        action: "role_preset.edit",
+
+        outcome: "success",
+
+        targetType: "role_request_preset",
+
+        targetId: "7",
+
+        details: {
+          name: "Naval Operations",
+
+          description: "Updated reusable naval roles.",
+
+          active: false,
+        },
+      }),
+    );
+  });
+
+  it("clears a preset description explicitly", async () => {
+    // Arrange
+    adminServiceMocks.editRoleRequestPreset.mockResolvedValue({
+      kind: "updated",
+
+      preset: {
+        id: 7,
+
+        name: "Naval",
+
+        description: null,
+
+        active: true,
+      },
+    });
+
+    const interaction = createInteraction({
+      subcommand: "edit",
+
+      integers: {
+        "preset-id": 7,
+      },
+
+      booleans: {
+        "clear-description": true,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.editRoleRequestPreset).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      presetId: 7,
+
+      name: undefined,
+
+      description: null,
+    });
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: [
+        "✅ Updated role-request preset **Naval** (#7).",
+        "**Description:** None",
+        "**Status:** Active",
+      ].join("\n"),
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  });
+
+  it("rejects supplying a preset description while also clearing it", async () => {
+    // Arrange
+    const interaction = createInteraction({
+      subcommand: "edit",
+
+      strings: {
+        description: "This should not be accepted.",
+      },
+
+      integers: {
+        "preset-id": 7,
+      },
+
+      booleans: {
+        "clear-description": true,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.editRoleRequestPreset).not.toHaveBeenCalled();
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "Choose either `description` or `clear-description:true`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("reports an unchanged preset metadata edit without auditing a mutation", async () => {
+    // Arrange
+    adminServiceMocks.editRoleRequestPreset.mockResolvedValue({
+      kind: "unchanged",
+
+      preset: {
+        id: 7,
+
+        name: "Naval",
+
+        description: "Reusable naval roles.",
+
+        active: true,
+      },
+    });
+
+    const interaction = createInteraction({
+      subcommand: "edit",
+
+      strings: {
+        name: "Naval",
+      },
+
+      integers: {
+        "preset-id": 7,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "Role-request preset **Naval** (#7) already has the requested metadata. No changes were made.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("reports a conflicting preset name returned by metadata editing", async () => {
+    // Arrange
+    adminServiceMocks.editRoleRequestPreset.mockResolvedValue({
+      kind: "name_conflict",
+
+      name: "Linebattle",
+    });
+
+    const interaction = createInteraction({
+      subcommand: "edit",
+
+      strings: {
+        name: "Linebattle",
+      },
+
+      integers: {
+        "preset-id": 7,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "A role-request preset named **Linebattle** already exists in this server.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("reports invalid or empty preset metadata edits", async () => {
+    // Arrange
+    adminServiceMocks.editRoleRequestPreset.mockResolvedValue({
+      kind: "invalid_input",
+
+      reason: "no_changes_requested",
+    });
+
+    const interaction = createInteraction({
+      subcommand: "edit",
+
+      integers: {
+        "preset-id": 7,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.editRoleRequestPreset).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      presetId: 7,
+
+      name: undefined,
+
+      description: undefined,
+    });
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "Supply at least one metadata change: `name`, `description`, or `clear-description:true`.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("reports a preset that cannot be found for metadata editing", async () => {
+    // Arrange
+    adminServiceMocks.editRoleRequestPreset.mockResolvedValue({
+      kind: "preset_not_found",
+    });
+
+    const interaction = createInteraction({
+      subcommand: "edit",
+
+      strings: {
+        name: "Renamed preset",
+      },
+
+      integers: {
+        "preset-id": 999,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: "Role-request preset #999 was not found in this server.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
   });
 
   it("adds a qualified role option through the administration service and audits the mutation", async () => {

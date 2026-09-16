@@ -135,50 +135,9 @@ Recurrence should not be built before template-generated one-off events are reli
 
 Complete the administrator workflow for maintaining an existing reusable role-request preset without requiring it to be recreated.
 
-The current system supports:
+The current preset-management foundation is established, and preset metadata editing is implemented.
 
-- preset creation
-- preset inspection
-- role-option creation
-- request-group creation
-- application to an event
-- preset activation/deactivation
-- option activation/deactivation
-- group activation/deactivation
-
-The missing area is **editing the stored definitions themselves**.
-
----
-
-## P0.1 - Preset metadata editing
-
-Add a service and administrator command for changing reusable preset metadata.
-
-Likely editable fields include:
-
-- name
-- description
-
-Requirements:
-
-- enforce guild ownership
-- preserve unique preset naming rules
-- allow inactive presets to be edited
-- update `updatedAt` only when a real mutation occurs
-- return an explicit unchanged/no-op result where appropriate
-- preserve all child options and groups
-- preserve all event snapshots already created from the preset
-
-Potential command shape:
-
-```text
-/role-preset edit
-    preset-id
-    name
-    description
-```
-
-Exact Discord option design should avoid making every field mandatory when only one needs changing.
+The remaining work is editing the stored child definitions themselves, including role options, qualifications, request groups, and mappings.
 
 ---
 

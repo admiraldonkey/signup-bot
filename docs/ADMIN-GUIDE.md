@@ -1,6 +1,6 @@
 # Administrator Guide
 
-**Last reconciled:** 10 September 2026
+**Last reconciled:** 16 September 2026
 
 ## Purpose
 
@@ -2148,6 +2148,67 @@ The preset name must be valid for the guild and cannot conflict with another exi
 Creating the preset does not create role options or groups automatically.
 
 Use the option and group commands to build it.
+
+---
+
+# `/role-preset edit`
+
+Edits the name or description of an existing reusable preset.
+
+Example:
+
+```text
+/role-preset edit
+preset-id: 7
+name: Naval Operations
+description: Standard naval and marine role requests
+```
+
+All edit fields except `preset-id` are optional, so an administrator can change only the field that needs updating.
+
+Supported metadata changes are:
+
+- preset name
+- preset description
+- explicit description removal
+
+To remove an existing description, use:
+
+```text
+/role-preset edit
+preset-id: 7
+clear-description: Yes
+```
+
+Do not supply both:
+
+```text
+description
+```
+
+and:
+
+```text
+clear-description: Yes
+```
+
+in the same command.
+
+An inactive preset can still be edited. Inactivity controls whether the preset may be applied to new events; it does not make the stored definition immutable.
+
+Renaming a preset must still respect the guild's preset-name uniqueness rules.
+
+If the requested metadata already matches the stored values, the command reports that no changes were made rather than creating a false mutation.
+
+Editing preset metadata does not alter:
+
+- preset role options
+- preset request groups
+- qualification mappings
+- group-option mappings
+- existing event-level snapshots previously created from the preset
+
+Later preset edits affect future applications only.
 
 ---
 

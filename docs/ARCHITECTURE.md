@@ -2308,15 +2308,70 @@ Reactivation restores the stored group definition.
 
 ---
 
-# Planned Preset Editing
+# Preset Metadata Editing
 
-Current preset administration supports creation, inspection, application, and lifecycle control.
+Existing reusable preset metadata can be edited without recreating the preset.
 
-Complete editing of existing definitions is the next planned preset-management phase.
+The supported parent metadata fields are currently:
 
-Expected areas include:
+```text
+name
+description
+```
 
-- preset metadata editing
+Description editing distinguishes:
+
+```text
+undefined
+    -> leave unchanged
+
+string
+    -> normalise and replace
+
+null
+    -> explicitly clear
+```
+
+Metadata mutation locks the preset parent row:
+
+```text
+role_request_presets FOR UPDATE
+```
+
+This participates in the existing preset locking contract with application:
+
+```text
+preset application
+    -> role_request_presets FOR SHARE
+
+preset metadata edit
+    -> role_request_presets FOR UPDATE
+```
+
+Application therefore sees either the complete metadata/configuration state before the edit or the complete state after the edit.
+
+A metadata edit:
+
+- enforces guild ownership
+- preserves guild-level preset-name uniqueness
+- permits inactive presets to be edited
+- updates `updatedAt` only when stored values actually change
+- returns an explicit unchanged result for a true no-op
+- does not alter child options or groups
+- does not alter existing event-level snapshots
+
+The database unique constraint remains authoritative for concurrent preset-name conflicts.
+
+Successful metadata editing is therefore a source-configuration mutation for future applications, not a propagation mechanism into events already created from the preset.
+
+---
+
+# Remaining Preset Editing
+
+Complete editing of child preset definitions remains planned.
+
+Remaining areas include:
+
 - role-option display and policy editing
 - qualification-role editing
 - capacity editing
@@ -2326,7 +2381,7 @@ Expected areas include:
 - opening and closing timing editing
 - group-option mapping editing
 
-These mutations should use the existing parent `FOR UPDATE` lock contract.
+These mutations must continue using the parent `FOR UPDATE` locking contract.
 
 Existing event snapshots must remain unchanged.
 

@@ -1,6 +1,6 @@
 # Current Development State
 
-**Last reconciled:** 12 September 2026
+**Last reconciled:** 16 September 2026
 
 This document is the short-form handoff for the current development checkpoint.
 
@@ -1375,15 +1375,50 @@ This remains planned.
 
 # Immediate Next Objective
 
-After this reliability PR is merged, start a fresh feature branch from updated `main` for:
+The first preset-editing slice is now implemented:
 
 ```text
-reusable role-request preset editing
+preset metadata editing
 ```
 
-The current preset foundation, application, lifecycle, scheduling, publication-intent, and snapshot behaviour should be treated as established architecture rather than work to redesign casually.
+This includes:
 
-The next feature phase should build on those boundaries.
+```text
+/role-preset edit
+    -> rename preset
+    -> replace description
+    -> explicitly clear description
+```
+
+The service preserves:
+
+- guild ownership
+- unique preset naming
+- inactive-preset editability
+- idempotent no-op behaviour
+- child configuration
+- existing event snapshots
+- the preset parent locking contract
+
+A deterministic PostgreSQL concurrency regression verifies that preset application holding:
+
+```text
+role_request_presets FOR SHARE
+```
+
+serialises correctly against metadata editing requesting:
+
+```text
+role_request_presets FOR UPDATE
+```
+
+The next implementation slice is:
+
+```text
+preset role-option editing
+```
+
+Before exposing logical-key editing, decide deliberately whether the logical key remains immutable or becomes a separately validated editable field.
 
 ---
 
@@ -1392,21 +1427,19 @@ The next feature phase should build on those boundaries.
 A sensible initial sequence is:
 
 ```text
-1. decide edit command/service surface
+completed:
+    edit command/service surface
+    preset metadata editing
 
-2. preset metadata editing
+next:
+    role-option editing
 
-3. role-option editing
-
-4. qualification-role editing
-
-5. request-group editing
-
-6. group-option mapping editing
-
-7. complete command UX review
-
-8. full preset administration manual smoke test
+then:
+    qualification-role editing
+    request-group editing
+    group-option mapping editing
+    complete command UX review
+    full preset administration manual smoke test
 ```
 
 The exact split into commits or PRs should remain reviewable rather than forcing the entire edit subsystem into one enormous change.

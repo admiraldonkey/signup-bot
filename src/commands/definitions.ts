@@ -1198,7 +1198,39 @@ export const commandDefinitions = [
             .setMaxLength(1000),
         ),
     )
-
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("edit")
+        .setDescription("Edits the name or description of a reusable preset.")
+        /*
+         * Discord requires required options before optional options.
+         */
+        .addIntegerOption((option) =>
+          option
+            .setName("preset-id")
+            .setDescription("Preset ID shown by /role-preset list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("name")
+            .setDescription("Replacement preset name.")
+            .setMinLength(1)
+            .setMaxLength(100),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("description")
+            .setDescription("Replacement preset description.")
+            .setMaxLength(1000),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("clear-description")
+            .setDescription("Remove the preset's existing description."),
+        ),
+    )
     .addSubcommand((subcommand) =>
       subcommand
         .setName("list")
