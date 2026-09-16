@@ -318,6 +318,93 @@ export type AddPresetRoleOptionResult =
       discordRoleId?: string;
     };
 
+export type EditPresetRoleOptionInput = {
+  guildDatabaseId: number;
+
+  presetId: number;
+
+  presetOptionId: number;
+
+  /*
+   * undefined means "leave unchanged".
+   *
+   * For nullable fields:
+   * - undefined -> leave unchanged
+   * - null      -> explicitly clear
+   */
+  displayName?: string;
+
+  description?: string | null;
+
+  requestRestriction?: string;
+
+  capacity?: number | null;
+};
+
+export type EditPresetRoleOptionResult =
+  | {
+      kind: "updated";
+
+      option: {
+        id: number;
+
+        presetId: number;
+
+        key: string;
+
+        displayName: string;
+
+        description: string | null;
+
+        requestRestriction: "open" | "qualified_only";
+
+        capacity: number | null;
+
+        sortOrder: number;
+
+        active: boolean;
+      };
+    }
+  | {
+      kind: "unchanged";
+
+      option: {
+        id: number;
+
+        presetId: number;
+
+        key: string;
+
+        displayName: string;
+
+        description: string | null;
+
+        requestRestriction: "open" | "qualified_only";
+
+        capacity: number | null;
+
+        sortOrder: number;
+
+        active: boolean;
+      };
+    }
+  | {
+      kind: "preset_not_found";
+    }
+  | {
+      kind: "option_not_found";
+    }
+  | {
+      kind: "invalid_input";
+
+      reason:
+        | "no_changes_requested"
+        | "invalid_name"
+        | "invalid_request_restriction"
+        | "invalid_capacity"
+        | "missing_qualification_roles";
+    };
+
 export type PresetNotifyRoleInput = {
   discordRoleId: string;
 
@@ -737,6 +824,298 @@ export async function setRoleRequestPresetActive(
       kind: "updated",
 
       preset: updatedPreset,
+    } as const;
+  });
+}
+
+/**
+ * Edits the mutable definition fields of one reusable preset role option.
+ *
+ * The logical key is deliberately immutable. It is stable preset identity,
+ * while displayName is presentation.
+ *
+ * As with every preset child mutation, the parent preset is locked FOR UPDATE
+ * so application cannot snapshot the reusable graph halfway through an edit.
+ *
+ * Existing event-level snapshots remain independent and are unaffected.
+ */
+export async function editPresetRoleOption(
+  input: EditPresetRoleOptionInput,
+): Promise<EditPresetRoleOptionResult> {
+  if (
+    input.displayName === undefined &&
+    input.description === undefined &&
+    input.requestRestriction === undefined &&
+    input.capacity === undefined
+  ) {
+    return {
+      kind: "invalid_input",
+
+      reason: "no_changes_requested",
+    };
+  }
+
+  const requestedDisplayName =
+    input.displayName === undefined ? undefined : input.displayName.trim();
+
+  if (
+    requestedDisplayName !== undefined &&
+    (requestedDisplayName.length === 0 || requestedDisplayName.length > 100)
+  ) {
+    return {
+      kind: "invalid_input",
+
+      reason: "invalid_name",
+    };
+  }
+
+  let requestedRequestRestriction: RequestRestriction | undefined;
+
+  if (input.requestRestriction !== undefined) {
+    if (!isRequestRestriction(input.requestRestriction)) {
+      return {
+        kind: "invalid_input",
+
+        reason: "invalid_request_restriction",
+      };
+    }
+
+    /*
+     * Capture the narrowed value before entering the asynchronous transaction.
+     */
+    requestedRequestRestriction = input.requestRestriction;
+  }
+
+  if (
+    input.capacity !== undefined &&
+    input.capacity !== null &&
+    !isPostgresPositiveInteger(input.capacity)
+  ) {
+    return {
+      kind: "invalid_input",
+
+      reason: "invalid_capacity",
+    };
+  }
+
+  const requestedDescription =
+    input.description === undefined
+      ? undefined
+      : normaliseOptionalText(input.description);
+
+  return db.transaction(async (transaction) => {
+    /*
+     * This is both the authoritative guild-ownership check and the
+     * mutation/application serialisation boundary.
+     *
+     * Inactive presets deliberately remain editable.
+     */
+    const [preset] = await transaction
+      .select({
+        id: roleRequestPresets.id,
+      })
+      .from(roleRequestPresets)
+      .where(
+        and(
+          eq(roleRequestPresets.id, input.presetId),
+
+          eq(roleRequestPresets.ownerGuildId, input.guildDatabaseId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    if (!preset) {
+      return {
+        kind: "preset_not_found",
+      } as const;
+    }
+
+    const [option] = await transaction
+      .select({
+        id: roleRequestPresetOptions.id,
+
+        presetId: roleRequestPresetOptions.presetId,
+
+        key: roleRequestPresetOptions.key,
+
+        displayName: roleRequestPresetOptions.displayName,
+
+        description: roleRequestPresetOptions.description,
+
+        requestRestriction: roleRequestPresetOptions.requestRestriction,
+
+        capacity: roleRequestPresetOptions.capacity,
+
+        sortOrder: roleRequestPresetOptions.sortOrder,
+
+        active: roleRequestPresetOptions.active,
+      })
+      .from(roleRequestPresetOptions)
+      .where(
+        and(
+          eq(roleRequestPresetOptions.id, input.presetOptionId),
+
+          eq(roleRequestPresetOptions.presetId, preset.id),
+        ),
+      )
+      .limit(1);
+
+    if (!option) {
+      return {
+        kind: "option_not_found",
+      } as const;
+    }
+
+    /*
+     * requestRestriction is varchar in PostgreSQL rather than an enum, so
+     * verify authoritative stored state before exposing it as a narrowed
+     * domain value.
+     */
+    if (!isRequestRestriction(option.requestRestriction)) {
+      throw new Error(
+        `Preset role option #${option.id} has unsupported request restriction "${option.requestRestriction}".`,
+      );
+    }
+
+    const displayName =
+      requestedDisplayName === undefined
+        ? option.displayName
+        : requestedDisplayName;
+
+    const description =
+      requestedDescription === undefined
+        ? option.description
+        : requestedDescription;
+
+    const requestRestriction =
+      requestedRequestRestriction === undefined
+        ? option.requestRestriction
+        : requestedRequestRestriction;
+
+    const capacity =
+      input.capacity === undefined ? option.capacity : input.capacity;
+
+    /*
+     * Qualification replacement belongs to a separate mutation slice.
+     *
+     * For now, switching an existing option to qualified_only is valid only
+     * when qualification rows are already present.
+     */
+    if (
+      option.requestRestriction !== "qualified_only" &&
+      requestRestriction === "qualified_only"
+    ) {
+      const [qualificationCount] = await transaction
+        .select({
+          count: sql<number>`count(*)::int`,
+        })
+        .from(roleRequestPresetOptionQualificationRoles)
+        .where(
+          eq(
+            roleRequestPresetOptionQualificationRoles.presetOptionId,
+            option.id,
+          ),
+        );
+
+      if ((qualificationCount?.count ?? 0) === 0) {
+        return {
+          kind: "invalid_input",
+
+          reason: "missing_qualification_roles",
+        } as const;
+      }
+    }
+
+    if (
+      displayName === option.displayName &&
+      description === option.description &&
+      requestRestriction === option.requestRestriction &&
+      capacity === option.capacity
+    ) {
+      return {
+        kind: "unchanged",
+
+        option: {
+          ...option,
+
+          requestRestriction,
+        },
+      } as const;
+    }
+
+    const now = new Date();
+
+    const [updatedOption] = await transaction
+      .update(roleRequestPresetOptions)
+      .set({
+        displayName,
+
+        description,
+
+        requestRestriction,
+
+        capacity,
+
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(roleRequestPresetOptions.id, option.id),
+
+          eq(roleRequestPresetOptions.presetId, preset.id),
+        ),
+      )
+      .returning({
+        id: roleRequestPresetOptions.id,
+
+        presetId: roleRequestPresetOptions.presetId,
+
+        key: roleRequestPresetOptions.key,
+
+        displayName: roleRequestPresetOptions.displayName,
+
+        description: roleRequestPresetOptions.description,
+
+        requestRestriction: roleRequestPresetOptions.requestRestriction,
+
+        capacity: roleRequestPresetOptions.capacity,
+
+        sortOrder: roleRequestPresetOptions.sortOrder,
+
+        active: roleRequestPresetOptions.active,
+      });
+
+    if (!updatedOption) {
+      throw new Error(
+        `Preset role option #${option.id} disappeared while its definition was being edited.`,
+      );
+    }
+
+    if (!isRequestRestriction(updatedOption.requestRestriction)) {
+      throw new Error(
+        `Preset role option #${updatedOption.id} returned unsupported request restriction "${updatedOption.requestRestriction}".`,
+      );
+    }
+
+    /*
+     * A child-definition mutation also changes the reusable preset as a whole.
+     */
+    await transaction
+      .update(roleRequestPresets)
+      .set({
+        updatedAt: now,
+      })
+      .where(eq(roleRequestPresets.id, preset.id));
+
+    return {
+      kind: "updated",
+
+      option: {
+        ...updatedOption,
+
+        requestRestriction: updatedOption.requestRestriction,
+      },
     } as const;
   });
 }
