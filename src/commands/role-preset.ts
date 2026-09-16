@@ -17,6 +17,7 @@ import {
   addPresetRequestGroup,
   addPresetRoleOption,
   createRoleRequestPreset,
+  editPresetRoleOption,
   editRoleRequestPreset,
   setRoleRequestPresetActive,
   setRoleRequestPresetGroupActive,
@@ -86,6 +87,11 @@ export async function handleRolePresetCommand(
 
     case "option-add":
       await addPresetOption(interaction, configuration.guildId);
+
+      return;
+
+    case "option-edit":
+      await editPresetOption(interaction, configuration.guildId);
 
       return;
 
@@ -667,6 +673,222 @@ async function addPresetOption(
       });
 
       return;
+  }
+}
+
+async function editPresetOption(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const presetId = interaction.options.getInteger("preset-id", true);
+
+  const presetOptionId = interaction.options.getInteger("option-id", true);
+
+  const displayName = interaction.options.getString("name") ?? undefined;
+
+  const suppliedDescription = interaction.options.getString("description");
+
+  const clearDescription =
+    interaction.options.getBoolean("clear-description") ?? false;
+
+  const suppliedCapacity = interaction.options.getInteger("capacity");
+
+  const clearCapacity =
+    interaction.options.getBoolean("clear-capacity") ?? false;
+
+  if (
+    (suppliedDescription !== null && clearDescription) ||
+    (suppliedCapacity !== null && clearCapacity)
+  ) {
+    await interaction.editReply({
+      content:
+        "Choose either a new value or its corresponding clear option, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const restrictionText = interaction.options.getString("restriction");
+
+  if (
+    restrictionText !== null &&
+    restrictionText !== "open" &&
+    restrictionText !== "qualified_only"
+  ) {
+    await interaction.editReply({
+      content: "The preset role-request restriction is invalid.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const requestRestriction: "open" | "qualified_only" | undefined =
+    restrictionText ?? undefined;
+
+  const description = clearDescription
+    ? null
+    : (suppliedDescription ?? undefined);
+
+  const capacity = clearCapacity ? null : (suppliedCapacity ?? undefined);
+
+  const result = await editPresetRoleOption({
+    guildDatabaseId,
+
+    presetId,
+
+    presetOptionId,
+
+    displayName,
+
+    description,
+
+    requestRestriction,
+
+    capacity,
+  });
+
+  switch (result.kind) {
+    case "updated": {
+      await interaction.editReply({
+        content: [
+          `✅ Updated preset role option **${result.option.displayName}** (#${result.option.id}) in preset #${result.option.presetId}.`,
+          `**Logical key:** \`${result.option.key}\``,
+          `**Restriction:** ${
+            result.option.requestRestriction === "qualified_only"
+              ? "Qualified only"
+              : "Open"
+          }`,
+          `**Capacity:** ${result.option.capacity ?? "Unlimited"}`,
+          result.option.description
+            ? `**Description:** ${result.option.description}`
+            : "**Description:** None",
+        ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: guildDatabaseId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "role_preset.option.edit",
+
+        outcome: "success",
+
+        summary: `Updated preset role option "${result.option.displayName}" (#${result.option.id}) in preset #${result.option.presetId}.`,
+
+        targetType: "role_request_preset_option",
+
+        targetId: String(result.option.id),
+
+        details: {
+          presetId: result.option.presetId,
+
+          key: result.option.key,
+
+          displayName: result.option.displayName,
+
+          description: result.option.description,
+
+          requestRestriction: result.option.requestRestriction,
+
+          capacity: result.option.capacity,
+
+          active: result.option.active,
+        },
+      });
+
+      return;
+    }
+
+    case "unchanged":
+      await interaction.editReply({
+        content: `Preset role option **${result.option.displayName}** (#${result.option.id}) already has the requested definition. No changes were made.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "preset_not_found":
+      await interaction.editReply({
+        content: `Role-request preset #${presetId} was not found in this server.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "option_not_found":
+      await interaction.editReply({
+        content: `Role option #${presetOptionId} was not found in role-request preset #${presetId}.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "invalid_input": {
+      let content: string;
+
+      switch (result.reason) {
+        case "no_changes_requested":
+          content =
+            "Supply at least one role-option change: `name`, `description`, `clear-description:true`, `restriction`, `capacity`, or `clear-capacity:true`.";
+
+          break;
+
+        case "invalid_name":
+          content =
+            "The role-option name is invalid. Use a non-empty name of no more than 100 characters.";
+
+          break;
+
+        case "invalid_request_restriction":
+          content = "The preset role-request restriction is invalid.";
+
+          break;
+
+        case "invalid_capacity":
+          content = "Capacity must be a positive whole number.";
+
+          break;
+
+        case "missing_qualification_roles":
+          content = `Preset role option #${presetOptionId} cannot be restricted to qualified members because it has no qualification roles configured.`;
+
+          break;
+      }
+
+      await interaction.editReply({
+        content,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+    }
   }
 }
 

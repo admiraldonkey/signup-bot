@@ -18,6 +18,8 @@ const adminServiceMocks = vi.hoisted(() => ({
 
   editRoleRequestPreset: vi.fn(),
 
+  editPresetRoleOption: vi.fn(),
+
   addPresetRoleOption: vi.fn(),
 
   addPresetRequestGroup: vi.fn(),
@@ -125,6 +127,7 @@ describe("/role-preset command", () => {
       "list",
       "show",
       "option-add",
+      "option-edit",
       "group-add",
       "apply",
       "set-active",
@@ -668,6 +671,351 @@ describe("/role-preset command", () => {
         }),
       }),
     );
+  });
+
+  it("edits a preset role option and audits the mutation", async () => {
+    // Arrange
+    adminServiceMocks.editPresetRoleOption.mockResolvedValue({
+      kind: "updated",
+
+      option: {
+        id: 11,
+
+        presetId: 7,
+
+        key: "captain",
+
+        displayName: "Ship Captain",
+
+        description: "Leads the ship.",
+
+        requestRestriction: "open",
+
+        capacity: 4,
+
+        sortOrder: 0,
+
+        active: true,
+      },
+    });
+
+    const interaction = createInteraction({
+      subcommand: "option-edit",
+
+      strings: {
+        name: "Ship Captain",
+
+        description: "Leads the ship.",
+
+        restriction: "open",
+      },
+
+      integers: {
+        "preset-id": 7,
+
+        "option-id": 11,
+
+        capacity: 4,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.editPresetRoleOption).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      presetId: 7,
+
+      presetOptionId: 11,
+
+      displayName: "Ship Captain",
+
+      description: "Leads the ship.",
+
+      requestRestriction: "open",
+
+      capacity: 4,
+    });
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: [
+        "✅ Updated preset role option **Ship Captain** (#11) in preset #7.",
+        "**Logical key:** `captain`",
+        "**Restriction:** Open",
+        "**Capacity:** 4",
+        "**Description:** Leads the ship.",
+      ].join("\n"),
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        guildId: 42,
+
+        actorUserId: ADMIN_USER_ID,
+
+        action: "role_preset.option.edit",
+
+        outcome: "success",
+
+        targetType: "role_request_preset_option",
+
+        targetId: "11",
+
+        details: {
+          presetId: 7,
+
+          key: "captain",
+
+          displayName: "Ship Captain",
+
+          description: "Leads the ship.",
+
+          requestRestriction: "open",
+
+          capacity: 4,
+
+          active: true,
+        },
+      }),
+    );
+  });
+
+  it("explicitly clears preset role-option description and capacity", async () => {
+    // Arrange
+    adminServiceMocks.editPresetRoleOption.mockResolvedValue({
+      kind: "updated",
+
+      option: {
+        id: 11,
+
+        presetId: 7,
+
+        key: "captain",
+
+        displayName: "Captain",
+
+        description: null,
+
+        requestRestriction: "open",
+
+        capacity: null,
+
+        sortOrder: 0,
+
+        active: true,
+      },
+    });
+
+    const interaction = createInteraction({
+      subcommand: "option-edit",
+
+      integers: {
+        "preset-id": 7,
+
+        "option-id": 11,
+      },
+
+      booleans: {
+        "clear-description": true,
+
+        "clear-capacity": true,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.editPresetRoleOption).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      presetId: 7,
+
+      presetOptionId: 11,
+
+      displayName: undefined,
+
+      description: null,
+
+      requestRestriction: undefined,
+
+      capacity: null,
+    });
+  });
+
+  it("rejects conflicting preset role-option clear arguments", async () => {
+    // Arrange
+    const interaction = createInteraction({
+      subcommand: "option-edit",
+
+      strings: {
+        description: "Description",
+      },
+
+      integers: {
+        "preset-id": 7,
+
+        "option-id": 11,
+
+        capacity: 2,
+      },
+
+      booleans: {
+        "clear-description": true,
+
+        "clear-capacity": true,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.editPresetRoleOption).not.toHaveBeenCalled();
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "Choose either a new value or its corresponding clear option, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("reports an unchanged preset role-option edit without auditing a mutation", async () => {
+    // Arrange
+    adminServiceMocks.editPresetRoleOption.mockResolvedValue({
+      kind: "unchanged",
+
+      option: {
+        id: 11,
+
+        presetId: 7,
+
+        key: "captain",
+
+        displayName: "Captain",
+
+        description: null,
+
+        requestRestriction: "open",
+
+        capacity: null,
+
+        sortOrder: 0,
+
+        active: true,
+      },
+    });
+
+    const interaction = createInteraction({
+      subcommand: "option-edit",
+
+      strings: {
+        name: "Captain",
+      },
+
+      integers: {
+        "preset-id": 7,
+
+        "option-id": 11,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "Preset role option **Captain** (#11) already has the requested definition. No changes were made.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("reports a missing qualification requirement for preset option editing", async () => {
+    // Arrange
+    adminServiceMocks.editPresetRoleOption.mockResolvedValue({
+      kind: "invalid_input",
+
+      reason: "missing_qualification_roles",
+    });
+
+    const interaction = createInteraction({
+      subcommand: "option-edit",
+
+      strings: {
+        restriction: "qualified_only",
+      },
+
+      integers: {
+        "preset-id": 7,
+
+        "option-id": 11,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "Preset role option #11 cannot be restricted to qualified members because it has no qualification roles configured.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("reports a preset role option that does not belong to the selected preset", async () => {
+    // Arrange
+    adminServiceMocks.editPresetRoleOption.mockResolvedValue({
+      kind: "option_not_found",
+    });
+
+    const interaction = createInteraction({
+      subcommand: "option-edit",
+
+      strings: {
+        name: "Ship Captain",
+      },
+
+      integers: {
+        "preset-id": 7,
+
+        "option-id": 999,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: "Role option #999 was not found in role-request preset #7.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
   });
 
   it("rejects one Discord role being selected at both qualification levels before calling the service", async () => {
