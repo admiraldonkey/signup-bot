@@ -230,9 +230,11 @@ A preset can contain:
 Current preset commands support:
 
 - creating a preset
+- editing preset name and description metadata
 - listing presets
 - inspecting a complete preset definition
 - adding role options
+- editing existing role-option display names, descriptions, request restrictions, and capacities
 - adding request groups
 - applying a preset to an existing event
 - activating or deactivating a preset
@@ -257,7 +259,9 @@ Lifecycle controls are non-destructive:
 
 Deactivating an option can intentionally leave an active group with no active mapped options. The bot warns the administrator rather than silently changing neighbouring configuration. Preset application remains the final authoritative validator and rejects an unusable active configuration.
 
-Editing existing preset fields and mappings is the next planned preset-management phase and is not yet exposed as a complete administrator workflow.
+Preset metadata and core role-option definition editing are implemented.
+
+Qualification-role replacement, request-group editing, and group-option mapping editing remain planned before the preset administration workflow is considered complete.
 
 ### Announcements and reminders
 
@@ -716,9 +720,11 @@ The following substantial areas are implemented:
 
 ### Immediate development direction
 
-The next planned area is **editing existing reusable role-request presets**.
+The current development focus is **completing editing of existing reusable role-request presets**.
 
-The current preset subsystem can create and deactivate or reactivate configuration, but a complete administrator workflow for editing existing preset metadata, option definitions, qualification rules, group settings, and group-option mappings is not yet implemented.
+Preset metadata editing and core role-option definition editing are implemented.
+
+The remaining preset-editing work includes qualification-role replacement, request-group editing, and group-option mapping editing before moving on to event templates.
 
 ### Event templates
 

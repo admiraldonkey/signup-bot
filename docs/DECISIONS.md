@@ -2100,13 +2100,20 @@ Administrators need to be able to prepare or repair configuration while keeping 
 
 ## D085 - Editing existing preset definitions must preserve snapshot semantics
 
-**Status: Planned, immediate next work**
+**Status: Current**
 
-Upcoming preset-edit functionality must alter the reusable source only.
+Preset-edit functionality alters the reusable source only.
 
 Already-applied events must not be rewritten automatically.
 
-Preset mutations must use the parent-row mutation lock described in D076.
+Preset mutations use the parent-row mutation lock described in D076.
+
+This invariant is currently implemented for:
+
+- preset metadata editing
+- preset role-option definition editing
+
+Future qualification, request-group, and mapping edits must preserve the same behaviour.
 
 ### Reason
 
@@ -2952,7 +2959,7 @@ implemented
     -> core message recovery
 
 planned
-    -> preset field editing
+    -> remaining preset qualification/group/mapping editing
     -> full event templates
     -> recurring event generation
     -> confirmed-organiser unavailability workflow
@@ -2969,6 +2976,49 @@ Documentation is used by:
 - potential users
 
 Ambiguous implementation status creates incorrect assumptions.
+
+---
+
+## D127 - Preset role-option logical keys remain stable after creation
+
+**Status: Current**
+
+A preset role option's logical key is stable identity after creation.
+
+Editing the human-readable display name must not regenerate or otherwise change that key.
+
+For example:
+
+```text
+display name
+    Captain
+        |
+        v
+    Ship Captain
+
+logical key
+    captain
+        |
+        v
+    captain
+```
+
+The current `/role-preset option-edit` operation therefore exposes display-name editing but does not expose logical-key editing.
+
+If changing logical identity is ever required, it should be designed as a separate explicit operation rather than being an accidental consequence of renaming presentation text.
+
+### Reason
+
+Logical keys participate in:
+
+- preset role-option identity
+- event-level snapshot conflict detection
+- reusable graph reasoning
+- administrator expectations about what a renamed option represents
+
+A display-name change is presentation.
+
+It should not turn an existing reusable role into a different logical role.
 
 ---
 
@@ -3056,6 +3106,9 @@ application
 
 preset mutation
     -> preset FOR UPDATE
+
+role-option display rename
+    -> logical key remains stable
 
 inactive child
     -> preserved configuration

@@ -2291,6 +2291,126 @@ Current fields include:
 
 ---
 
+# `/role-preset option-edit`
+
+Edits the mutable definition fields of an existing reusable preset role option.
+
+Use the option ID shown by:
+
+```text
+/role-preset show
+```
+
+Example:
+
+```text
+/role-preset option-edit
+preset-id: 7
+option-id: 11
+name: Ship Captain
+restriction: Open
+capacity: 4
+description: Leads the ship
+```
+
+Editable fields are:
+
+- displayed name
+- description
+- request restriction
+- capacity
+
+All edit fields except `preset-id` and `option-id` are optional.
+
+An administrator can therefore change only the values that need updating.
+
+## Clearing optional values
+
+To remove an existing description:
+
+```text
+/role-preset option-edit
+preset-id: 7
+option-id: 11
+clear-description: Yes
+```
+
+To remove an existing capacity limit:
+
+```text
+/role-preset option-edit
+preset-id: 7
+option-id: 11
+clear-capacity: Yes
+```
+
+Do not supply both a replacement value and its corresponding clear option in the same command.
+
+For example, do not combine:
+
+```text
+capacity: 4
+clear-capacity: Yes
+```
+
+## Logical key behaviour
+
+Changing the displayed role name does **not** change the option's logical key.
+
+For example:
+
+```text
+Captain
+    -> renamed to Ship Captain
+
+logical key
+    -> remains captain
+```
+
+The logical key is stable identity after option creation.
+
+A human-readable rename therefore does not create a different logical role or alter the identity used during preset application and conflict detection.
+
+## Qualification behaviour
+
+Changing an existing option to:
+
+```text
+Qualified only
+```
+
+requires the option to already have at least one configured qualification role.
+
+Qualification-role editing is a separate administration operation and is not part of `/role-preset option-edit`.
+
+Changing an option from:
+
+```text
+Qualified only
+```
+
+back to:
+
+```text
+Open
+```
+
+does not delete its stored qualification-role configuration.
+
+That configuration remains available for later reuse or explicit editing.
+
+## Snapshot behaviour
+
+Editing a preset role option changes reusable source configuration for future applications.
+
+It does not alter event-level role options already created from the preset.
+
+Inactive presets remain editable.
+
+If the requested values already match the stored definition, the command reports that no changes were made rather than recording a false mutation.
+
+---
+
 # Preset Option Qualification Rules
 
 The same qualification principles as event-level options apply.
@@ -2650,15 +2770,17 @@ Repeatedly asking for the state it already has returns a no-change result.
 
 ---
 
-# Current Preset Administration Limitation
+# Remaining Preset Administration Limitations
 
 The current preset subsystem supports:
 
 ```text
 create
+edit
 list
 show
 option-add
+option-edit
 group-add
 apply
 set-active
@@ -2666,20 +2788,18 @@ option-set-active
 group-set-active
 ```
 
-A complete command workflow for editing existing preset fields is **not yet implemented**.
+Preset parent metadata and core role-option definition editing are implemented.
 
-For example, there is not yet a complete supported administrator flow for changing an existing preset's:
+The remaining existing-definition editing work includes:
 
-- name
-- description
-- option metadata
-- qualification mappings
-- request-group timing
-- destination
-- notification role
-- option mappings
+- qualification-role replacement
+- request-group metadata and timing
+- destination-channel behaviour
+- notification roles
+- signup requirements
+- group-option mappings
 
-That is the next planned preset feature phase.
+These remaining operations will continue to use the existing preset mutation-lock and snapshot-independence rules.
 
 For now, lifecycle controls are non-destructive and can be used to temporarily retire configuration without deleting it.
 

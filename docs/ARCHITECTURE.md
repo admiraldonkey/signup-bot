@@ -2366,15 +2366,154 @@ Successful metadata editing is therefore a source-configuration mutation for fut
 
 ---
 
+# Preset Role-Option Editing
+
+Existing reusable preset role options can be edited without recreating either the option or its parent preset.
+
+Currently editable fields are:
+
+```text
+display name
+description
+request restriction
+capacity
+```
+
+The option's logical key is deliberately not editable.
+
+Conceptually:
+
+```text
+logical key
+    -> stable identity
+
+display name
+    -> administrator-facing presentation
+```
+
+Renaming:
+
+```text
+Captain
+```
+
+to:
+
+```text
+Ship Captain
+```
+
+therefore leaves:
+
+```text
+key = captain
+```
+
+unchanged.
+
+This prevents a presentation edit from silently becoming a logical identity change.
+
+Nullable field editing distinguishes:
+
+```text
+undefined
+    -> leave unchanged
+
+value
+    -> replace
+
+null
+    -> explicitly clear
+```
+
+This applies to:
+
+```text
+description
+capacity
+```
+
+Role-option editing locks the preset parent row:
+
+```text
+role_request_presets FOR UPDATE
+```
+
+Preset application continues to use:
+
+```text
+role_request_presets FOR SHARE
+```
+
+Application therefore observes either:
+
+```text
+complete option definition before edit
+```
+
+or:
+
+```text
+complete option definition after edit
+```
+
+rather than a partially-mutated preset graph.
+
+A true no-op returns an unchanged result and does not advance either the option or parent preset update timestamp.
+
+A real option-definition mutation updates both:
+
+```text
+role_request_preset_options.updated_at
+role_request_presets.updated_at
+```
+
+Inactive presets remain editable.
+
+Guild ownership and child ownership are checked authoritatively.
+
+An option belonging to preset B cannot be edited through preset A.
+
+Existing event-level snapshots remain independent and are not rewritten.
+
+## Qualification interaction
+
+Qualification-role replacement is a separate preset-editing operation.
+
+Changing an option from:
+
+```text
+open
+```
+
+to:
+
+```text
+qualified_only
+```
+
+is allowed only when that option already has at least one stored qualification role.
+
+Changing an option back to:
+
+```text
+open
+```
+
+preserves existing qualification rows.
+
+This avoids destructive side effects while qualification editing remains an explicit separate mutation.
+
+---
+
 # Remaining Preset Editing
 
-Complete editing of child preset definitions remains planned.
+Complete editing of the remaining child preset graph is still planned.
 
 Remaining areas include:
 
-- role-option display and policy editing
-- qualification-role editing
-- capacity editing
+- qualification-role replacement
+- request-group metadata editing
 - request-group destination editing
 - notification-role editing
 - signup-gate editing

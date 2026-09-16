@@ -8,6 +8,7 @@ import {
   addPresetRequestGroup,
   addPresetRoleOption,
   createRoleRequestPreset,
+  editPresetRoleOption,
   editRoleRequestPreset,
   setRoleRequestPresetActive,
   setRoleRequestPresetGroupActive,
@@ -558,6 +559,745 @@ describe("role-request preset administration service", () => {
 
       reason: "no_changes_requested",
     });
+  });
+
+  it("edits an inactive preset role option without changing its logical key", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const fixedUpdatedAt = new Date("2026-01-01T00:00:00Z");
+
+    await pool.query(
+      `
+        UPDATE
+          "role_request_presets"
+        SET
+          "active" = false,
+          "updated_at" = $2
+        WHERE
+          "id" = $1
+      `,
+      [fixture.presetId, fixedUpdatedAt],
+    );
+
+    await pool.query(
+      `
+        UPDATE
+          "role_request_preset_options"
+        SET
+          "description" = 'Original captain description.',
+          "capacity" = 2,
+          "updated_at" = $2
+        WHERE
+          "id" = $1
+      `,
+      [options.captainId, fixedUpdatedAt],
+    );
+
+    // Act
+    const result = await editPresetRoleOption({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetOptionId: options.captainId,
+
+      displayName: "  Ship Captain  ",
+
+      description: "  Leads the ship.  ",
+
+      capacity: 4,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "updated",
+
+      option: {
+        id: options.captainId,
+
+        presetId: fixture.presetId,
+
+        /*
+         * Display-name editing must not silently change logical identity.
+         */
+        key: "captain",
+
+        displayName: "Ship Captain",
+
+        description: "Leads the ship.",
+
+        requestRestriction: "open",
+
+        capacity: 4,
+
+        sortOrder: 0,
+
+        active: true,
+      },
+    });
+
+    const storedOption = await pool.query<{
+      key: string;
+
+      display_name: string;
+
+      description: string | null;
+
+      request_restriction: string;
+
+      capacity: number | null;
+
+      updated_at: Date;
+    }>(
+      `
+        SELECT
+          "key",
+          "display_name",
+          "description",
+          "request_restriction",
+          "capacity",
+          "updated_at"
+        FROM
+          "role_request_preset_options"
+        WHERE
+          "id" = $1
+      `,
+      [options.captainId],
+    );
+
+    expect(storedOption.rows).toHaveLength(1);
+
+    expect(storedOption.rows[0]).toMatchObject({
+      key: "captain",
+
+      display_name: "Ship Captain",
+
+      description: "Leads the ship.",
+
+      request_restriction: "open",
+
+      capacity: 4,
+    });
+
+    expect(storedOption.rows[0]?.updated_at.getTime()).toBeGreaterThan(
+      fixedUpdatedAt.getTime(),
+    );
+
+    const storedPreset = await pool.query<{
+      active: boolean;
+
+      updated_at: Date;
+    }>(
+      `
+        SELECT
+          "active",
+          "updated_at"
+        FROM
+          "role_request_presets"
+        WHERE
+          "id" = $1
+      `,
+      [fixture.presetId],
+    );
+
+    expect(storedPreset.rows).toHaveLength(1);
+
+    /*
+     * Inactive presets remain editable, but editing a child must not
+     * reactivate the parent.
+     */
+    expect(storedPreset.rows[0]?.active).toBe(false);
+
+    expect(storedPreset.rows[0]?.updated_at.getTime()).toBeGreaterThan(
+      fixedUpdatedAt.getTime(),
+    );
+  });
+
+  it("treats equivalent preset role-option fields as an idempotent no-op", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const fixedUpdatedAt = new Date("2026-01-01T00:00:00Z");
+
+    await pool.query(
+      `
+        UPDATE
+          "role_request_preset_options"
+        SET
+          "updated_at" = $2
+        WHERE
+          "id" = $1
+      `,
+      [options.captainId, fixedUpdatedAt],
+    );
+
+    await pool.query(
+      `
+        UPDATE
+          "role_request_presets"
+        SET
+          "updated_at" = $2
+        WHERE
+          "id" = $1
+      `,
+      [fixture.presetId, fixedUpdatedAt],
+    );
+
+    // Act
+    const result = await editPresetRoleOption({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetOptionId: options.captainId,
+
+      displayName: "  Captain  ",
+
+      requestRestriction: "open",
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "unchanged",
+
+      option: {
+        id: options.captainId,
+
+        presetId: fixture.presetId,
+
+        key: "captain",
+
+        displayName: "Captain",
+
+        description: null,
+
+        requestRestriction: "open",
+
+        capacity: null,
+
+        sortOrder: 0,
+
+        active: true,
+      },
+    });
+
+    const timestamps = await pool.query<{
+      option_updated_at: Date;
+
+      preset_updated_at: Date;
+    }>(
+      `
+        SELECT
+          "option"."updated_at" AS "option_updated_at",
+          "preset"."updated_at" AS "preset_updated_at"
+        FROM
+          "role_request_preset_options" AS "option"
+        INNER JOIN
+          "role_request_presets" AS "preset"
+        ON
+          "preset"."id" = "option"."preset_id"
+        WHERE
+          "option"."id" = $1
+      `,
+      [options.captainId],
+    );
+
+    expect(timestamps.rows).toHaveLength(1);
+
+    expect(timestamps.rows[0]?.option_updated_at.getTime()).toBe(
+      fixedUpdatedAt.getTime(),
+    );
+
+    expect(timestamps.rows[0]?.preset_updated_at.getTime()).toBe(
+      fixedUpdatedAt.getTime(),
+    );
+  });
+
+  it("explicitly clears a preset role option description and capacity", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    await pool.query(
+      `
+        UPDATE
+          "role_request_preset_options"
+        SET
+          "description" = 'Command role.',
+          "capacity" = 2
+        WHERE
+          "id" = $1
+      `,
+      [options.captainId],
+    );
+
+    // Act
+    const result = await editPresetRoleOption({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetOptionId: options.captainId,
+
+      description: null,
+
+      capacity: null,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "updated",
+
+      option: {
+        id: options.captainId,
+
+        presetId: fixture.presetId,
+
+        key: "captain",
+
+        displayName: "Captain",
+
+        description: null,
+
+        requestRestriction: "open",
+
+        capacity: null,
+
+        sortOrder: 0,
+
+        active: true,
+      },
+    });
+
+    const stored = await pool.query<{
+      description: string | null;
+
+      capacity: number | null;
+    }>(
+      `
+        SELECT
+          "description",
+          "capacity"
+        FROM
+          "role_request_preset_options"
+        WHERE
+          "id" = $1
+      `,
+      [options.captainId],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        description: null,
+
+        capacity: null,
+      },
+    ]);
+  });
+
+  it("rejects changing an option to qualified-only when it has no qualification roles", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const fixedUpdatedAt = new Date("2026-01-01T00:00:00Z");
+
+    await pool.query(
+      `
+        UPDATE
+          "role_request_preset_options"
+        SET
+          "updated_at" = $2
+        WHERE
+          "id" = $1
+      `,
+      [options.captainId, fixedUpdatedAt],
+    );
+
+    await pool.query(
+      `
+        UPDATE
+          "role_request_presets"
+        SET
+          "updated_at" = $2
+        WHERE
+          "id" = $1
+      `,
+      [fixture.presetId, fixedUpdatedAt],
+    );
+
+    // Act
+    const result = await editPresetRoleOption({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetOptionId: options.captainId,
+
+      requestRestriction: "qualified_only",
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "missing_qualification_roles",
+    });
+
+    const stored = await pool.query<{
+      request_restriction: string;
+
+      option_updated_at: Date;
+
+      preset_updated_at: Date;
+    }>(
+      `
+        SELECT
+          "option"."request_restriction",
+          "option"."updated_at" AS "option_updated_at",
+          "preset"."updated_at" AS "preset_updated_at"
+        FROM
+          "role_request_preset_options" AS "option"
+        INNER JOIN
+          "role_request_presets" AS "preset"
+        ON
+          "preset"."id" = "option"."preset_id"
+        WHERE
+          "option"."id" = $1
+      `,
+      [options.captainId],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        request_restriction: "open",
+
+        option_updated_at: fixedUpdatedAt,
+
+        preset_updated_at: fixedUpdatedAt,
+      },
+    ]);
+  });
+
+  it("changes an option to qualified-only when qualification roles already exist", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    await pool.query(
+      `
+        INSERT INTO
+          "role_request_preset_option_qualification_roles" (
+            "preset_option_id",
+            "discord_role_id",
+            "role_name_snapshot",
+            "qualification_level"
+          )
+        VALUES (
+          $1,
+          $2,
+          'Qualified Captain',
+          'qualified'
+        )
+      `,
+      [options.captainId, QUALIFIED_ROLE_ID],
+    );
+
+    // Act
+    const result = await editPresetRoleOption({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetOptionId: options.captainId,
+
+      requestRestriction: "qualified_only",
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "updated",
+
+      option: {
+        id: options.captainId,
+
+        presetId: fixture.presetId,
+
+        key: "captain",
+
+        displayName: "Captain",
+
+        description: null,
+
+        requestRestriction: "qualified_only",
+
+        capacity: null,
+
+        sortOrder: 0,
+
+        active: true,
+      },
+    });
+  });
+
+  it("preserves qualification roles when changing a preset option back to open", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    await pool.query(
+      `
+        UPDATE
+          "role_request_preset_options"
+        SET
+          "request_restriction" = 'qualified_only'
+        WHERE
+          "id" = $1
+      `,
+      [options.captainId],
+    );
+
+    await pool.query(
+      `
+        INSERT INTO
+          "role_request_preset_option_qualification_roles" (
+            "preset_option_id",
+            "discord_role_id",
+            "role_name_snapshot",
+            "qualification_level"
+          )
+        VALUES (
+          $1,
+          $2,
+          'Qualified Captain',
+          'qualified'
+        )
+      `,
+      [options.captainId, QUALIFIED_ROLE_ID],
+    );
+
+    // Act
+    const result = await editPresetRoleOption({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetOptionId: options.captainId,
+
+      requestRestriction: "open",
+    });
+
+    // Assert
+    expect(result.kind).toBe("updated");
+
+    const qualificationCount = await pool.query<{
+      count: number;
+    }>(
+      `
+        SELECT
+          COUNT(*)::int AS "count"
+        FROM
+          "role_request_preset_option_qualification_roles"
+        WHERE
+          "preset_option_id" = $1
+      `,
+      [options.captainId],
+    );
+
+    expect(qualificationCount.rows).toEqual([
+      {
+        count: 1,
+      },
+    ]);
+  });
+
+  it("rejects a role option that belongs to a different preset", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const otherPreset = await createRoleRequestPreset({
+      guildDatabaseId: fixture.guildId,
+
+      name: "Linebattle",
+
+      description: null,
+
+      createdByUserId: ADMIN_USER_ID,
+    });
+
+    expect(otherPreset.kind).toBe("created");
+
+    if (otherPreset.kind !== "created") {
+      throw new Error("The second integration-test preset was not created.");
+    }
+
+    // Act
+    const result = await editPresetRoleOption({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: otherPreset.preset.id,
+
+      presetOptionId: options.captainId,
+
+      displayName: "Foreign Captain",
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "option_not_found",
+    });
+  });
+
+  it("does not allow one guild to edit another guild's preset role option", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const otherGuildId = await createGuild(pool, OTHER_DISCORD_GUILD_ID);
+
+    // Act
+    const result = await editPresetRoleOption({
+      guildDatabaseId: otherGuildId,
+
+      presetId: fixture.presetId,
+
+      presetOptionId: options.captainId,
+
+      displayName: "Foreign Captain",
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "preset_not_found",
+    });
+  });
+
+  it("rejects invalid preset role-option edits before changing stored state", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    // Act / Assert
+    await expect(
+      editPresetRoleOption({
+        guildDatabaseId: fixture.guildId,
+
+        presetId: fixture.presetId,
+
+        presetOptionId: options.captainId,
+      }),
+    ).resolves.toEqual({
+      kind: "invalid_input",
+
+      reason: "no_changes_requested",
+    });
+
+    await expect(
+      editPresetRoleOption({
+        guildDatabaseId: fixture.guildId,
+
+        presetId: fixture.presetId,
+
+        presetOptionId: options.captainId,
+
+        displayName: "   ",
+      }),
+    ).resolves.toEqual({
+      kind: "invalid_input",
+
+      reason: "invalid_name",
+    });
+
+    await expect(
+      editPresetRoleOption({
+        guildDatabaseId: fixture.guildId,
+
+        presetId: fixture.presetId,
+
+        presetOptionId: options.captainId,
+
+        requestRestriction: "captains_only",
+      }),
+    ).resolves.toEqual({
+      kind: "invalid_input",
+
+      reason: "invalid_request_restriction",
+    });
+
+    await expect(
+      editPresetRoleOption({
+        guildDatabaseId: fixture.guildId,
+
+        presetId: fixture.presetId,
+
+        presetOptionId: options.captainId,
+
+        capacity: 0,
+      }),
+    ).resolves.toEqual({
+      kind: "invalid_input",
+
+      reason: "invalid_capacity",
+    });
+
+    await expect(
+      editPresetRoleOption({
+        guildDatabaseId: fixture.guildId,
+
+        presetId: fixture.presetId,
+
+        presetOptionId: options.captainId,
+
+        capacity: 2_147_483_648,
+      }),
+    ).resolves.toEqual({
+      kind: "invalid_input",
+
+      reason: "invalid_capacity",
+    });
+
+    const stored = await pool.query<{
+      display_name: string;
+
+      request_restriction: string;
+
+      capacity: number | null;
+    }>(
+      `
+        SELECT
+          "display_name",
+          "request_restriction",
+          "capacity"
+        FROM
+          "role_request_preset_options"
+        WHERE
+          "id" = $1
+      `,
+      [options.captainId],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        display_name: "Captain",
+
+        request_restriction: "open",
+
+        capacity: null,
+      },
+    ]);
   });
 
   it("deactivates a preset without changing its child configuration", async () => {

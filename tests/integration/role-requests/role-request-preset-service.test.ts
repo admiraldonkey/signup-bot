@@ -6,7 +6,10 @@ import { pool as applicationPool } from "../../../src/db/client.js";
 
 import { applyRoleRequestPresetToEvent } from "../../../src/role-requests/role-request-preset-service.js";
 
-import { editRoleRequestPreset } from "../../../src/role-requests/role-request-preset-admin-service.js";
+import {
+  editRoleRequestPreset,
+  editPresetRoleOption,
+} from "../../../src/role-requests/role-request-preset-admin-service.js";
 
 import {
   createIntegrationPool,
@@ -776,6 +779,172 @@ describe("role-request preset application service", () => {
     }
   });
 
+  it("serialises preset role-option editing behind an in-flight preset application", async () => {
+    // Arrange
+    const fixture = await createFixture(pool);
+
+    const blockerClient = await pool.connect();
+
+    let blockerReleased = false;
+
+    let applicationPromise: ReturnType<
+      typeof applyRoleRequestPresetToEvent
+    > | null = null;
+
+    let editPromise: ReturnType<typeof editPresetRoleOption> | null = null;
+
+    try {
+      await blockerClient.query("BEGIN");
+
+      /*
+       * Application reaches this table after taking FOR SHARE on the preset
+       * parent row. Blocking it here keeps that shared lock alive while the
+       * option edit attempts to obtain FOR UPDATE on the same parent.
+       */
+      await blockerClient.query(`
+        LOCK TABLE "event_role_request_preset_applications"
+        IN ACCESS EXCLUSIVE MODE
+      `);
+
+      applicationPromise = applyRoleRequestPresetToEvent({
+        guildDatabaseId: fixture.guildId,
+
+        eventId: fixture.eventId,
+
+        presetId: fixture.presetId,
+
+        appliedByUserId: ADMIN_USER_ID,
+      });
+
+      await waitForBlockedDatabaseQuery(
+        pool,
+        '%from "event_role_request_preset_applications"%',
+      );
+
+      let editResolved = false;
+
+      editPromise = editPresetRoleOption({
+        guildDatabaseId: fixture.guildId,
+
+        presetId: fixture.presetId,
+
+        presetOptionId: fixture.carpenterPresetOptionId,
+
+        displayName: "Shipwright",
+      }).then((result) => {
+        editResolved = true;
+
+        return result;
+      });
+
+      await waitForBlockedDatabaseQuery(
+        pool,
+        '%from "role_request_presets"%for update%',
+      );
+
+      expect(editResolved).toBe(false);
+
+      await blockerClient.query("COMMIT");
+
+      blockerReleased = true;
+
+      const applicationResult = await applicationPromise;
+
+      const editResult = await editPromise;
+
+      // Assert
+      expect(applicationResult.kind).toBe("applied");
+
+      expect(editResult).toEqual({
+        kind: "updated",
+
+        option: {
+          id: fixture.carpenterPresetOptionId,
+
+          presetId: fixture.presetId,
+
+          key: "carpenter",
+
+          displayName: "Shipwright",
+
+          description: "Repair the ship.",
+
+          requestRestriction: "open",
+
+          capacity: null,
+
+          sortOrder: 1,
+
+          active: true,
+        },
+      });
+
+      /*
+       * Application acquired FOR SHARE first, so the event snapshot must
+       * contain the complete pre-edit definition.
+       */
+      const eventOption = await pool.query<{
+        display_name: string;
+      }>(
+        `
+          SELECT
+            "display_name"
+          FROM
+            "event_role_options"
+          WHERE
+            "event_id" = $1
+            AND
+            "source_role_request_preset_option_id" = $2
+        `,
+        [fixture.eventId, fixture.carpenterPresetOptionId],
+      );
+
+      expect(eventOption.rows).toEqual([
+        {
+          display_name: "Carpenter",
+        },
+      ]);
+
+      const sourceOption = await pool.query<{
+        display_name: string;
+      }>(
+        `
+          SELECT
+            "display_name"
+          FROM
+            "role_request_preset_options"
+          WHERE
+            "id" = $1
+        `,
+        [fixture.carpenterPresetOptionId],
+      );
+
+      expect(sourceOption.rows).toEqual([
+        {
+          display_name: "Shipwright",
+        },
+      ]);
+    } finally {
+      if (!blockerReleased) {
+        await blockerClient.query("ROLLBACK").catch(() => undefined);
+      }
+
+      blockerClient.release();
+
+      const pendingOperations: Promise<unknown>[] = [];
+
+      if (applicationPromise) {
+        pendingOperations.push(applicationPromise);
+      }
+
+      if (editPromise) {
+        pendingOperations.push(editPromise);
+      }
+
+      await Promise.allSettled(pendingOperations);
+    }
+  });
+
   it("keeps applied event state independent from later preset edits", async () => {
     // Arrange
     const fixture = await createFixture(pool);
@@ -799,19 +968,21 @@ describe("role-request preset application service", () => {
     }
 
     // Act
-    await pool.query(
-      `
-        UPDATE
-          "role_request_preset_options"
-        SET
-          "display_name" = 'Changed Captain',
-          "request_restriction" = 'open',
-          "capacity" = 99
-        WHERE
-          "id" = $1
-      `,
-      [fixture.captainPresetOptionId],
-    );
+    const optionEditResult = await editPresetRoleOption({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetOptionId: fixture.captainPresetOptionId,
+
+      displayName: "Changed Captain",
+
+      requestRestriction: "open",
+
+      capacity: 99,
+    });
+
+    expect(optionEditResult.kind).toBe("updated");
 
     await pool.query(
       `

@@ -1371,6 +1371,74 @@ export const commandDefinitions = [
 
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("option-edit")
+        .setDescription("Edits an existing reusable preset role option.")
+        /*
+         * Discord requires required options before optional options.
+         */
+        .addIntegerOption((option) =>
+          option
+            .setName("preset-id")
+            .setDescription("Preset ID shown by /role-preset list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("option-id")
+            .setDescription("Role-option ID shown by /role-preset show.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("name")
+            .setDescription("Replacement displayed role name.")
+            .setMinLength(1)
+            .setMaxLength(100),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("description")
+            .setDescription("Replacement role-option description.")
+            .setMaxLength(1000),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("clear-description")
+            .setDescription("Remove the existing role-option description."),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("restriction")
+            .setDescription("Who may request this role.")
+            .addChoices(
+              {
+                name: "Open",
+                value: "open",
+              },
+
+              {
+                name: "Qualified only",
+                value: "qualified_only",
+              },
+            ),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("capacity")
+            .setDescription("Replacement maximum number of requests.")
+            .setMinValue(1),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("clear-capacity")
+            .setDescription("Remove the existing capacity limit."),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("group-add")
         .setDescription("Adds a reusable role-request group to a preset.")
 
