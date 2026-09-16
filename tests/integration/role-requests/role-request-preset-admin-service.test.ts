@@ -9,6 +9,7 @@ import {
   addPresetRoleOption,
   createRoleRequestPreset,
   editPresetRoleOption,
+  replacePresetRoleOptionQualificationRoles,
   editRoleRequestPreset,
   setRoleRequestPresetActive,
   setRoleRequestPresetGroupActive,
@@ -1298,6 +1299,583 @@ describe("role-request preset administration service", () => {
         capacity: null,
       },
     ]);
+  });
+
+  it("atomically replaces a preset role option's qualification roles", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    await pool.query(
+      `
+        UPDATE
+          "role_request_preset_options"
+        SET
+          "request_restriction" = 'qualified_only'
+        WHERE
+          "id" = $1
+      `,
+      [options.captainId],
+    );
+
+    await pool.query(
+      `
+        INSERT INTO
+          "role_request_preset_option_qualification_roles" (
+            "preset_option_id",
+            "discord_role_id",
+            "role_name_snapshot",
+            "qualification_level"
+          )
+        VALUES (
+          $1,
+          $2,
+          'Old Captain Qualification',
+          'qualified'
+        )
+      `,
+      [options.captainId, "986000000000000008"],
+    );
+
+    // Act
+    const result = await replacePresetRoleOptionQualificationRoles({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetOptionId: options.captainId,
+
+      qualificationRoles: [
+        {
+          discordRoleId: QUALIFIED_ROLE_ID,
+
+          roleNameSnapshot: "  Qualified Captain  ",
+
+          qualificationLevel: "qualified",
+        },
+
+        {
+          discordRoleId: SUPERVISED_ROLE_ID,
+
+          roleNameSnapshot: "Captain Trainee",
+
+          qualificationLevel: "supervision_required",
+        },
+      ],
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "updated",
+
+      option: {
+        id: options.captainId,
+
+        presetId: fixture.presetId,
+
+        displayName: "Captain",
+
+        requestRestriction: "qualified_only",
+
+        active: true,
+      },
+
+      qualificationRoles: [
+        {
+          discordRoleId: QUALIFIED_ROLE_ID,
+
+          roleNameSnapshot: "Qualified Captain",
+
+          qualificationLevel: "qualified",
+        },
+
+        {
+          discordRoleId: SUPERVISED_ROLE_ID,
+
+          roleNameSnapshot: "Captain Trainee",
+
+          qualificationLevel: "supervision_required",
+        },
+      ],
+    });
+
+    const stored = await pool.query<{
+      discord_role_id: string;
+
+      role_name_snapshot: string;
+
+      qualification_level: string;
+    }>(
+      `
+        SELECT
+          "discord_role_id",
+          "role_name_snapshot",
+          "qualification_level"
+        FROM
+          "role_request_preset_option_qualification_roles"
+        WHERE
+          "preset_option_id" = $1
+        ORDER BY
+          "discord_role_id"
+      `,
+      [options.captainId],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        discord_role_id: QUALIFIED_ROLE_ID,
+
+        role_name_snapshot: "Qualified Captain",
+
+        qualification_level: "qualified",
+      },
+
+      {
+        discord_role_id: SUPERVISED_ROLE_ID,
+
+        role_name_snapshot: "Captain Trainee",
+
+        qualification_level: "supervision_required",
+      },
+    ]);
+  });
+
+  it("treats an equivalent qualification-role replacement as a no-op regardless of input order", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const fixedUpdatedAt = new Date("2026-01-01T00:00:00Z");
+
+    await pool.query(
+      `
+        UPDATE
+          "role_request_preset_options"
+        SET
+          "request_restriction" = 'qualified_only',
+          "updated_at" = $2
+        WHERE
+          "id" = $1
+      `,
+      [options.captainId, fixedUpdatedAt],
+    );
+
+    await pool.query(
+      `
+        UPDATE
+          "role_request_presets"
+        SET
+          "updated_at" = $2
+        WHERE
+          "id" = $1
+      `,
+      [fixture.presetId, fixedUpdatedAt],
+    );
+
+    await pool.query(
+      `
+        INSERT INTO
+          "role_request_preset_option_qualification_roles" (
+            "preset_option_id",
+            "discord_role_id",
+            "role_name_snapshot",
+            "qualification_level"
+          )
+        VALUES
+          ($1, $2, 'Qualified Captain', 'qualified'),
+          ($1, $3, 'Captain Trainee', 'supervision_required')
+      `,
+      [options.captainId, QUALIFIED_ROLE_ID, SUPERVISED_ROLE_ID],
+    );
+
+    // Act
+    const result = await replacePresetRoleOptionQualificationRoles({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetOptionId: options.captainId,
+
+      /*
+       * Deliberately reversed from storage order.
+       */
+      qualificationRoles: [
+        {
+          discordRoleId: SUPERVISED_ROLE_ID,
+
+          roleNameSnapshot: "Captain Trainee",
+
+          qualificationLevel: "supervision_required",
+        },
+
+        {
+          discordRoleId: QUALIFIED_ROLE_ID,
+
+          roleNameSnapshot: "Qualified Captain",
+
+          qualificationLevel: "qualified",
+        },
+      ],
+    });
+
+    // Assert
+    expect(result.kind).toBe("unchanged");
+
+    const timestamps = await pool.query<{
+      option_updated_at: Date;
+
+      preset_updated_at: Date;
+    }>(
+      `
+        SELECT
+          "option"."updated_at" AS "option_updated_at",
+          "preset"."updated_at" AS "preset_updated_at"
+        FROM
+          "role_request_preset_options" AS "option"
+        INNER JOIN
+          "role_request_presets" AS "preset"
+        ON
+          "preset"."id" = "option"."preset_id"
+        WHERE
+          "option"."id" = $1
+      `,
+      [options.captainId],
+    );
+
+    expect(timestamps.rows).toEqual([
+      {
+        option_updated_at: fixedUpdatedAt,
+
+        preset_updated_at: fixedUpdatedAt,
+      },
+    ]);
+  });
+
+  it("clears all qualification roles from an open preset option", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    await pool.query(
+      `
+        INSERT INTO
+          "role_request_preset_option_qualification_roles" (
+            "preset_option_id",
+            "discord_role_id",
+            "role_name_snapshot",
+            "qualification_level"
+          )
+        VALUES (
+          $1,
+          $2,
+          'Qualified Captain',
+          'qualified'
+        )
+      `,
+      [options.captainId, QUALIFIED_ROLE_ID],
+    );
+
+    // Act
+    const result = await replacePresetRoleOptionQualificationRoles({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetOptionId: options.captainId,
+
+      qualificationRoles: [],
+    });
+
+    // Assert
+    expect(result.kind).toBe("updated");
+
+    if (result.kind !== "updated") {
+      throw new Error(
+        `Expected qualification replacement to succeed, received "${result.kind}".`,
+      );
+    }
+
+    expect(result.qualificationRoles).toEqual([]);
+
+    const stored = await pool.query<{
+      count: number;
+    }>(
+      `
+        SELECT
+          COUNT(*)::int AS "count"
+        FROM
+          "role_request_preset_option_qualification_roles"
+        WHERE
+          "preset_option_id" = $1
+      `,
+      [options.captainId],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+  });
+
+  it("rejects clearing the final qualification roles from a qualified-only option", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    await pool.query(
+      `
+        UPDATE
+          "role_request_preset_options"
+        SET
+          "request_restriction" = 'qualified_only'
+        WHERE
+          "id" = $1
+      `,
+      [options.captainId],
+    );
+
+    await pool.query(
+      `
+        INSERT INTO
+          "role_request_preset_option_qualification_roles" (
+            "preset_option_id",
+            "discord_role_id",
+            "role_name_snapshot",
+            "qualification_level"
+          )
+        VALUES (
+          $1,
+          $2,
+          'Qualified Captain',
+          'qualified'
+        )
+      `,
+      [options.captainId, QUALIFIED_ROLE_ID],
+    );
+
+    // Act
+    const result = await replacePresetRoleOptionQualificationRoles({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetOptionId: options.captainId,
+
+      qualificationRoles: [],
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "missing_qualification_roles",
+    });
+
+    const stored = await pool.query<{
+      discord_role_id: string;
+
+      qualification_level: string;
+    }>(
+      `
+        SELECT
+          "discord_role_id",
+          "qualification_level"
+        FROM
+          "role_request_preset_option_qualification_roles"
+        WHERE
+          "preset_option_id" = $1
+      `,
+      [options.captainId],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        discord_role_id: QUALIFIED_ROLE_ID,
+
+        qualification_level: "qualified",
+      },
+    ]);
+  });
+
+  it("rejects invalid qualification replacement input without changing existing roles", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    await pool.query(
+      `
+        INSERT INTO
+          "role_request_preset_option_qualification_roles" (
+            "preset_option_id",
+            "discord_role_id",
+            "role_name_snapshot",
+            "qualification_level"
+          )
+        VALUES (
+          $1,
+          $2,
+          'Qualified Captain',
+          'qualified'
+        )
+      `,
+      [options.captainId, QUALIFIED_ROLE_ID],
+    );
+
+    // Act
+    const duplicateResult = await replacePresetRoleOptionQualificationRoles({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetOptionId: options.captainId,
+
+      qualificationRoles: [
+        {
+          discordRoleId: SUPERVISED_ROLE_ID,
+
+          roleNameSnapshot: "Captain",
+
+          qualificationLevel: "qualified",
+        },
+
+        {
+          discordRoleId: SUPERVISED_ROLE_ID,
+
+          roleNameSnapshot: "Captain Trainee",
+
+          qualificationLevel: "supervision_required",
+        },
+      ],
+    });
+
+    const everyoneResult = await replacePresetRoleOptionQualificationRoles({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetOptionId: options.captainId,
+
+      qualificationRoles: [
+        {
+          discordRoleId: DISCORD_GUILD_ID,
+
+          roleNameSnapshot: "@everyone",
+
+          qualificationLevel: "qualified",
+        },
+      ],
+    });
+
+    // Assert
+    expect(duplicateResult).toEqual({
+      kind: "invalid_input",
+
+      reason: "duplicate_qualification_role",
+
+      discordRoleId: SUPERVISED_ROLE_ID,
+    });
+
+    expect(everyoneResult).toEqual({
+      kind: "invalid_input",
+
+      reason: "everyone_qualification_role",
+
+      discordRoleId: DISCORD_GUILD_ID,
+    });
+
+    const stored = await pool.query<{
+      discord_role_id: string;
+
+      role_name_snapshot: string;
+
+      qualification_level: string;
+    }>(
+      `
+        SELECT
+          "discord_role_id",
+          "role_name_snapshot",
+          "qualification_level"
+        FROM
+          "role_request_preset_option_qualification_roles"
+        WHERE
+          "preset_option_id" = $1
+      `,
+      [options.captainId],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        discord_role_id: QUALIFIED_ROLE_ID,
+
+        role_name_snapshot: "Qualified Captain",
+
+        qualification_level: "qualified",
+      },
+    ]);
+  });
+
+  it("does not allow one guild to replace another guild's preset qualification roles", async () => {
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const otherGuildId = await createGuild(pool, OTHER_DISCORD_GUILD_ID);
+
+    const result = await replacePresetRoleOptionQualificationRoles({
+      guildDatabaseId: otherGuildId,
+
+      presetId: fixture.presetId,
+
+      presetOptionId: options.captainId,
+
+      qualificationRoles: [],
+    });
+
+    expect(result).toEqual({
+      kind: "preset_not_found",
+    });
+  });
+
+  it("rejects a qualification replacement for an option belonging to another preset", async () => {
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const otherPreset = await createRoleRequestPreset({
+      guildDatabaseId: fixture.guildId,
+
+      name: "Linebattle",
+
+      description: null,
+
+      createdByUserId: ADMIN_USER_ID,
+    });
+
+    expect(otherPreset.kind).toBe("created");
+
+    if (otherPreset.kind !== "created") {
+      throw new Error("The secondary preset was not created.");
+    }
+
+    const result = await replacePresetRoleOptionQualificationRoles({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: otherPreset.preset.id,
+
+      presetOptionId: options.captainId,
+
+      qualificationRoles: [],
+    });
+
+    expect(result).toEqual({
+      kind: "option_not_found",
+    });
   });
 
   it("deactivates a preset without changing its child configuration", async () => {
