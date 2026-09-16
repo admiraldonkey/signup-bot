@@ -8,6 +8,7 @@ import {
   addPresetRequestGroup,
   addPresetRoleOption,
   createRoleRequestPreset,
+  editRoleRequestPreset,
   setRoleRequestPresetActive,
   setRoleRequestPresetGroupActive,
   setRoleRequestPresetOptionActive,
@@ -217,6 +218,346 @@ describe("role-request preset administration service", () => {
     );
 
     expect(count.rows[0]?.count).toBe(0);
+  });
+
+  it("edits metadata on an inactive preset and advances its update timestamp", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const fixedUpdatedAt = new Date("2026-01-01T00:00:00Z");
+
+    await pool.query(
+      `
+        UPDATE
+          "role_request_presets"
+        SET
+          "active" = false,
+          "updated_at" = $2
+        WHERE
+          "id" = $1
+      `,
+      [fixture.presetId, fixedUpdatedAt],
+    );
+
+    // Act
+    const result = await editRoleRequestPreset({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      name: "  Naval Operations  ",
+
+      description: "  Updated reusable naval roles.  ",
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "updated",
+
+      preset: {
+        id: fixture.presetId,
+
+        name: "Naval Operations",
+
+        description: "Updated reusable naval roles.",
+
+        active: false,
+      },
+    });
+
+    const stored = await pool.query<{
+      name: string;
+
+      description: string | null;
+
+      active: boolean;
+
+      updated_at: Date;
+    }>(
+      `
+        SELECT
+          "name",
+          "description",
+          "active",
+          "updated_at"
+        FROM
+          "role_request_presets"
+        WHERE
+          "id" = $1
+      `,
+      [fixture.presetId],
+    );
+
+    expect(stored.rows).toHaveLength(1);
+
+    expect(stored.rows[0]?.name).toBe("Naval Operations");
+
+    expect(stored.rows[0]?.description).toBe("Updated reusable naval roles.");
+
+    expect(stored.rows[0]?.active).toBe(false);
+
+    expect(stored.rows[0]?.updated_at.getTime()).toBeGreaterThan(
+      fixedUpdatedAt.getTime(),
+    );
+  });
+
+  it("explicitly clears a preset description without changing its name", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    // Act
+    const result = await editRoleRequestPreset({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      description: null,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "updated",
+
+      preset: {
+        id: fixture.presetId,
+
+        name: "Naval",
+
+        description: null,
+
+        active: true,
+      },
+    });
+
+    const stored = await pool.query<{
+      name: string;
+
+      description: string | null;
+    }>(
+      `
+        SELECT
+          "name",
+          "description"
+        FROM
+          "role_request_presets"
+        WHERE
+          "id" = $1
+      `,
+      [fixture.presetId],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        name: "Naval",
+
+        description: null,
+      },
+    ]);
+  });
+
+  it("treats equivalent preset metadata as an idempotent no-op", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const fixedUpdatedAt = new Date("2026-01-01T00:00:00Z");
+
+    await pool.query(
+      `
+        UPDATE
+          "role_request_presets"
+        SET
+          "updated_at" = $2
+        WHERE
+          "id" = $1
+      `,
+      [fixture.presetId, fixedUpdatedAt],
+    );
+
+    // Act
+    const result = await editRoleRequestPreset({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      name: "  Naval  ",
+
+      description: "  Reusable naval roles.  ",
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "unchanged",
+
+      preset: {
+        id: fixture.presetId,
+
+        name: "Naval",
+
+        description: "Reusable naval roles.",
+
+        active: true,
+      },
+    });
+
+    const stored = await pool.query<{
+      updated_at: Date;
+    }>(
+      `
+        SELECT
+          "updated_at"
+        FROM
+          "role_request_presets"
+        WHERE
+          "id" = $1
+      `,
+      [fixture.presetId],
+    );
+
+    expect(stored.rows[0]?.updated_at.getTime()).toBe(fixedUpdatedAt.getTime());
+  });
+
+  it("rejects a preset rename that conflicts with another preset in the same guild", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const otherPreset = await createRoleRequestPreset({
+      guildDatabaseId: fixture.guildId,
+
+      name: "Linebattle",
+
+      description: null,
+
+      createdByUserId: ADMIN_USER_ID,
+    });
+
+    expect(otherPreset.kind).toBe("created");
+
+    // Act
+    const result = await editRoleRequestPreset({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      name: "  Linebattle  ",
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "name_conflict",
+
+      name: "Linebattle",
+    });
+
+    const stored = await pool.query<{
+      name: string;
+
+      description: string | null;
+    }>(
+      `
+        SELECT
+          "name",
+          "description"
+        FROM
+          "role_request_presets"
+        WHERE
+          "id" = $1
+      `,
+      [fixture.presetId],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        name: "Naval",
+
+        description: "Reusable naval roles.",
+      },
+    ]);
+  });
+
+  it("does not allow one guild to edit another guild's preset metadata", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const otherGuildId = await createGuild(pool, OTHER_DISCORD_GUILD_ID);
+
+    // Act
+    const result = await editRoleRequestPreset({
+      guildDatabaseId: otherGuildId,
+
+      presetId: fixture.presetId,
+
+      name: "Foreign Rename",
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "preset_not_found",
+    });
+
+    const stored = await pool.query<{
+      name: string;
+
+      description: string | null;
+    }>(
+      `
+        SELECT
+          "name",
+          "description"
+        FROM
+          "role_request_presets"
+        WHERE
+          "id" = $1
+      `,
+      [fixture.presetId],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        name: "Naval",
+
+        description: "Reusable naval roles.",
+      },
+    ]);
+  });
+
+  it("rejects an invalid preset metadata name", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    // Act
+    const result = await editRoleRequestPreset({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      name: "   ",
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "invalid_name",
+    });
+  });
+
+  it("rejects a preset metadata edit with no requested fields", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    // Act
+    const result = await editRoleRequestPreset({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "no_changes_requested",
+    });
   });
 
   it("deactivates a preset without changing its child configuration", async () => {

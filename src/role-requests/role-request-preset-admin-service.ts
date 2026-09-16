@@ -51,6 +51,65 @@ export type CreateRoleRequestPresetResult =
       reason: "invalid_name";
     };
 
+export type EditRoleRequestPresetInput = {
+  guildDatabaseId: number;
+
+  presetId: number;
+
+  /*
+   * undefined means "leave unchanged".
+   *
+   * For description:
+   * - undefined -> leave unchanged
+   * - null      -> clear
+   * - string    -> trim/normalise and store
+   */
+  name?: string;
+
+  description?: string | null;
+};
+
+export type EditRoleRequestPresetResult =
+  | {
+      kind: "updated";
+
+      preset: {
+        id: number;
+
+        name: string;
+
+        description: string | null;
+
+        active: boolean;
+      };
+    }
+  | {
+      kind: "unchanged";
+
+      preset: {
+        id: number;
+
+        name: string;
+
+        description: string | null;
+
+        active: boolean;
+      };
+    }
+  | {
+      kind: "preset_not_found";
+    }
+  | {
+      kind: "name_conflict";
+
+      name: string;
+    }
+  | {
+      kind: "invalid_input";
+
+      reason: "no_changes_requested" | "invalid_name";
+    };
+
 export type SetRoleRequestPresetActiveInput = {
   guildDatabaseId: number;
 
@@ -447,6 +506,160 @@ export async function createRoleRequestPreset(
       preset,
     } as const;
   });
+}
+
+/**
+ * Edits the metadata of one reusable role-request preset.
+ *
+ * Preset application takes FOR SHARE on the parent preset row. Metadata
+ * mutation therefore takes FOR UPDATE on the same row so application sees
+ * either the complete state before this edit or the complete state after it.
+ *
+ * This operation changes only parent metadata. Existing child options/groups
+ * and event-level snapshots remain independent.
+ */
+export async function editRoleRequestPreset(
+  input: EditRoleRequestPresetInput,
+): Promise<EditRoleRequestPresetResult> {
+  if (input.name === undefined && input.description === undefined) {
+    return {
+      kind: "invalid_input",
+
+      reason: "no_changes_requested",
+    };
+  }
+
+  const requestedName =
+    input.name === undefined ? undefined : input.name.trim();
+
+  if (
+    requestedName !== undefined &&
+    (requestedName.length === 0 || requestedName.length > 100)
+  ) {
+    return {
+      kind: "invalid_input",
+
+      reason: "invalid_name",
+    };
+  }
+
+  const requestedDescription =
+    input.description === undefined
+      ? undefined
+      : normaliseOptionalText(input.description);
+
+  try {
+    return await db.transaction(async (transaction) => {
+      /*
+       * This is the authoritative guild-ownership check as well as the
+       * mutation/application concurrency boundary.
+       *
+       * Inactive presets deliberately remain editable.
+       */
+      const [preset] = await transaction
+        .select({
+          id: roleRequestPresets.id,
+
+          name: roleRequestPresets.name,
+
+          description: roleRequestPresets.description,
+
+          active: roleRequestPresets.active,
+        })
+        .from(roleRequestPresets)
+        .where(
+          and(
+            eq(roleRequestPresets.id, input.presetId),
+
+            eq(roleRequestPresets.ownerGuildId, input.guildDatabaseId),
+          ),
+        )
+        .limit(1)
+        .for("update");
+
+      if (!preset) {
+        return {
+          kind: "preset_not_found",
+        } as const;
+      }
+
+      const name = requestedName ?? preset.name;
+
+      const description =
+        requestedDescription === undefined
+          ? preset.description
+          : requestedDescription;
+
+      if (name === preset.name && description === preset.description) {
+        return {
+          kind: "unchanged",
+
+          preset,
+        } as const;
+      }
+
+      const [updatedPreset] = await transaction
+        .update(roleRequestPresets)
+        .set({
+          name,
+
+          description,
+
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(roleRequestPresets.id, preset.id),
+
+            eq(roleRequestPresets.ownerGuildId, input.guildDatabaseId),
+          ),
+        )
+        .returning({
+          id: roleRequestPresets.id,
+
+          name: roleRequestPresets.name,
+
+          description: roleRequestPresets.description,
+
+          active: roleRequestPresets.active,
+        });
+
+      if (!updatedPreset) {
+        throw new Error(
+          `Role-request preset #${preset.id} disappeared while its metadata was being edited.`,
+        );
+      }
+
+      return {
+        kind: "updated",
+
+        preset: updatedPreset,
+      } as const;
+    });
+  } catch (error) {
+    /*
+     * The database unique index is the final authority here.
+     *
+     * In particular, do not rely on a pre-update "does this name exist?"
+     * query: two concurrent renames could both pass that check.
+     */
+    if (
+      requestedName !== undefined &&
+      isPostgresConstraintViolation(
+        error,
+        "23505",
+        "role_request_presets_owner_name_unique",
+      )
+    ) {
+      return {
+        kind: "name_conflict",
+
+        name: requestedName,
+      };
+    }
+
+    throw error;
+  }
 }
 
 /**
@@ -1576,6 +1789,37 @@ function makeRoleOptionKey(displayName: string): string | null {
     .slice(0, 64);
 
   return key || null;
+}
+
+function isPostgresConstraintViolation(
+  error: unknown,
+  code: string,
+  constraint: string,
+): boolean {
+  /*
+   * Depending on the database/Drizzle failure path, the PostgreSQL error may
+   * be thrown directly or wrapped as a cause. Inspect a small bounded cause
+   * chain without making any driver-specific error class part of the service
+   * API.
+   */
+  let current: unknown = error;
+
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (typeof current !== "object" || current === null) {
+      return false;
+    }
+
+    if (
+      Reflect.get(current, "code") === code &&
+      Reflect.get(current, "constraint") === constraint
+    ) {
+      return true;
+    }
+
+    current = Reflect.get(current, "cause");
+  }
+
+  return false;
 }
 
 function normaliseOptionalText(value: string | null): string | null {

@@ -6,6 +6,8 @@ import { pool as applicationPool } from "../../../src/db/client.js";
 
 import { applyRoleRequestPresetToEvent } from "../../../src/role-requests/role-request-preset-service.js";
 
+import { editRoleRequestPreset } from "../../../src/role-requests/role-request-preset-admin-service.js";
+
 import {
   createIntegrationPool,
   resetIntegrationDatabase,
@@ -609,6 +611,169 @@ describe("role-request preset application service", () => {
         },
       ]),
     );
+  });
+
+  it("serialises preset metadata editing behind an in-flight preset application", async () => {
+    // Arrange
+    const fixture = await createFixture(pool);
+
+    const blockerClient = await pool.connect();
+
+    let blockerReleased = false;
+
+    let applicationPromise: ReturnType<
+      typeof applyRoleRequestPresetToEvent
+    > | null = null;
+
+    let editPromise: ReturnType<typeof editRoleRequestPreset> | null = null;
+
+    try {
+      await blockerClient.query("BEGIN");
+
+      /*
+       * Application reads this table only after taking FOR SHARE on the
+       * parent preset row.
+       *
+       * ACCESS EXCLUSIVE therefore gives us a deterministic point where the
+       * application transaction is paused while still holding that shared
+       * preset lock.
+       */
+      await blockerClient.query(`
+        LOCK TABLE "event_role_request_preset_applications"
+        IN ACCESS EXCLUSIVE MODE
+      `);
+
+      applicationPromise = applyRoleRequestPresetToEvent({
+        guildDatabaseId: fixture.guildId,
+
+        eventId: fixture.eventId,
+
+        presetId: fixture.presetId,
+
+        appliedByUserId: ADMIN_USER_ID,
+      });
+
+      await waitForBlockedDatabaseQuery(
+        pool,
+        '%from "event_role_request_preset_applications"%',
+      );
+
+      let editResolved = false;
+
+      editPromise = editRoleRequestPreset({
+        guildDatabaseId: fixture.guildId,
+
+        presetId: fixture.presetId,
+
+        name: "Naval Operations",
+      }).then((result) => {
+        editResolved = true;
+
+        return result;
+      });
+
+      /*
+       * Metadata editing takes FOR UPDATE on the same parent preset row.
+       * It must therefore wait while application still holds FOR SHARE.
+       */
+      await waitForBlockedDatabaseQuery(
+        pool,
+        '%from "role_request_presets"%for update%',
+      );
+
+      expect(editResolved).toBe(false);
+
+      /*
+       * Let application continue. It should finish its complete snapshot and
+       * commit before the metadata edit can acquire its exclusive row lock.
+       */
+      await blockerClient.query("COMMIT");
+
+      blockerReleased = true;
+
+      const applicationResult = await applicationPromise;
+
+      const editResult = await editPromise;
+
+      // Assert
+      expect(applicationResult.kind).toBe("applied");
+
+      expect(editResult).toEqual({
+        kind: "updated",
+
+        preset: {
+          id: fixture.presetId,
+
+          name: "Naval Operations",
+
+          description: "Reusable naval role requests.",
+
+          active: true,
+        },
+      });
+
+      const storedPreset = await pool.query<{
+        name: string;
+      }>(
+        `
+          SELECT
+            "name"
+          FROM
+            "role_request_presets"
+          WHERE
+            "id" = $1
+        `,
+        [fixture.presetId],
+      );
+
+      expect(storedPreset.rows).toEqual([
+        {
+          name: "Naval Operations",
+        },
+      ]);
+
+      const snapshotCounts = await readPresetSnapshotCounts(
+        pool,
+        fixture.eventId,
+      );
+
+      expect(snapshotCounts).toEqual({
+        applications: 1,
+
+        presetOptions: 2,
+
+        qualificationRoles: 2,
+
+        presetGroups: 2,
+
+        groupOptions: 3,
+
+        scheduledActions: 4,
+      });
+    } finally {
+      if (!blockerReleased) {
+        await blockerClient.query("ROLLBACK").catch(() => undefined);
+      }
+
+      blockerClient.release();
+
+      /*
+       * If an assertion or lock-wait check failed before the main awaits,
+       * make sure any started work is allowed to settle before the next test
+       * resets the shared integration database.
+       */
+      const pendingOperations: Promise<unknown>[] = [];
+
+      if (applicationPromise) {
+        pendingOperations.push(applicationPromise);
+      }
+
+      if (editPromise) {
+        pendingOperations.push(editPromise);
+      }
+
+      await Promise.allSettled(pendingOperations);
+    }
   });
 
   it("keeps applied event state independent from later preset edits", async () => {
@@ -1759,4 +1924,47 @@ async function assertNoPresetSnapshot(
 
     scheduledActions: 0,
   });
+}
+
+async function waitForBlockedDatabaseQuery(
+  pool: Pool,
+  queryPattern: string,
+): Promise<void> {
+  const timeoutAt = Date.now() + 3_000;
+
+  while (Date.now() < timeoutAt) {
+    const result = await pool.query<{
+      blocked: boolean;
+    }>(
+      `
+        SELECT EXISTS (
+          SELECT
+            1
+          FROM
+            "pg_stat_activity"
+          WHERE
+            "datname" = current_database()
+            AND
+            "state" = 'active'
+            AND
+            "wait_event_type" = 'Lock'
+            AND
+            "query" ILIKE $1
+        ) AS "blocked"
+      `,
+      [queryPattern],
+    );
+
+    if (result.rows[0]?.blocked) {
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+
+  throw new Error(
+    `Timed out waiting for blocked PostgreSQL query matching ${queryPattern}.`,
+  );
 }
