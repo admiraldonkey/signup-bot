@@ -1611,10 +1611,25 @@ export const commandDefinitions = [
 
         .addRoleOption((option) =>
           option
-            .setName("notify-role")
+            .setName("notify-role-1")
             .setDescription(
               "Optional role to ping when the snapshotted group opens.",
             ),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("notify-role-2")
+            .setDescription("Additional notification role."),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("notify-role-3")
+            .setDescription("Additional notification role."),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("notify-role-4")
+            .setDescription("Additional notification role."),
         )
 
         .addIntegerOption((option) =>

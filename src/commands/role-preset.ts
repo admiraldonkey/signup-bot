@@ -1309,9 +1309,41 @@ async function addPresetGroup(
     return option;
   });
 
-  const notifyRole = interaction.options.getRole("notify-role");
+  const notificationRoles = [
+    interaction.options.getRole("notify-role-1"),
 
-  if (notifyRole?.id === interaction.guild.id) {
+    interaction.options.getRole("notify-role-2"),
+
+    interaction.options.getRole("notify-role-3"),
+
+    interaction.options.getRole("notify-role-4"),
+  ].filter((role): role is Role => role !== null);
+
+  const seenNotificationRoleIds = new Set<string>();
+
+  const duplicateNotificationRole = notificationRoles.find((role) => {
+    if (seenNotificationRoleIds.has(role.id)) {
+      return true;
+    }
+
+    seenNotificationRoleIds.add(role.id);
+
+    return false;
+  });
+
+  if (duplicateNotificationRole) {
+    await interaction.editReply({
+      content: `Notification role **${duplicateNotificationRole.name}** was selected more than once.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  if (notificationRoles.some((role) => role.id === interaction.guild.id)) {
     await interaction.editReply({
       content:
         "`@everyone` cannot be used as a preset request-group notification role.",
@@ -1384,13 +1416,16 @@ async function addPresetGroup(
       return;
     }
 
+    const unmentionableNotificationRole = notificationRoles.find(
+      (role) => !role.mentionable,
+    );
+
     if (
-      notifyRole &&
-      !notifyRole.mentionable &&
+      unmentionableNotificationRole &&
       !permissions.has(PermissionFlagsBits.MentionEveryone)
     ) {
       await interaction.editReply({
-        content: `The bot cannot currently mention **${notifyRole.name}** in that explicit preset channel.`,
+        content: `The bot cannot currently mention **${unmentionableNotificationRole.name}** in that explicit preset channel.`,
 
         allowedMentions: {
           parse: [],
@@ -1430,15 +1465,11 @@ async function addPresetGroup(
 
     channelId: explicitChannelId,
 
-    notificationRoles: notifyRole
-      ? [
-          {
-            discordRoleId: notifyRole.id,
+    notificationRoles: notificationRoles.map((role) => ({
+      discordRoleId: role.id,
 
-            roleNameSnapshot: notifyRole.name,
-          },
-        ]
-      : [],
+      roleNameSnapshot: role.name,
+    })),
 
     requiresPositiveSignup,
 
@@ -2418,12 +2449,15 @@ function formatPresetDetails(preset: RoleRequestPresetDetails): string {
 
       lines.push(
         `  Notify: ${
-          group.notifyRoleId
-            ? `<@&${group.notifyRoleId}>${
-                group.notifyRoleNameSnapshot
-                  ? ` (${group.notifyRoleNameSnapshot})`
-                  : ""
-              }`
+          group.notificationRoles.length > 0
+            ? group.notificationRoles
+                .map(
+                  (role) =>
+                    `<@&${role.discordRoleId}>${
+                      role.roleNameSnapshot ? ` (${role.roleNameSnapshot})` : ""
+                    }`,
+                )
+                .join(", ")
             : "None"
         }`,
       );

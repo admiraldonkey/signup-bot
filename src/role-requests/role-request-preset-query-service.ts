@@ -3,6 +3,7 @@ import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../db/client.js";
 
 import {
+  roleRequestPresetGroupNotificationRoles,
   roleRequestPresetGroupOptions,
   roleRequestPresetGroups,
   roleRequestPresetOptionQualificationRoles,
@@ -80,9 +81,13 @@ export type RoleRequestPresetDetails = {
 
     channelId: string | null;
 
-    notifyRoleId: string | null;
+    notificationRoles: {
+      discordRoleId: string;
 
-    notifyRoleNameSnapshot: string | null;
+      roleNameSnapshot: string | null;
+
+      sortOrder: number;
+    }[];
 
     requiresPositiveSignup: boolean;
 
@@ -331,6 +336,37 @@ export async function getRoleRequestPresetDetails(
 
     const groupIds = groups.map((group) => group.id);
 
+    const notificationRows =
+      groupIds.length === 0
+        ? []
+        : await transaction
+            .select({
+              presetGroupId:
+                roleRequestPresetGroupNotificationRoles.presetGroupId,
+
+              discordRoleId:
+                roleRequestPresetGroupNotificationRoles.discordRoleId,
+
+              roleNameSnapshot:
+                roleRequestPresetGroupNotificationRoles.roleNameSnapshot,
+
+              sortOrder: roleRequestPresetGroupNotificationRoles.sortOrder,
+            })
+            .from(roleRequestPresetGroupNotificationRoles)
+            .where(
+              inArray(
+                roleRequestPresetGroupNotificationRoles.presetGroupId,
+                groupIds,
+              ),
+            )
+            .orderBy(
+              asc(roleRequestPresetGroupNotificationRoles.presetGroupId),
+
+              asc(roleRequestPresetGroupNotificationRoles.sortOrder),
+
+              asc(roleRequestPresetGroupNotificationRoles.discordRoleId),
+            );
+
     const qualificationRows =
       optionIds.length === 0
         ? []
@@ -418,6 +454,31 @@ export async function getRoleRequestPresetDetails(
       qualificationRolesByOptionId.set(row.presetOptionId, existing);
     }
 
+    const notificationRolesByGroupId = new Map<
+      number,
+      {
+        discordRoleId: string;
+
+        roleNameSnapshot: string | null;
+
+        sortOrder: number;
+      }[]
+    >();
+
+    for (const row of notificationRows) {
+      const existing = notificationRolesByGroupId.get(row.presetGroupId) ?? [];
+
+      existing.push({
+        discordRoleId: row.discordRoleId,
+
+        roleNameSnapshot: row.roleNameSnapshot,
+
+        sortOrder: row.sortOrder,
+      });
+
+      notificationRolesByGroupId.set(row.presetGroupId, existing);
+    }
+
     const optionIdsByGroupId = new Map<number, number[]>();
 
     for (const row of mappingRows) {
@@ -440,11 +501,43 @@ export async function getRoleRequestPresetDetails(
           qualificationRoles: qualificationRolesByOptionId.get(option.id) ?? [],
         })),
 
-        groups: groups.map((group) => ({
-          ...group,
+        groups: groups.map((group) => {
+          const { notifyRoleId, notifyRoleNameSnapshot, ...groupDetails } =
+            group;
 
-          presetOptionIds: optionIdsByGroupId.get(group.id) ?? [],
-        })),
+          const storedNotificationRoles =
+            notificationRolesByGroupId.get(group.id) ?? [];
+
+          /*
+           * Prefer the collection model.
+           *
+           * Fall back to the singular compatibility columns only when no child
+           * rows exist. This covers groups created by an older app revision during
+           * the expand-and-contract deployment window.
+           */
+          const notificationRoles =
+            storedNotificationRoles.length > 0
+              ? storedNotificationRoles
+              : notifyRoleId
+                ? [
+                    {
+                      discordRoleId: notifyRoleId,
+
+                      roleNameSnapshot: notifyRoleNameSnapshot,
+
+                      sortOrder: 0,
+                    },
+                  ]
+                : [];
+
+          return {
+            ...groupDetails,
+
+            notificationRoles,
+
+            presetOptionIds: optionIdsByGroupId.get(group.id) ?? [],
+          };
+        }),
       },
     } as const;
   });

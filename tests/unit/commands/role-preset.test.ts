@@ -75,6 +75,10 @@ const EXPLICIT_CHANNEL_ID = "988000000000000020";
 
 const NAVAL_NOTIFY_ROLE_ID = "988000000000000021";
 
+const OFFICER_NOTIFY_ROLE_ID = "988000000000000022";
+
+const RESERVE_NOTIFY_ROLE_ID = "988000000000000023";
+
 describe("/role-preset command", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1635,7 +1639,7 @@ describe("/role-preset command", () => {
     expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
   });
 
-  it("adds a preset request group with ordered options, an explicit channel and a notification role", async () => {
+  it("adds a preset request group with ordered options, an explicit channel and multiple notification roles", async () => {
     // Arrange
     mockPresetDetailsForGroup();
 
@@ -1653,9 +1657,31 @@ describe("/role-preset command", () => {
 
         channelId: EXPLICIT_CHANNEL_ID,
 
-        notifyRoleId: NAVAL_NOTIFY_ROLE_ID,
+        notificationRoles: [
+          {
+            discordRoleId: NAVAL_NOTIFY_ROLE_ID,
 
-        notifyRoleNameSnapshot: "Naval",
+            roleNameSnapshot: "Naval",
+
+            sortOrder: 0,
+          },
+
+          {
+            discordRoleId: OFFICER_NOTIFY_ROLE_ID,
+
+            roleNameSnapshot: "Officers",
+
+            sortOrder: 1,
+          },
+
+          {
+            discordRoleId: RESERVE_NOTIFY_ROLE_ID,
+
+            roleNameSnapshot: "Reserve",
+
+            sortOrder: 2,
+          },
+        ],
 
         requiresPositiveSignup: true,
 
@@ -1697,10 +1723,26 @@ describe("/role-preset command", () => {
       },
 
       roles: {
-        "notify-role": {
+        "notify-role-1": {
           id: NAVAL_NOTIFY_ROLE_ID,
 
           name: "Naval",
+
+          mentionable: true,
+        },
+
+        "notify-role-2": {
+          id: OFFICER_NOTIFY_ROLE_ID,
+
+          name: "Officers",
+
+          mentionable: true,
+        },
+
+        "notify-role-3": {
+          id: RESERVE_NOTIFY_ROLE_ID,
+
+          name: "Reserve",
 
           mentionable: true,
         },
@@ -1728,11 +1770,25 @@ describe("/role-preset command", () => {
 
       channelId: EXPLICIT_CHANNEL_ID,
 
-      notifyRole: {
-        discordRoleId: NAVAL_NOTIFY_ROLE_ID,
+      notificationRoles: [
+        {
+          discordRoleId: NAVAL_NOTIFY_ROLE_ID,
 
-        roleNameSnapshot: "Naval",
-      },
+          roleNameSnapshot: "Naval",
+        },
+
+        {
+          discordRoleId: OFFICER_NOTIFY_ROLE_ID,
+
+          roleNameSnapshot: "Officers",
+        },
+
+        {
+          discordRoleId: RESERVE_NOTIFY_ROLE_ID,
+
+          roleNameSnapshot: "Reserve",
+        },
+      ],
 
       requiresPositiveSignup: true,
 
@@ -1750,6 +1806,10 @@ describe("/role-preset command", () => {
     expect(content).toContain(`<#${EXPLICIT_CHANNEL_ID}>`);
 
     expect(content).toContain(`<@&${NAVAL_NOTIFY_ROLE_ID}>`);
+
+    expect(content).toContain(`<@&${OFFICER_NOTIFY_ROLE_ID}>`);
+
+    expect(content).toContain(`<@&${RESERVE_NOTIFY_ROLE_ID}>`);
 
     expect(content).toContain("T-60 → T+10");
 
@@ -1780,7 +1840,13 @@ describe("/role-preset command", () => {
 
           channelId: EXPLICIT_CHANNEL_ID,
 
-          notifyRoleId: NAVAL_NOTIFY_ROLE_ID,
+          notificationRoleIds: [
+            NAVAL_NOTIFY_ROLE_ID,
+
+            OFFICER_NOTIFY_ROLE_ID,
+
+            RESERVE_NOTIFY_ROLE_ID,
+          ],
 
           requiresPositiveSignup: true,
 
@@ -1810,9 +1876,7 @@ describe("/role-preset command", () => {
 
         channelId: null,
 
-        notifyRoleId: null,
-
-        notifyRoleNameSnapshot: null,
+        notificationRoles: [],
 
         requiresPositiveSignup: false,
 
@@ -1854,7 +1918,7 @@ describe("/role-preset command", () => {
       expect.objectContaining({
         channelId: null,
 
-        notifyRole: null,
+        notificationRoles: [],
 
         requiresPositiveSignup: false,
 
@@ -2075,7 +2139,7 @@ describe("/role-preset command", () => {
       },
 
       roles: {
-        "notify-role": {
+        "notify-role-1": {
           id: DISCORD_GUILD_ID,
 
           name: "@everyone",
@@ -2101,6 +2165,57 @@ describe("/role-preset command", () => {
     });
   });
 
+  it("rejects the same preset request-group notification role selected more than once", async () => {
+    // Arrange
+    mockPresetDetailsForGroup();
+
+    const interaction = createInteraction({
+      subcommand: "group-add",
+
+      strings: {
+        name: "Duplicate Notification Group",
+      },
+
+      integers: {
+        "preset-id": 7,
+
+        "role-1": 11,
+      },
+
+      roles: {
+        "notify-role-1": {
+          id: NAVAL_NOTIFY_ROLE_ID,
+
+          name: "Naval",
+
+          mentionable: true,
+        },
+
+        "notify-role-2": {
+          id: NAVAL_NOTIFY_ROLE_ID,
+
+          name: "Naval",
+
+          mentionable: true,
+        },
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(adminServiceMocks.addPresetRequestGroup).not.toHaveBeenCalled();
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: "Notification role **Naval** was selected more than once.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  });
+
   it("rejects an unmentionable notification role for an explicit channel when the bot cannot mention it", async () => {
     // Arrange
     mockPresetDetailsForGroup();
@@ -2119,7 +2234,7 @@ describe("/role-preset command", () => {
       },
 
       roles: {
-        "notify-role": {
+        "notify-role-1": {
           id: NAVAL_NOTIFY_ROLE_ID,
 
           name: "Naval",
@@ -2304,9 +2419,31 @@ describe("/role-preset command", () => {
 
             channelId: null,
 
-            notifyRoleId: "988000000000000011",
+            notificationRoles: [
+              {
+                discordRoleId: NAVAL_NOTIFY_ROLE_ID,
 
-            notifyRoleNameSnapshot: "Naval",
+                roleNameSnapshot: "Naval",
+
+                sortOrder: 0,
+              },
+
+              {
+                discordRoleId: OFFICER_NOTIFY_ROLE_ID,
+
+                roleNameSnapshot: "Officers",
+
+                sortOrder: 1,
+              },
+
+              {
+                discordRoleId: RESERVE_NOTIFY_ROLE_ID,
+
+                roleNameSnapshot: "Reserve",
+
+                sortOrder: 2,
+              },
+            ],
 
             requiresPositiveSignup: true,
 
@@ -2358,7 +2495,11 @@ describe("/role-preset command", () => {
 
     expect(content).toContain("Guild default at application");
 
-    expect(content).toContain("<@&988000000000000011>");
+    expect(content).toContain(`<@&${NAVAL_NOTIFY_ROLE_ID}>`);
+
+    expect(content).toContain(`<@&${OFFICER_NOTIFY_ROLE_ID}>`);
+
+    expect(content).toContain(`<@&${RESERVE_NOTIFY_ROLE_ID}>`);
 
     expect(content).toContain("Carpenter (#12), Captain (#11)");
   });
