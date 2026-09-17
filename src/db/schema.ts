@@ -5,6 +5,7 @@ import {
   pgEnum,
   pgTable,
   primaryKey,
+  foreignKey,
   text,
   timestamp,
   uniqueIndex,
@@ -591,6 +592,62 @@ export const roleRequestPresetGroups = pgTable(
   },
   (table) => [
     index("role_request_preset_groups_preset_idx").on(table.presetId),
+  ],
+);
+
+/*
+ * Ordered Discord roles pinged when a reusable preset request group opens.
+ *
+ * The collection is snapshotted into role_request_group_notification_roles
+ * when the preset is applied to an event.
+ *
+ * The application currently limits this collection to four roles. The
+ * database intentionally models a general collection so changing that limit
+ * later does not require another schema redesign.
+ */
+export const roleRequestPresetGroupNotificationRoles = pgTable(
+  "role_request_preset_group_notification_roles",
+  {
+    presetGroupId: integer("preset_group_id").notNull(),
+
+    discordRoleId: text("discord_role_id").notNull(),
+
+    /*
+     * Nullable for migration compatibility with any historical row whose
+     * legacy role ID exists without a corresponding name snapshot.
+     *
+     * Normal service writes should always provide a name snapshot.
+     */
+    roleNameSnapshot: varchar("role_name_snapshot", {
+      length: 100,
+    }),
+
+    sortOrder: integer("sort_order").notNull().default(0),
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "role_request_preset_group_notification_roles_pk",
+
+      columns: [table.presetGroupId, table.discordRoleId],
+    }),
+
+    foreignKey({
+      name: "rr_preset_group_notify_roles_group_fk",
+
+      columns: [table.presetGroupId],
+
+      foreignColumns: [roleRequestPresetGroups.id],
+    }).onDelete("cascade"),
+
+    index("role_request_preset_group_notification_roles_group_idx").on(
+      table.presetGroupId,
+    ),
   ],
 );
 
@@ -1232,6 +1289,54 @@ export const roleRequestGroups = pgTable(
       table.eventId,
       table.closesAt,
     ),
+  ],
+);
+
+/*
+ * Event-level snapshot of the Discord roles pinged when a request group is
+ * published.
+ *
+ * Preset-derived groups copy their source collection here. Manually-created
+ * event groups also store their selected notification roles here.
+ *
+ * PostgreSQL remains authoritative even if Discord roles are later renamed
+ * or deleted.
+ */
+export const roleRequestGroupNotificationRoles = pgTable(
+  "role_request_group_notification_roles",
+  {
+    groupId: integer("group_id").notNull(),
+
+    discordRoleId: text("discord_role_id").notNull(),
+
+    roleNameSnapshot: varchar("role_name_snapshot", {
+      length: 100,
+    }),
+
+    sortOrder: integer("sort_order").notNull().default(0),
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "role_request_group_notification_roles_pk",
+
+      columns: [table.groupId, table.discordRoleId],
+    }),
+
+    foreignKey({
+      name: "rr_group_notify_roles_group_fk",
+
+      columns: [table.groupId],
+
+      foreignColumns: [roleRequestGroups.id],
+    }).onDelete("cascade"),
+
+    index("role_request_group_notification_roles_group_idx").on(table.groupId),
   ],
 );
 
