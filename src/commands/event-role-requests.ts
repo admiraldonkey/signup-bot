@@ -21,6 +21,7 @@ import {
   eventRoleOptions,
   eventTypes,
   events,
+  roleRequestGroupNotificationRoles,
   roleRequestGroupOptions,
   roleRequestGroups,
   roleRequests,
@@ -606,29 +607,75 @@ export async function postRoleRequestGroup(
     return;
   }
 
-  const notifyRole = interaction.options.getRole("notify-role");
+  const notificationRoles = [
+    interaction.options.getRole("notify-role-1"),
 
-  if (notifyRole?.id === interaction.guild.id) {
-    await interaction.editReply(
-      "`@everyone` cannot be used as the role-request notification role.",
-    );
+    interaction.options.getRole("notify-role-2"),
+
+    interaction.options.getRole("notify-role-3"),
+
+    interaction.options.getRole("notify-role-4"),
+  ].filter((role): role is Role => role !== null);
+
+  const seenNotificationRoleIds = new Set<string>();
+
+  const duplicateNotificationRole = notificationRoles.find((role) => {
+    if (seenNotificationRoleIds.has(role.id)) {
+      return true;
+    }
+
+    seenNotificationRoleIds.add(role.id);
+
+    return false;
+  });
+
+  if (duplicateNotificationRole) {
+    await interaction.editReply({
+      content: `Notification role **${duplicateNotificationRole.name}** was selected more than once.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
 
     return;
   }
 
+  if (notificationRoles.some((role) => role.id === interaction.guild.id)) {
+    await interaction.editReply({
+      content:
+        "`@everyone` cannot be used as a role-request notification role.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const unmentionableNotificationRole = notificationRoles.find(
+    (role) => !role.mentionable,
+  );
+
   if (
-    notifyRole &&
-    !notifyRole.mentionable &&
+    unmentionableNotificationRole &&
     !permissions.has(PermissionFlagsBits.MentionEveryone)
   ) {
-    await interaction.editReply(
-      `The bot cannot mention **${notifyRole.name}** in that channel.`,
-    );
+    await interaction.editReply({
+      content: `The bot cannot mention **${unmentionableNotificationRole.name}** in that channel.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
 
     return;
   }
 
   const now = new Date();
+
+  const primaryNotificationRole = notificationRoles[0] ?? null;
 
   const group = await db.transaction(async (transaction) => {
     const [created] = await transaction
@@ -643,6 +690,16 @@ export async function postRoleRequestGroup(
         channelId: channel.id,
 
         messageId: null,
+
+        /*
+         * Temporary compatibility shadow during the expand-and-contract
+         * notification-role migration.
+         *
+         * New code treats role_request_group_notification_roles as authoritative.
+         */
+        notifyRoleId: primaryNotificationRole?.id ?? null,
+
+        notifyRoleNameSnapshot: primaryNotificationRole?.name ?? null,
 
         requiresPositiveSignup,
 
@@ -668,6 +725,20 @@ export async function postRoleRequestGroup(
       );
     }
 
+    if (notificationRoles.length > 0) {
+      await transaction.insert(roleRequestGroupNotificationRoles).values(
+        notificationRoles.map((role, index) => ({
+          groupId: created.id,
+
+          discordRoleId: role.id,
+
+          roleNameSnapshot: role.name,
+
+          sortOrder: index,
+        })),
+      );
+    }
+
     await transaction.insert(roleRequestGroupOptions).values(
       orderedOptions.map((option, index) => ({
         groupId: created.id,
@@ -686,15 +757,20 @@ export async function postRoleRequestGroup(
   try {
     const payload = await buildRoleRequestGroupMessagePayload(group.id);
 
+    const notificationRoleIds = notificationRoles.map((role) => role.id);
+
     sentMessage = await channel.send({
-      content: notifyRole ? `<@&${notifyRole.id}>` : undefined,
+      content:
+        notificationRoleIds.length > 0
+          ? notificationRoleIds.map((roleId) => `<@&${roleId}>`).join(" ")
+          : undefined,
 
       ...payload,
 
       allowedMentions: {
         parse: [],
 
-        roles: notifyRole ? [notifyRole.id] : [],
+        roles: notificationRoleIds,
       },
     });
 
@@ -749,6 +825,8 @@ export async function postRoleRequestGroup(
 
       roleOptionIds: orderedOptions.map((option) => option.id),
 
+      notificationRoleIds: notificationRoles.map((role) => role.id),
+
       requiresPositiveSignup,
 
       closeOffsetMinutes: closeMinutesBeforeStart,
@@ -768,6 +846,11 @@ export async function postRoleRequestGroup(
       `**Roles:** ${orderedOptions
         .map((option) => `${option.displayName} (#${option.id})`)
         .join(", ")}`,
+      `**Notification roles:** ${
+        notificationRoles.length > 0
+          ? notificationRoles.map((role) => `<@&${role.id}>`).join(", ")
+          : "None"
+      }`,
       `**Requires Attending/Tentative signup:** ${
         requiresPositiveSignup ? "Yes" : "No"
       }`,
@@ -813,6 +896,13 @@ export async function listRoleRequestGroups(
 
       channelId: roleRequestGroups.channelId,
 
+      /*
+       * Legacy singular fields are retained only for rollout fallback.
+       */
+      notifyRoleId: roleRequestGroups.notifyRoleId,
+
+      notifyRoleNameSnapshot: roleRequestGroups.notifyRoleNameSnapshot,
+
       requiresPositiveSignup: roleRequestGroups.requiresPositiveSignup,
 
       openMinutesBeforeStart: roleRequestGroups.openMinutesBeforeStart,
@@ -839,10 +929,78 @@ export async function listRoleRequestGroups(
     return;
   }
 
+  const notificationRows = await db
+    .select({
+      groupId: roleRequestGroupNotificationRoles.groupId,
+
+      discordRoleId: roleRequestGroupNotificationRoles.discordRoleId,
+
+      roleNameSnapshot: roleRequestGroupNotificationRoles.roleNameSnapshot,
+
+      sortOrder: roleRequestGroupNotificationRoles.sortOrder,
+    })
+    .from(roleRequestGroupNotificationRoles)
+    .where(
+      inArray(
+        roleRequestGroupNotificationRoles.groupId,
+        groups.map((group) => group.id),
+      ),
+    )
+    .orderBy(
+      asc(roleRequestGroupNotificationRoles.groupId),
+
+      asc(roleRequestGroupNotificationRoles.sortOrder),
+
+      asc(roleRequestGroupNotificationRoles.discordRoleId),
+    );
+
+  const notificationRolesByGroupId = new Map<
+    number,
+    {
+      discordRoleId: string;
+
+      roleNameSnapshot: string | null;
+
+      sortOrder: number;
+    }[]
+  >();
+
+  for (const row of notificationRows) {
+    const roles = notificationRolesByGroupId.get(row.groupId) ?? [];
+
+    roles.push({
+      discordRoleId: row.discordRoleId,
+
+      roleNameSnapshot: row.roleNameSnapshot,
+
+      sortOrder: row.sortOrder,
+    });
+
+    notificationRolesByGroupId.set(row.groupId, roles);
+  }
+
   const now = new Date();
 
   const lines = groups.map((group) => {
     const openTimestamp = Math.floor(group.opensAt.getTime() / 1000);
+
+    const storedNotificationRoles =
+      notificationRolesByGroupId.get(group.id) ?? [];
+
+    const notificationRoles =
+      storedNotificationRoles.length > 0
+        ? storedNotificationRoles
+        : group.notifyRoleId
+          ? [
+              {
+                discordRoleId: group.notifyRoleId,
+
+                roleNameSnapshot: group.notifyRoleNameSnapshot,
+
+                sortOrder: 0,
+              },
+            ]
+          : [];
 
     const closeTimestamp = Math.floor(group.closesAt.getTime() / 1000);
 
@@ -856,6 +1014,14 @@ export async function listRoleRequestGroups(
       )} • <#${group.channelId}>`,
 
       `Signup required: ${group.requiresPositiveSignup ? "Yes" : "No"}`,
+
+      `Notify: ${
+        notificationRoles.length > 0
+          ? notificationRoles
+              .map((role) => `<@&${role.discordRoleId}>`)
+              .join(", ")
+          : "None"
+      }`,
 
       `Open rule: ${formatRoleRequestOpenOffset(group.openMinutesBeforeStart)}`,
 
