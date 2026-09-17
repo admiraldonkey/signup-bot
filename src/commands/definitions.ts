@@ -1710,7 +1710,138 @@ export const commandDefinitions = [
             .setMinValue(1),
         ),
     )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("group-edit")
+        .setDescription(
+          "Edits an existing reusable role-request group definition.",
+        )
 
+        /*
+         * Required identity fields first. Every actual mutation is optional so
+         * administrators can change only the fields they intend to replace.
+         */
+        .addIntegerOption((option) =>
+          option
+            .setName("preset-id")
+            .setDescription("Preset ID shown by /role-preset list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("group-id")
+            .setDescription("Request-group ID shown by /role-preset show.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("name")
+            .setDescription("Replacement request-group name.")
+            .setMinLength(1)
+            .setMaxLength(100),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("description")
+            .setDescription("Replacement request-group instructions.")
+            .setMaxLength(800),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("clear-description")
+            .setDescription("Explicitly remove the current description."),
+        )
+        .addChannelOption((option) =>
+          option
+            .setName("channel")
+            .setDescription("Replacement fixed role-request channel.")
+            .addChannelTypes(
+              ChannelType.GuildText,
+              ChannelType.GuildAnnouncement,
+            ),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("clear-channel")
+            .setDescription(
+              "Use the guild default channel when future events are snapshotted.",
+            ),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("requires-signup")
+            .setDescription(
+              "Whether this group requires an Attending/Tentative signup.",
+            ),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("open-minutes-before-start")
+            .setDescription(
+              "Replace opening with this many minutes before start.",
+            )
+            .setMinValue(0)
+            .setMaxValue(10080),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("open-minutes-after-start")
+            .setDescription(
+              "Replace opening with this many minutes after start.",
+            )
+            .setMinValue(0)
+            .setMaxValue(480),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("close-minutes-before-start")
+            .setDescription(
+              "Replace closing with this many minutes before start.",
+            )
+            .setMinValue(0)
+            .setMaxValue(10080),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("close-minutes-after-start")
+            .setDescription(
+              "Replace closing with this many minutes after start.",
+            )
+            .setMinValue(0)
+            .setMaxValue(480),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("notify-role-1")
+            .setDescription(
+              "First role in a complete replacement notification set.",
+            ),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("notify-role-2")
+            .setDescription("Additional replacement notification role."),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("notify-role-3")
+            .setDescription("Additional replacement notification role."),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("notify-role-4")
+            .setDescription("Additional replacement notification role."),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("clear-notification-roles")
+            .setDescription(
+              "Explicitly remove all notification roles from this group.",
+            ),
+        ),
+    )
     .addSubcommand((subcommand) =>
       subcommand
         .setName("apply")
