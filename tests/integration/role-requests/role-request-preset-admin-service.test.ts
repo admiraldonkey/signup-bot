@@ -3943,11 +3943,13 @@ describe("role-request preset administration service", () => {
 
       channelId: `  ${ROLE_REQUEST_CHANNEL_ID}  `,
 
-      notifyRole: {
-        discordRoleId: `  ${NOTIFY_ROLE_ID}  `,
+      notificationRoles: [
+        {
+          discordRoleId: `  ${NOTIFY_ROLE_ID}  `,
 
-        roleNameSnapshot: "  Naval  ",
-      },
+          roleNameSnapshot: "  Naval  ",
+        },
+      ],
 
       requiresPositiveSignup: true,
 
@@ -3976,9 +3978,15 @@ describe("role-request preset administration service", () => {
 
       channelId: ROLE_REQUEST_CHANNEL_ID,
 
-      notifyRoleId: NOTIFY_ROLE_ID,
+      notificationRoles: [
+        {
+          discordRoleId: NOTIFY_ROLE_ID,
 
-      notifyRoleNameSnapshot: "Naval",
+          roleNameSnapshot: "Naval",
+
+          sortOrder: 0,
+        },
+      ],
 
       requiresPositiveSignup: true,
 
@@ -4117,7 +4125,7 @@ describe("role-request preset administration service", () => {
 
       channelId: null,
 
-      notifyRole: null,
+      notificationRoles: [],
 
       requiresPositiveSignup: false,
 
@@ -4137,9 +4145,7 @@ describe("role-request preset administration service", () => {
 
     expect(result.group.channelId).toBeNull();
 
-    expect(result.group.notifyRoleId).toBeNull();
-
-    expect(result.group.notifyRoleNameSnapshot).toBeNull();
+    expect(result.group.notificationRoles).toEqual([]);
 
     const stored = await pool.query<{
       channel_id: string | null;
@@ -4190,7 +4196,7 @@ describe("role-request preset administration service", () => {
 
       channelId: null,
 
-      notifyRole: null,
+      notificationRoles: [],
 
       requiresPositiveSignup: false,
 
@@ -4229,7 +4235,7 @@ describe("role-request preset administration service", () => {
 
       channelId: null,
 
-      notifyRole: null,
+      notificationRoles: [],
 
       requiresPositiveSignup: false,
 
@@ -4301,7 +4307,7 @@ describe("role-request preset administration service", () => {
 
       channelId: null,
 
-      notifyRole: null,
+      notificationRoles: [],
 
       requiresPositiveSignup: false,
 
@@ -4354,7 +4360,7 @@ describe("role-request preset administration service", () => {
 
       channelId: null,
 
-      notifyRole: null,
+      notificationRoles: [],
 
       requiresPositiveSignup: false,
 
@@ -4395,7 +4401,7 @@ describe("role-request preset administration service", () => {
 
       channelId: null,
 
-      notifyRole: null,
+      notificationRoles: [],
 
       requiresPositiveSignup: false,
 
@@ -4438,14 +4444,16 @@ describe("role-request preset administration service", () => {
 
       channelId: null,
 
-      notifyRole: {
-        /*
-         * Discord's @everyone role uses the guild snowflake.
-         */
-        discordRoleId: DISCORD_GUILD_ID,
+      notificationRoles: [
+        {
+          /*
+           * Discord's @everyone role uses the guild snowflake.
+           */
+          discordRoleId: DISCORD_GUILD_ID,
 
-        roleNameSnapshot: "@everyone",
-      },
+          roleNameSnapshot: "@everyone",
+        },
+      ],
 
       requiresPositiveSignup: false,
 
@@ -4464,6 +4472,241 @@ describe("role-request preset administration service", () => {
     });
 
     await expectNoPresetGroups(pool, fixture.presetId);
+  });
+
+  it("stores four ordered preset request-group notification roles", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const notificationRoles = [
+      {
+        discordRoleId: "986000000000000021",
+
+        roleNameSnapshot: "Naval",
+      },
+      {
+        discordRoleId: "986000000000000022",
+
+        roleNameSnapshot: "Officers",
+      },
+      {
+        discordRoleId: "986000000000000023",
+
+        roleNameSnapshot: "Reserve",
+      },
+      {
+        discordRoleId: "986000000000000024",
+
+        roleNameSnapshot: "Command",
+      },
+    ];
+
+    // Act
+    const result = await addPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      name: "Multi Ping",
+
+      description: null,
+
+      presetOptionIds: [options.captainId],
+
+      channelId: null,
+
+      notificationRoles,
+
+      requiresPositiveSignup: false,
+
+      openMinutesBeforeStart: 60,
+
+      closeMinutesBeforeStart: 0,
+    });
+
+    // Assert
+    expect(result.kind).toBe("added");
+
+    if (result.kind !== "added") {
+      throw new Error(
+        `Expected preset request-group creation to succeed, received "${result.kind}".`,
+      );
+    }
+
+    expect(result.group.notificationRoles).toEqual(
+      notificationRoles.map((role, index) => ({
+        ...role,
+
+        sortOrder: index,
+      })),
+    );
+
+    const stored = await pool.query<{
+      discord_role_id: string;
+
+      role_name_snapshot: string | null;
+
+      sort_order: number;
+    }>(
+      `
+      SELECT
+        "discord_role_id",
+        "role_name_snapshot",
+        "sort_order"
+      FROM
+        "role_request_preset_group_notification_roles"
+      WHERE
+        "preset_group_id" = $1
+      ORDER BY
+        "sort_order"
+    `,
+      [result.group.id],
+    );
+
+    expect(stored.rows).toEqual(
+      notificationRoles.map((role, index) => ({
+        discord_role_id: role.discordRoleId,
+
+        role_name_snapshot: role.roleNameSnapshot,
+
+        sort_order: index,
+      })),
+    );
+
+    const legacy = await pool.query<{
+      notify_role_id: string | null;
+
+      notify_role_name_snapshot: string | null;
+    }>(
+      `
+      SELECT
+        "notify_role_id",
+        "notify_role_name_snapshot"
+      FROM
+        "role_request_preset_groups"
+      WHERE
+        "id" = $1
+    `,
+      [result.group.id],
+    );
+
+    expect(legacy.rows).toEqual([
+      {
+        notify_role_id: notificationRoles[0]?.discordRoleId ?? null,
+
+        notify_role_name_snapshot:
+          notificationRoles[0]?.roleNameSnapshot ?? null,
+      },
+    ]);
+  });
+
+  it("rejects more than four preset request-group notification roles", async () => {
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const result = await addPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      name: "Too Many Pings",
+
+      description: null,
+
+      presetOptionIds: [options.captainId],
+
+      channelId: null,
+
+      notificationRoles: [
+        {
+          discordRoleId: "986000000000000031",
+
+          roleNameSnapshot: "One",
+        },
+        {
+          discordRoleId: "986000000000000032",
+
+          roleNameSnapshot: "Two",
+        },
+        {
+          discordRoleId: "986000000000000033",
+
+          roleNameSnapshot: "Three",
+        },
+        {
+          discordRoleId: "986000000000000034",
+
+          roleNameSnapshot: "Four",
+        },
+        {
+          discordRoleId: "986000000000000035",
+
+          roleNameSnapshot: "Five",
+        },
+      ],
+
+      requiresPositiveSignup: false,
+
+      openMinutesBeforeStart: 60,
+
+      closeMinutesBeforeStart: 0,
+    });
+
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "too_many_notification_roles",
+    });
+  });
+
+  it("rejects duplicate preset request-group notification roles", async () => {
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const result = await addPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      name: "Duplicate Ping",
+
+      description: null,
+
+      presetOptionIds: [options.captainId],
+
+      channelId: null,
+
+      notificationRoles: [
+        {
+          discordRoleId: NOTIFY_ROLE_ID,
+
+          roleNameSnapshot: "Naval",
+        },
+        {
+          discordRoleId: NOTIFY_ROLE_ID,
+
+          roleNameSnapshot: "Naval Again",
+        },
+      ],
+
+      requiresPositiveSignup: false,
+
+      openMinutesBeforeStart: 60,
+
+      closeMinutesBeforeStart: 0,
+    });
+
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "duplicate_notification_role",
+
+      discordRoleId: NOTIFY_ROLE_ID,
+    });
   });
 
   it("does not allow one guild to add a request group to another guild's preset", async () => {
@@ -4488,7 +4731,7 @@ describe("role-request preset administration service", () => {
 
       channelId: null,
 
-      notifyRole: null,
+      notificationRoles: [],
 
       requiresPositiveSignup: false,
 

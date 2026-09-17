@@ -384,6 +384,58 @@ describe("role-request preset application service", () => {
       created_by_user_id: ADMIN_USER_ID,
     });
 
+    const generalNotificationRoles = await pool.query<{
+      discord_role_id: string;
+
+      role_name_snapshot: string | null;
+
+      sort_order: number;
+    }>(
+      `
+    SELECT
+      "notification_role"."discord_role_id",
+      "notification_role"."role_name_snapshot",
+      "notification_role"."sort_order"
+    FROM
+      "role_request_group_notification_roles" AS "notification_role"
+    INNER JOIN
+      "role_request_groups" AS "group"
+    ON
+      "group"."id" = "notification_role"."group_id"
+    WHERE
+      "group"."event_id" = $1
+      AND
+      "group"."source_role_request_preset_group_id" = $2
+    ORDER BY
+      "notification_role"."sort_order"
+  `,
+      [fixture.eventId, fixture.generalPresetGroupId],
+    );
+
+    expect(generalNotificationRoles.rows).toEqual([
+      {
+        discord_role_id: NOTIFY_ROLE_ID,
+
+        role_name_snapshot: "Naval",
+
+        sort_order: 0,
+      },
+      {
+        discord_role_id: "983000000000000021",
+
+        role_name_snapshot: "Officers",
+
+        sort_order: 1,
+      },
+      {
+        discord_role_id: "983000000000000022",
+
+        role_name_snapshot: "Reserve",
+
+        sort_order: 2,
+      },
+    ]);
+
     const groupMappings = await pool.query<{
       preset_group_id: number | null;
 
@@ -749,6 +801,8 @@ describe("role-request preset application service", () => {
         qualificationRoles: 2,
 
         presetGroups: 2,
+
+        notificationRoles: 3,
 
         groupOptions: 3,
 
@@ -1178,6 +1232,35 @@ describe("role-request preset application service", () => {
 
     await pool.query(
       `
+    DELETE FROM
+      "role_request_preset_group_notification_roles"
+    WHERE
+      "preset_group_id" = $1
+  `,
+      [fixture.generalPresetGroupId],
+    );
+
+    await pool.query(
+      `
+    INSERT INTO
+      "role_request_preset_group_notification_roles" (
+        "preset_group_id",
+        "discord_role_id",
+        "role_name_snapshot",
+        "sort_order"
+      )
+    VALUES (
+      $1,
+      '983000000000000099',
+      'Replacement Notification Role',
+      0
+    )
+  `,
+      [fixture.generalPresetGroupId],
+    );
+
+    await pool.query(
+      `
         DELETE FROM
           "role_request_preset_group_options"
         WHERE
@@ -1301,6 +1384,58 @@ describe("role-request preset application service", () => {
       },
     ]);
 
+    const copiedNotificationRoles = await pool.query<{
+      discord_role_id: string;
+
+      role_name_snapshot: string | null;
+
+      sort_order: number;
+    }>(
+      `
+    SELECT
+      "notification_role"."discord_role_id",
+      "notification_role"."role_name_snapshot",
+      "notification_role"."sort_order"
+    FROM
+      "role_request_group_notification_roles" AS "notification_role"
+    INNER JOIN
+      "role_request_groups" AS "group"
+    ON
+      "group"."id" = "notification_role"."group_id"
+    WHERE
+      "group"."event_id" = $1
+      AND
+      "group"."source_role_request_preset_group_id" = $2
+    ORDER BY
+      "notification_role"."sort_order"
+  `,
+      [fixture.eventId, fixture.generalPresetGroupId],
+    );
+
+    expect(copiedNotificationRoles.rows).toEqual([
+      {
+        discord_role_id: NOTIFY_ROLE_ID,
+
+        role_name_snapshot: "Naval",
+
+        sort_order: 0,
+      },
+      {
+        discord_role_id: "983000000000000021",
+
+        role_name_snapshot: "Officers",
+
+        sort_order: 1,
+      },
+      {
+        discord_role_id: "983000000000000022",
+
+        role_name_snapshot: "Reserve",
+
+        sort_order: 2,
+      },
+    ]);
+
     const copiedGeneralMappings = await pool.query<{
       count: number;
     }>(
@@ -1375,6 +1510,8 @@ describe("role-request preset application service", () => {
       qualificationRoles: 2,
 
       presetGroups: 2,
+
+      notificationRoles: 3,
 
       groupOptions: 3,
 
@@ -2029,6 +2166,46 @@ async function createFixture(pool: Pool): Promise<Fixture> {
 
   await pool.query(
     `
+    INSERT INTO
+      "role_request_preset_group_notification_roles" (
+        "preset_group_id",
+        "discord_role_id",
+        "role_name_snapshot",
+        "sort_order"
+      )
+    VALUES
+      (
+        $1,
+        $2,
+        'Naval',
+        0
+      ),
+      (
+        $1,
+        $3,
+        'Officers',
+        1
+      ),
+      (
+        $1,
+        $4,
+        'Reserve',
+        2
+      )
+  `,
+    [
+      generalPresetGroupId,
+
+      NOTIFY_ROLE_ID,
+
+      "983000000000000021",
+
+      "983000000000000022",
+    ],
+  );
+
+  await pool.query(
+    `
       INSERT INTO
         "role_request_preset_group_options" (
           "group_id",
@@ -2119,6 +2296,8 @@ async function readPresetSnapshotCounts(
 
   presetGroups: number;
 
+  notificationRoles: number;
+
   groupOptions: number;
 
   scheduledActions: number;
@@ -2131,6 +2310,8 @@ async function readPresetSnapshotCounts(
     qualification_roles: number;
 
     preset_groups: number;
+
+    notification_roles: number;
 
     group_options: number;
 
@@ -2190,6 +2371,23 @@ async function readPresetSnapshotCounts(
           SELECT
             COUNT(*)::int
           FROM
+            "role_request_group_notification_roles"
+          INNER JOIN
+            "role_request_groups"
+          ON
+            "role_request_groups"."id" =
+              "role_request_group_notification_roles"."group_id"
+          WHERE
+            "role_request_groups"."event_id" = $1
+            AND
+            "role_request_groups"."source_role_request_preset_group_id"
+              IS NOT NULL
+        ) AS "notification_roles",
+
+        (
+          SELECT
+            COUNT(*)::int
+          FROM
             "role_request_group_options"
           INNER JOIN
             "role_request_groups"
@@ -2235,6 +2433,8 @@ async function readPresetSnapshotCounts(
 
     presetGroups: row.preset_groups,
 
+    notificationRoles: row.notification_roles,
+
     groupOptions: row.group_options,
 
     scheduledActions: row.scheduled_actions,
@@ -2253,6 +2453,8 @@ async function assertNoPresetSnapshot(
     qualificationRoles: 0,
 
     presetGroups: 0,
+
+    notificationRoles: 0,
 
     groupOptions: 0,
 
