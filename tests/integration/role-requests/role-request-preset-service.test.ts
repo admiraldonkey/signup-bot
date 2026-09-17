@@ -7,6 +7,7 @@ import { pool as applicationPool } from "../../../src/db/client.js";
 import { applyRoleRequestPresetToEvent } from "../../../src/role-requests/role-request-preset-service.js";
 
 import {
+  editPresetRequestGroup,
   editRoleRequestPreset,
   editPresetRoleOption,
   replacePresetRoleOptionQualificationRoles,
@@ -30,6 +31,10 @@ const NOTIFY_ROLE_ID = "983000000000000005";
 const CAPTAIN_QUALIFIED_ROLE_ID = "983000000000000006";
 
 const MIDSHIPMAN_ROLE_ID = "983000000000000007";
+
+const REPLACEMENT_GROUP_CHANNEL_ID = "983000000000000023";
+
+const REPLACEMENT_GROUP_NOTIFY_ROLE_ID = "983000000000000024";
 
 const EVENT_START = new Date("2026-09-21T19:00:00.000Z");
 
@@ -1153,6 +1158,366 @@ describe("role-request preset application service", () => {
     }
   });
 
+  it("serialises preset request-group editing behind an in-flight preset application", async () => {
+    // Arrange
+    const fixture = await createFixture(pool);
+
+    const blockerClient = await pool.connect();
+
+    let blockerReleased = false;
+
+    let applicationPromise: ReturnType<
+      typeof applyRoleRequestPresetToEvent
+    > | null = null;
+
+    let editPromise: ReturnType<typeof editPresetRequestGroup> | null = null;
+
+    try {
+      await blockerClient.query("BEGIN");
+
+      /*
+       * Application takes FOR SHARE on the parent preset before checking the
+       * application table.
+       *
+       * Blocking it here therefore keeps that shared parent lock alive while
+       * request-group editing attempts to acquire FOR UPDATE on the same row.
+       */
+      await blockerClient.query(`
+      LOCK TABLE "event_role_request_preset_applications"
+      IN ACCESS EXCLUSIVE MODE
+    `);
+
+      applicationPromise = applyRoleRequestPresetToEvent({
+        guildDatabaseId: fixture.guildId,
+
+        eventId: fixture.eventId,
+
+        presetId: fixture.presetId,
+
+        appliedByUserId: ADMIN_USER_ID,
+      });
+
+      await waitForBlockedDatabaseQuery(
+        pool,
+        '%from "event_role_request_preset_applications"%',
+      );
+
+      let editResolved = false;
+
+      editPromise = editPresetRequestGroup({
+        guildDatabaseId: fixture.guildId,
+
+        presetId: fixture.presetId,
+
+        presetGroupId: fixture.generalPresetGroupId,
+
+        name: "Updated Naval Roles",
+
+        channelId: REPLACEMENT_GROUP_CHANNEL_ID,
+
+        notificationRoles: [
+          {
+            discordRoleId: REPLACEMENT_GROUP_NOTIFY_ROLE_ID,
+
+            roleNameSnapshot: "Replacement Notification Role",
+          },
+        ],
+
+        requiresPositiveSignup: false,
+
+        openMinutesBeforeStart: 5,
+
+        closeMinutesBeforeStart: -30,
+      }).then((result) => {
+        editResolved = true;
+
+        return result;
+      });
+
+      /*
+       * Group editing takes FOR UPDATE on the same parent preset row.
+       *
+       * It must therefore remain blocked until application commits its complete
+       * snapshot.
+       */
+      await waitForBlockedDatabaseQuery(
+        pool,
+        '%from "role_request_presets"%for update%',
+      );
+
+      expect(editResolved).toBe(false);
+
+      /*
+       * Allow application to finish.
+       *
+       * Its event snapshot must contain the complete pre-edit group definition.
+       * Only afterwards may the reusable preset group change.
+       */
+      await blockerClient.query("COMMIT");
+
+      blockerReleased = true;
+
+      const applicationResult = await applicationPromise;
+
+      const editResult = await editPromise;
+
+      // Assert
+      expect(applicationResult.kind).toBe("applied");
+
+      expect(editResult.kind).toBe("updated");
+
+      if (editResult.kind !== "updated") {
+        throw new Error(
+          `Expected request-group edit to succeed, received "${editResult.kind}".`,
+        );
+      }
+
+      expect(editResult.group).toMatchObject({
+        id: fixture.generalPresetGroupId,
+
+        presetId: fixture.presetId,
+
+        name: "Updated Naval Roles",
+
+        channelId: REPLACEMENT_GROUP_CHANNEL_ID,
+
+        notificationRoles: [
+          {
+            discordRoleId: REPLACEMENT_GROUP_NOTIFY_ROLE_ID,
+
+            roleNameSnapshot: "Replacement Notification Role",
+
+            sortOrder: 0,
+          },
+        ],
+
+        requiresPositiveSignup: false,
+
+        openMinutesBeforeStart: 5,
+
+        closeMinutesBeforeStart: -30,
+      });
+
+      /*
+       * Application acquired FOR SHARE first, so the event-level group must
+       * contain the complete definition from before the edit.
+       */
+      const eventGroup = await pool.query<{
+        name: string;
+
+        channel_id: string;
+
+        notify_role_id: string | null;
+
+        notify_role_name_snapshot: string | null;
+
+        requires_positive_signup: boolean;
+
+        open_minutes_before_start: number | null;
+
+        close_minutes_before_start: number;
+      }>(
+        `
+        SELECT
+          "name",
+          "channel_id",
+          "notify_role_id",
+          "notify_role_name_snapshot",
+          "requires_positive_signup",
+          "open_minutes_before_start",
+          "close_minutes_before_start"
+        FROM
+          "role_request_groups"
+        WHERE
+          "event_id" = $1
+          AND
+          "source_role_request_preset_group_id" = $2
+      `,
+        [fixture.eventId, fixture.generalPresetGroupId],
+      );
+
+      expect(eventGroup.rows).toEqual([
+        {
+          name: "Naval Roles",
+
+          channel_id: DEFAULT_ROLE_REQUEST_CHANNEL_ID,
+
+          notify_role_id: NOTIFY_ROLE_ID,
+
+          notify_role_name_snapshot: "Naval",
+
+          requires_positive_signup: true,
+
+          open_minutes_before_start: 60,
+
+          close_minutes_before_start: -10,
+        },
+      ]);
+
+      const eventNotificationRoles = await pool.query<{
+        discord_role_id: string;
+
+        role_name_snapshot: string | null;
+
+        sort_order: number;
+      }>(
+        `
+        SELECT
+          "notification_role"."discord_role_id",
+          "notification_role"."role_name_snapshot",
+          "notification_role"."sort_order"
+        FROM
+          "role_request_group_notification_roles" AS "notification_role"
+        INNER JOIN
+          "role_request_groups" AS "group"
+        ON
+          "group"."id" = "notification_role"."group_id"
+        WHERE
+          "group"."event_id" = $1
+          AND
+          "group"."source_role_request_preset_group_id" = $2
+        ORDER BY
+          "notification_role"."sort_order"
+      `,
+        [fixture.eventId, fixture.generalPresetGroupId],
+      );
+
+      expect(eventNotificationRoles.rows).toEqual([
+        {
+          discord_role_id: NOTIFY_ROLE_ID,
+
+          role_name_snapshot: "Naval",
+
+          sort_order: 0,
+        },
+
+        {
+          discord_role_id: "983000000000000021",
+
+          role_name_snapshot: "Officers",
+
+          sort_order: 1,
+        },
+
+        {
+          discord_role_id: "983000000000000022",
+
+          role_name_snapshot: "Reserve",
+
+          sort_order: 2,
+        },
+      ]);
+
+      /*
+       * The reusable source should now contain the complete post-application
+       * edit rather than some mixture of old and new state.
+       */
+      const sourceGroup = await pool.query<{
+        name: string;
+
+        channel_id: string | null;
+
+        notify_role_id: string | null;
+
+        notify_role_name_snapshot: string | null;
+
+        requires_positive_signup: boolean;
+
+        open_minutes_before_start: number;
+
+        close_minutes_before_start: number;
+      }>(
+        `
+        SELECT
+          "name",
+          "channel_id",
+          "notify_role_id",
+          "notify_role_name_snapshot",
+          "requires_positive_signup",
+          "open_minutes_before_start",
+          "close_minutes_before_start"
+        FROM
+          "role_request_preset_groups"
+        WHERE
+          "id" = $1
+      `,
+        [fixture.generalPresetGroupId],
+      );
+
+      expect(sourceGroup.rows).toEqual([
+        {
+          name: "Updated Naval Roles",
+
+          channel_id: REPLACEMENT_GROUP_CHANNEL_ID,
+
+          notify_role_id: REPLACEMENT_GROUP_NOTIFY_ROLE_ID,
+
+          notify_role_name_snapshot: "Replacement Notification Role",
+
+          requires_positive_signup: false,
+
+          open_minutes_before_start: 5,
+
+          close_minutes_before_start: -30,
+        },
+      ]);
+
+      const sourceNotificationRoles = await pool.query<{
+        discord_role_id: string;
+
+        role_name_snapshot: string | null;
+
+        sort_order: number;
+      }>(
+        `
+        SELECT
+          "discord_role_id",
+          "role_name_snapshot",
+          "sort_order"
+        FROM
+          "role_request_preset_group_notification_roles"
+        WHERE
+          "preset_group_id" = $1
+        ORDER BY
+          "sort_order"
+      `,
+        [fixture.generalPresetGroupId],
+      );
+
+      expect(sourceNotificationRoles.rows).toEqual([
+        {
+          discord_role_id: REPLACEMENT_GROUP_NOTIFY_ROLE_ID,
+
+          role_name_snapshot: "Replacement Notification Role",
+
+          sort_order: 0,
+        },
+      ]);
+    } finally {
+      if (!blockerReleased) {
+        await blockerClient.query("ROLLBACK").catch(() => undefined);
+      }
+
+      blockerClient.release();
+
+      /*
+       * If a lock assertion fails early, allow any work already started to
+       * settle before the next beforeEach resets the shared integration database.
+       */
+      const pendingOperations: Promise<unknown>[] = [];
+
+      if (applicationPromise) {
+        pendingOperations.push(applicationPromise);
+      }
+
+      if (editPromise) {
+        pendingOperations.push(editPromise);
+      }
+
+      await Promise.allSettled(pendingOperations);
+    }
+  });
+
   it("keeps applied event state independent from later preset edits", async () => {
     // Arrange
     const fixture = await createFixture(pool);
@@ -1213,51 +1578,61 @@ describe("role-request preset application service", () => {
 
     expect(qualificationEditResult.kind).toBe("updated");
 
-    await pool.query(
-      `
-        UPDATE
-          "role_request_preset_groups"
-        SET
-          "channel_id" = '983000000000000099',
-          "notify_role_id" = NULL,
-          "notify_role_name_snapshot" = NULL,
-          "requires_positive_signup" = false,
-          "open_minutes_before_start" = 5,
-          "close_minutes_before_start" = -30
-        WHERE
-          "id" = $1
-      `,
-      [fixture.generalPresetGroupId],
-    );
+    const groupEditResult = await editPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
 
-    await pool.query(
-      `
-    DELETE FROM
-      "role_request_preset_group_notification_roles"
-    WHERE
-      "preset_group_id" = $1
-  `,
-      [fixture.generalPresetGroupId],
-    );
+      presetId: fixture.presetId,
 
-    await pool.query(
-      `
-    INSERT INTO
-      "role_request_preset_group_notification_roles" (
-        "preset_group_id",
-        "discord_role_id",
-        "role_name_snapshot",
-        "sort_order"
-      )
-    VALUES (
-      $1,
-      '983000000000000099',
-      'Replacement Notification Role',
-      0
-    )
-  `,
-      [fixture.generalPresetGroupId],
-    );
+      presetGroupId: fixture.generalPresetGroupId,
+
+      channelId: REPLACEMENT_GROUP_CHANNEL_ID,
+
+      notificationRoles: [
+        {
+          discordRoleId: REPLACEMENT_GROUP_NOTIFY_ROLE_ID,
+
+          roleNameSnapshot: "Replacement Notification Role",
+        },
+      ],
+
+      requiresPositiveSignup: false,
+
+      openMinutesBeforeStart: 5,
+
+      closeMinutesBeforeStart: -30,
+    });
+
+    expect(groupEditResult.kind).toBe("updated");
+
+    if (groupEditResult.kind !== "updated") {
+      throw new Error(
+        `Expected preset request-group edit to succeed, received "${groupEditResult.kind}".`,
+      );
+    }
+
+    expect(groupEditResult.group).toMatchObject({
+      id: fixture.generalPresetGroupId,
+
+      presetId: fixture.presetId,
+
+      channelId: REPLACEMENT_GROUP_CHANNEL_ID,
+
+      notificationRoles: [
+        {
+          discordRoleId: REPLACEMENT_GROUP_NOTIFY_ROLE_ID,
+
+          roleNameSnapshot: "Replacement Notification Role",
+
+          sortOrder: 0,
+        },
+      ],
+
+      requiresPositiveSignup: false,
+
+      openMinutesBeforeStart: 5,
+
+      closeMinutesBeforeStart: -30,
+    });
 
     await pool.query(
       `

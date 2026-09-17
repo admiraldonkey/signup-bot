@@ -8,6 +8,7 @@ import {
   addPresetRequestGroup,
   addPresetRoleOption,
   createRoleRequestPreset,
+  editPresetRequestGroup,
   editPresetRoleOption,
   replacePresetRoleOptionQualificationRoles,
   editRoleRequestPreset,
@@ -34,6 +35,10 @@ const SUPERVISED_ROLE_ID = "986000000000000005";
 const ROLE_REQUEST_CHANNEL_ID = "986000000000000006";
 
 const NOTIFY_ROLE_ID = "986000000000000007";
+
+const OFFICER_NOTIFY_ROLE_ID = "986000000000000008";
+
+const RESERVE_NOTIFY_ROLE_ID = "986000000000000009";
 
 describe("role-request preset administration service", () => {
   let pool: Pool;
@@ -3893,6 +3898,815 @@ describe("role-request preset administration service", () => {
     await expectNoPresetOptions(pool, fixture.presetId);
   });
 
+  it("edits an inactive preset request group while preserving omitted notification roles and option mappings", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const group = await createEditablePresetGroup(
+      pool,
+      fixture.guildId,
+      fixture.presetId,
+      options.captainId,
+      options.carpenterId,
+    );
+
+    const fixedUpdatedAt = new Date("2026-01-01T00:00:00Z");
+
+    await pool.query(
+      `
+      UPDATE
+        "role_request_presets"
+      SET
+        "active" = false,
+        "updated_at" = $2
+      WHERE
+        "id" = $1
+    `,
+      [fixture.presetId, fixedUpdatedAt],
+    );
+
+    await pool.query(
+      `
+      UPDATE
+        "role_request_preset_groups"
+      SET
+        "active" = false,
+        "updated_at" = $2
+      WHERE
+        "id" = $1
+    `,
+      [group.id, fixedUpdatedAt],
+    );
+
+    // Act
+    const result = await editPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: group.id,
+
+      name: "  Command Roles  ",
+
+      description: "  Updated request window.  ",
+
+      channelId: null,
+
+      /*
+       * Deliberately omit notificationRoles.
+       *
+       * This must preserve the complete existing collection.
+       */
+      requiresPositiveSignup: false,
+
+      openMinutesBeforeStart: 180,
+
+      closeMinutesBeforeStart: 30,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "updated",
+
+      group: {
+        id: group.id,
+
+        presetId: fixture.presetId,
+
+        name: "Command Roles",
+
+        description: "Updated request window.",
+
+        channelId: null,
+
+        notificationRoles: [
+          {
+            discordRoleId: NOTIFY_ROLE_ID,
+
+            roleNameSnapshot: "Naval",
+
+            sortOrder: 0,
+          },
+
+          {
+            discordRoleId: OFFICER_NOTIFY_ROLE_ID,
+
+            roleNameSnapshot: "Officers",
+
+            sortOrder: 1,
+          },
+        ],
+
+        requiresPositiveSignup: false,
+
+        openMinutesBeforeStart: 180,
+
+        closeMinutesBeforeStart: 30,
+
+        sortOrder: group.sortOrder,
+
+        active: false,
+      },
+    });
+
+    const mappings = await pool.query<{
+      preset_option_id: number;
+
+      sort_order: number;
+    }>(
+      `
+      SELECT
+        "preset_option_id",
+        "sort_order"
+      FROM
+        "role_request_preset_group_options"
+      WHERE
+        "group_id" = $1
+      ORDER BY
+        "sort_order"
+    `,
+      [group.id],
+    );
+
+    expect(mappings.rows).toEqual([
+      {
+        preset_option_id: options.captainId,
+
+        sort_order: 0,
+      },
+
+      {
+        preset_option_id: options.carpenterId,
+
+        sort_order: 1,
+      },
+    ]);
+
+    const storedNotificationRoles = await pool.query<{
+      discord_role_id: string;
+
+      role_name_snapshot: string | null;
+
+      sort_order: number;
+    }>(
+      `
+      SELECT
+        "discord_role_id",
+        "role_name_snapshot",
+        "sort_order"
+      FROM
+        "role_request_preset_group_notification_roles"
+      WHERE
+        "preset_group_id" = $1
+      ORDER BY
+        "sort_order"
+    `,
+      [group.id],
+    );
+
+    expect(storedNotificationRoles.rows).toEqual([
+      {
+        discord_role_id: NOTIFY_ROLE_ID,
+
+        role_name_snapshot: "Naval",
+
+        sort_order: 0,
+      },
+
+      {
+        discord_role_id: OFFICER_NOTIFY_ROLE_ID,
+
+        role_name_snapshot: "Officers",
+
+        sort_order: 1,
+      },
+    ]);
+
+    const storedGroup = await pool.query<{
+      notify_role_id: string | null;
+
+      notify_role_name_snapshot: string | null;
+
+      group_updated_at: Date;
+
+      preset_updated_at: Date;
+    }>(
+      `
+      SELECT
+        "group"."notify_role_id",
+        "group"."notify_role_name_snapshot",
+        "group"."updated_at" AS "group_updated_at",
+        "preset"."updated_at" AS "preset_updated_at"
+      FROM
+        "role_request_preset_groups" AS "group"
+      INNER JOIN
+        "role_request_presets" AS "preset"
+      ON
+        "preset"."id" = "group"."preset_id"
+      WHERE
+        "group"."id" = $1
+    `,
+      [group.id],
+    );
+
+    expect(storedGroup.rows).toHaveLength(1);
+
+    expect(storedGroup.rows[0]).toMatchObject({
+      notify_role_id: NOTIFY_ROLE_ID,
+
+      notify_role_name_snapshot: "Naval",
+    });
+
+    expect(storedGroup.rows[0]?.group_updated_at.getTime()).toBeGreaterThan(
+      fixedUpdatedAt.getTime(),
+    );
+
+    expect(storedGroup.rows[0]?.preset_updated_at.getTime()).toBeGreaterThan(
+      fixedUpdatedAt.getTime(),
+    );
+  });
+
+  it("treats an equivalent preset request-group edit as an idempotent no-op", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const group = await createEditablePresetGroup(
+      pool,
+      fixture.guildId,
+      fixture.presetId,
+      options.captainId,
+      options.carpenterId,
+    );
+
+    const fixedGroupUpdatedAt = new Date("2026-01-01T00:00:00Z");
+
+    const fixedPresetUpdatedAt = new Date("2026-01-02T00:00:00Z");
+
+    await pool.query(
+      `
+      UPDATE
+        "role_request_preset_groups"
+      SET
+        "updated_at" = $2
+      WHERE
+        "id" = $1
+    `,
+      [group.id, fixedGroupUpdatedAt],
+    );
+
+    await pool.query(
+      `
+      UPDATE
+        "role_request_presets"
+      SET
+        "updated_at" = $2
+      WHERE
+        "id" = $1
+    `,
+      [fixture.presetId, fixedPresetUpdatedAt],
+    );
+
+    // Act
+    const result = await editPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: group.id,
+
+      name: "  Naval Roles  ",
+
+      description: "  General naval role requests.  ",
+
+      channelId: `  ${ROLE_REQUEST_CHANNEL_ID}  `,
+
+      notificationRoles: [
+        {
+          discordRoleId: `  ${NOTIFY_ROLE_ID}  `,
+
+          roleNameSnapshot: "  Naval  ",
+        },
+
+        {
+          discordRoleId: `  ${OFFICER_NOTIFY_ROLE_ID}  `,
+
+          roleNameSnapshot: "  Officers  ",
+        },
+      ],
+
+      requiresPositiveSignup: true,
+
+      openMinutesBeforeStart: 60,
+
+      closeMinutesBeforeStart: -10,
+    });
+
+    // Assert
+    expect(result.kind).toBe("unchanged");
+
+    if (result.kind !== "unchanged") {
+      throw new Error(
+        `Expected request-group edit to be unchanged, received "${result.kind}".`,
+      );
+    }
+
+    expect(result.group.notificationRoles).toEqual([
+      {
+        discordRoleId: NOTIFY_ROLE_ID,
+
+        roleNameSnapshot: "Naval",
+
+        sortOrder: 0,
+      },
+
+      {
+        discordRoleId: OFFICER_NOTIFY_ROLE_ID,
+
+        roleNameSnapshot: "Officers",
+
+        sortOrder: 1,
+      },
+    ]);
+
+    const timestamps = await pool.query<{
+      group_updated_at: Date;
+
+      preset_updated_at: Date;
+    }>(
+      `
+      SELECT
+        "group"."updated_at" AS "group_updated_at",
+        "preset"."updated_at" AS "preset_updated_at"
+      FROM
+        "role_request_preset_groups" AS "group"
+      INNER JOIN
+        "role_request_presets" AS "preset"
+      ON
+        "preset"."id" = "group"."preset_id"
+      WHERE
+        "group"."id" = $1
+    `,
+      [group.id],
+    );
+
+    expect(timestamps.rows).toEqual([
+      {
+        group_updated_at: fixedGroupUpdatedAt,
+
+        preset_updated_at: fixedPresetUpdatedAt,
+      },
+    ]);
+  });
+
+  it("atomically replaces a preset request-group notification-role collection", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const group = await createEditablePresetGroup(
+      pool,
+      fixture.guildId,
+      fixture.presetId,
+      options.captainId,
+      options.carpenterId,
+    );
+
+    // Act
+    const result = await editPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: group.id,
+
+      notificationRoles: [
+        {
+          discordRoleId: `  ${RESERVE_NOTIFY_ROLE_ID}  `,
+
+          roleNameSnapshot: "  Reserve  ",
+        },
+
+        {
+          discordRoleId: `  ${OFFICER_NOTIFY_ROLE_ID}  `,
+
+          roleNameSnapshot: "  Officers  ",
+        },
+      ],
+    });
+
+    // Assert
+    expect(result.kind).toBe("updated");
+
+    if (result.kind !== "updated") {
+      throw new Error(
+        `Expected notification-role replacement to succeed, received "${result.kind}".`,
+      );
+    }
+
+    expect(result.group.notificationRoles).toEqual([
+      {
+        discordRoleId: RESERVE_NOTIFY_ROLE_ID,
+
+        roleNameSnapshot: "Reserve",
+
+        sortOrder: 0,
+      },
+
+      {
+        discordRoleId: OFFICER_NOTIFY_ROLE_ID,
+
+        roleNameSnapshot: "Officers",
+
+        sortOrder: 1,
+      },
+    ]);
+
+    const storedNotificationRoles = await pool.query<{
+      discord_role_id: string;
+
+      role_name_snapshot: string | null;
+
+      sort_order: number;
+    }>(
+      `
+      SELECT
+        "discord_role_id",
+        "role_name_snapshot",
+        "sort_order"
+      FROM
+        "role_request_preset_group_notification_roles"
+      WHERE
+        "preset_group_id" = $1
+      ORDER BY
+        "sort_order"
+    `,
+      [group.id],
+    );
+
+    expect(storedNotificationRoles.rows).toEqual([
+      {
+        discord_role_id: RESERVE_NOTIFY_ROLE_ID,
+
+        role_name_snapshot: "Reserve",
+
+        sort_order: 0,
+      },
+
+      {
+        discord_role_id: OFFICER_NOTIFY_ROLE_ID,
+
+        role_name_snapshot: "Officers",
+
+        sort_order: 1,
+      },
+    ]);
+
+    const legacy = await pool.query<{
+      notify_role_id: string | null;
+
+      notify_role_name_snapshot: string | null;
+    }>(
+      `
+      SELECT
+        "notify_role_id",
+        "notify_role_name_snapshot"
+      FROM
+        "role_request_preset_groups"
+      WHERE
+        "id" = $1
+    `,
+      [group.id],
+    );
+
+    expect(legacy.rows).toEqual([
+      {
+        notify_role_id: RESERVE_NOTIFY_ROLE_ID,
+
+        notify_role_name_snapshot: "Reserve",
+      },
+    ]);
+  });
+
+  it("explicitly clears a preset request-group notification-role collection", async () => {
+    // Arrange
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const group = await createEditablePresetGroup(
+      pool,
+      fixture.guildId,
+      fixture.presetId,
+      options.captainId,
+      options.carpenterId,
+    );
+
+    // Act
+    const result = await editPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: group.id,
+
+      notificationRoles: [],
+    });
+
+    // Assert
+    expect(result.kind).toBe("updated");
+
+    if (result.kind !== "updated") {
+      throw new Error(
+        `Expected notification-role clearing to succeed, received "${result.kind}".`,
+      );
+    }
+
+    expect(result.group.notificationRoles).toEqual([]);
+
+    const stored = await pool.query<{
+      notification_count: number;
+
+      notify_role_id: string | null;
+
+      notify_role_name_snapshot: string | null;
+    }>(
+      `
+      SELECT
+        (
+          SELECT
+            COUNT(*)::int
+          FROM
+            "role_request_preset_group_notification_roles"
+          WHERE
+            "preset_group_id" = $1
+        ) AS "notification_count",
+
+        "notify_role_id",
+
+        "notify_role_name_snapshot"
+      FROM
+        "role_request_preset_groups"
+      WHERE
+        "id" = $1
+    `,
+      [group.id],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        notification_count: 0,
+
+        notify_role_id: null,
+
+        notify_role_name_snapshot: null,
+      },
+    ]);
+  });
+
+  it("rejects a preset request-group edit whose final opening does not precede closing", async () => {
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const group = await createEditablePresetGroup(
+      pool,
+      fixture.guildId,
+      fixture.presetId,
+      options.captainId,
+      options.carpenterId,
+    );
+
+    const result = await editPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: group.id,
+
+      openMinutesBeforeStart: -20,
+    });
+
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "invalid_group_window",
+    });
+
+    const stored = await pool.query<{
+      open_minutes_before_start: number;
+
+      close_minutes_before_start: number;
+    }>(
+      `
+      SELECT
+        "open_minutes_before_start",
+        "close_minutes_before_start"
+      FROM
+        "role_request_preset_groups"
+      WHERE
+        "id" = $1
+    `,
+      [group.id],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        open_minutes_before_start: 60,
+
+        close_minutes_before_start: -10,
+      },
+    ]);
+  });
+
+  it("rejects @everyone in an edited preset request-group notification collection", async () => {
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const group = await createEditablePresetGroup(
+      pool,
+      fixture.guildId,
+      fixture.presetId,
+      options.captainId,
+      options.carpenterId,
+    );
+
+    const result = await editPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: group.id,
+
+      notificationRoles: [
+        {
+          discordRoleId: DISCORD_GUILD_ID,
+
+          roleNameSnapshot: "@everyone",
+        },
+      ],
+    });
+
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "everyone_notify_role",
+
+      discordRoleId: DISCORD_GUILD_ID,
+    });
+  });
+
+  it("rejects duplicate roles in an edited preset request-group notification collection", async () => {
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const group = await createEditablePresetGroup(
+      pool,
+      fixture.guildId,
+      fixture.presetId,
+      options.captainId,
+      options.carpenterId,
+    );
+
+    const result = await editPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: group.id,
+
+      notificationRoles: [
+        {
+          discordRoleId: NOTIFY_ROLE_ID,
+
+          roleNameSnapshot: "Naval",
+        },
+
+        {
+          discordRoleId: NOTIFY_ROLE_ID,
+
+          roleNameSnapshot: "Naval Again",
+        },
+      ],
+    });
+
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "duplicate_notification_role",
+
+      discordRoleId: NOTIFY_ROLE_ID,
+    });
+  });
+
+  it("does not allow one guild to edit another guild's preset request group", async () => {
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const group = await createEditablePresetGroup(
+      pool,
+      fixture.guildId,
+      fixture.presetId,
+      options.captainId,
+      options.carpenterId,
+    );
+
+    const otherGuildId = await createGuild(pool, OTHER_DISCORD_GUILD_ID);
+
+    const result = await editPresetRequestGroup({
+      guildDatabaseId: otherGuildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: group.id,
+
+      name: "Foreign Group",
+    });
+
+    expect(result).toEqual({
+      kind: "preset_not_found",
+    });
+  });
+
+  it("rejects editing a request group through a different preset", async () => {
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const group = await createEditablePresetGroup(
+      pool,
+      fixture.guildId,
+      fixture.presetId,
+      options.captainId,
+      options.carpenterId,
+    );
+
+    const otherPreset = await createRoleRequestPreset({
+      guildDatabaseId: fixture.guildId,
+
+      name: "Linebattle",
+
+      description: null,
+
+      createdByUserId: ADMIN_USER_ID,
+    });
+
+    expect(otherPreset.kind).toBe("created");
+
+    if (otherPreset.kind !== "created") {
+      throw new Error("The secondary preset was not created.");
+    }
+
+    const result = await editPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: otherPreset.preset.id,
+
+      presetGroupId: group.id,
+
+      name: "Foreign Group",
+    });
+
+    expect(result).toEqual({
+      kind: "group_not_found",
+    });
+  });
+
+  it("rejects a preset request-group edit with no requested fields", async () => {
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const group = await createEditablePresetGroup(
+      pool,
+      fixture.guildId,
+      fixture.presetId,
+      options.captainId,
+      options.carpenterId,
+    );
+
+    const result = await editPresetRequestGroup({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: group.id,
+    });
+
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "no_changes_requested",
+    });
+  });
+
   it("adds a preset request group with ordered option mappings and the next sort order", async () => {
     // Arrange
     const fixture = await createPresetFixture(pool);
@@ -4913,6 +5727,56 @@ async function createPresetOptions(
 
     carpenterId,
   };
+}
+
+async function createEditablePresetGroup(
+  pool: Pool,
+  guildDatabaseId: number,
+  presetId: number,
+  captainId: number,
+  carpenterId: number,
+) {
+  const result = await addPresetRequestGroup({
+    guildDatabaseId,
+
+    presetId,
+
+    name: "Naval Roles",
+
+    description: "General naval role requests.",
+
+    presetOptionIds: [captainId, carpenterId],
+
+    channelId: ROLE_REQUEST_CHANNEL_ID,
+
+    notificationRoles: [
+      {
+        discordRoleId: NOTIFY_ROLE_ID,
+
+        roleNameSnapshot: "Naval",
+      },
+
+      {
+        discordRoleId: OFFICER_NOTIFY_ROLE_ID,
+
+        roleNameSnapshot: "Officers",
+      },
+    ],
+
+    requiresPositiveSignup: true,
+
+    openMinutesBeforeStart: 60,
+
+    closeMinutesBeforeStart: -10,
+  });
+
+  if (result.kind !== "added") {
+    throw new Error(
+      `Expected editable preset request group to be created, received "${result.kind}".`,
+    );
+  }
+
+  return result.group;
 }
 
 async function expectNoPresetGroups(

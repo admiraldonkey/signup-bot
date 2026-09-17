@@ -21,241 +21,182 @@ If this document becomes substantially longer because completed work keeps being
 
 ## Current Repository Checkpoint
 
-The current development branch adds ordered multiple notification roles to role-request groups.
+The current development branch completes P0.4 reusable preset request-group definition editing.
 
-The historical model allowed one optional notification role per group.
-
-The new model supports:
+Administrators can now edit an existing preset group's:
 
 ```text
-0-4 ordered notification roles
+name
+description
+destination channel behaviour
+ordered notification-role collection
+positive-signup requirement
+opening timing
+closing timing
 ```
 
-for both:
+The edit operation supports explicit clearing of:
 
 ```text
-reusable preset request groups
-event-level request groups
+description
+fixed channel override
+notification-role collection
 ```
 
-The implementation now covers:
+Omitted fields remain unchanged.
 
-- additive PostgreSQL child tables
-- migration backfill from historical singular notification fields
-- preset group creation
-- preset administration display
-- preset application snapshots
-- scheduled group publication
-- manual `/event role-group-post`
-- `/event role-group-list`
-- per-role notification delivery results
-- audit output
-- direct integration coverage
+Notification roles use complete ordered replacement semantics rather than incremental add/remove behaviour.
 
-Preset application copies the complete ordered notification-role collection into ordinary event-level state.
+Group-option mappings deliberately remain outside P0.4.
 
-Scheduled publication resolves each snapshotted role independently and pings the usable subset.
+The service preserves the established preset concurrency contract:
 
-A missing or unmentionable role does not suppress unrelated valid notification roles.
+```text
+preset application
+    -> role_request_presets FOR SHARE
 
-Manual group posting validates the known destination immediately and persists its selected notification roles atomically with the group.
+request-group edit
+    -> role_request_presets FOR UPDATE
+```
 
-The first configured role is temporarily mirrored into the historical singular columns for deployment compatibility.
+Deterministic integration coverage verifies that an in-flight application snapshots either the complete pre-edit group or the complete post-edit group.
 
-New collection-aware reads prefer child rows and use the singular fields only as an old-revision fallback when no collection rows exist.
+It cannot observe a partially-mutated request-group definition.
 
-Current automated verification for the feature is green across its targeted unit, integration, and typecheck gates.
+Existing event snapshots remain independent from later reusable group edits.
 
-Always verify local branch and working-tree state before beginning the next development slice.
+The next preset-editing feature is:
+
+```text
+P0.5
+group-option mapping editing
+```
 
 ---
 
 # Current Activity
 
-Multiple request-group notification roles were introduced as a prerequisite discovered while beginning P0.4 preset request-group editing.
+P0.4 preset request-group editing is implemented.
 
-The original P0.4 service branch assumed a singular notification role.
-
-Rather than completing that public edit contract and immediately redesigning it, development paused P0.4 and first generalised notification state.
-
-The implemented collection model is:
+The final service contract is:
 
 ```text
-preset request group
-        |
-        v
-0-4 ordered notification roles
-        |
-        | apply
-        v
-event-level notification-role snapshot
-        |
-        v
-publication resolves each role independently
+scalar field omitted
+    -> preserve existing value
+
+nullable scalar explicitly cleared
+    -> store null
+
+notificationRoles omitted
+    -> preserve complete ordered collection
+
+notificationRoles: []
+    -> explicitly clear collection
+
+notificationRoles: [A, B, ...]
+    -> replace complete ordered collection
 ```
 
-Manual event groups use the same event-level collection representation.
-
-The database itself does not enforce the current four-role limit.
-
-That limit is application-level policy so it can change later without another schema redesign.
-
-## Compatibility migration
-
-The notification-role schema change intentionally uses an expand-and-contract deployment.
-
-Migration `0020` adds the new child tables and backfills old singular role configuration.
-
-The existing singular columns remain temporarily in the schema so an older and newer app revision can overlap safely during deployment.
-
-During this period:
+Editable group definition state includes:
 
 ```text
-new child collection
-    -> authoritative
-
-legacy singular columns
-    -> compatibility shadow only
+name
+description
+channel override
+notification roles
+requires-positive-signup
+open offset
+close offset
 ```
 
-New writes mirror the first configured role into the legacy fields.
+Group-option mappings are intentionally not part of this operation.
 
-New reads fall back to those fields only when no child collection rows exist.
+Request-group editing:
 
-A later cleanup migration should remove the compatibility columns after the collection-aware revision has been deployed safely.
+- locks the preset parent `FOR UPDATE`
+- enforces guild ownership
+- enforces child ownership
+- permits inactive presets to be edited
+- validates the final opening/closing window
+- treats a genuine no-op as unchanged
+- preserves existing event snapshots
+- keeps group-option mappings untouched
 
-## Return to preset request-group editing
+The Discord command exposes explicit clear controls so omitted optional command inputs cannot accidentally destroy reusable configuration.
 
-After this prerequisite PR merges, development returns to:
-
-```text
-P0.4
-preset request-group editing
-```
-
-The existing request-group edit work must be reconciled with the new collection model.
-
-In particular, notification editing should operate on the complete ordered collection rather than a singular `notifyRole` value.
-
-The remaining broad sequence is still:
-
-```text
-preset request-group editing
-        |
-        v
-group-option mapping editing
-        |
-        v
-event templates
-        |
-        v
-recurrence
-```
+The next implementation slice is P0.5 group-option mapping editing.
 
 ---
 
 # Most Recently Completed Feature Area
 
-## Role-request publication intent
+## Preset request-group definition editing
 
-Automatic preset-derived role-request publication now respects how the parent event is intended to become public.
+`/role-preset group-edit` now provides administrator-facing editing for existing reusable request groups.
 
-Current behaviour is:
-
-```text
-Published event
-    -> due group may post
-
-Manual-held unpublished event
-    -> due automatic group waits
-
-Future scheduled publication
-    -> deliberately earlier due group may post
-
-Scheduled publication overdue
-event still unpublished
-    -> later automatic group waits
-```
-
-Manual `/event role-group-post` remains a separate explicit administrator action.
-
----
-
-## Durable deferral
-
-Waiting for event publication does not consume scheduler retry attempts.
-
-Instead:
+The command supports:
 
 ```text
-due opening
-    |
-    v
-awaiting event publication
-    |
-    v
-opening action parked at closesAt
+name
+description
+clear-description
+channel
+clear-channel
+requires-signup
+
+open-minutes-before-start
+open-minutes-after-start
+
+close-minutes-before-start
+close-minutes-after-start
+
+notify-role-1
+notify-role-2
+notify-role-3
+notify-role-4
+clear-notification-roles
 ```
 
-If the parent event publishes while the request window remains valid:
+Replacement notification roles are validated as one complete ordered collection.
+
+The service then replaces the authoritative child rows transactionally and mirrors the first configured role into the temporary legacy compatibility fields.
+
+An unrelated metadata or timing edit leaves notification rows untouched.
+
+## Snapshot independence
+
+Editing reusable group state does not alter an event which already received that preset.
+
+Direct integration coverage verifies that changing reusable:
 
 ```text
-event publication
-    |
-    v
-due deferred opening reset to pending
-dueAt = publishedAt
-attemptCount = 0
+channel
+notification roles
+signup rule
+opening timing
+closing timing
 ```
 
-If the event never publishes, the action eventually reaches the closing boundary and expires naturally.
+leaves the existing event-level request-group snapshot unchanged.
 
----
+## Application race
 
-## Publication wake-up
-
-The reusable event-publication service wakes already-due deferred role-group openings in the same transaction that commits event publication.
-
-Only groups satisfying:
+A deterministic PostgreSQL concurrency regression verifies:
 
 ```text
-opensAt <= publishedAt < closesAt
+application starts first
+    -> parent FOR SHARE
+
+group edit starts second
+    -> waits for parent FOR UPDATE
+
+application commits complete old snapshot
+    -> edit proceeds afterwards
 ```
 
-are resumed.
+The reverse lock ordering similarly permits application to observe the complete new definition after mutation.
 
-Future groups retain their original opening schedule.
-
-The wake-up helper supports both:
-
-```text
-pending
-processing
-```
-
-opening actions.
-
-Resetting a processing action to fresh pending state uses the scheduler's existing attempt/status fencing so a stale worker cannot later overwrite the newer schedule.
-
----
-
-## Discord in-flight race
-
-Role-group publication re-checks parent-event publication intent after the Discord send and before authoritative linkage.
-
-If publication intent becomes incompatible while Discord is in flight:
-
-```text
-candidate message sent
-
-event changes
-
-linkage rejected
-
-candidate deleted
-```
-
-The Discord send does not become authoritative merely because it completed first.
+No partially-edited reusable graph can be snapshotted.
 
 ---
 
@@ -267,10 +208,14 @@ Current administrator capabilities include:
 
 ```text
 /role-preset create
+/role-preset edit
 /role-preset list
 /role-preset show
 /role-preset option-add
+/role-preset option-edit
+/role-preset option-qualifications-set
 /role-preset group-add
+/role-preset group-edit
 /role-preset apply
 /role-preset set-active
 /role-preset option-set-active
@@ -294,7 +239,7 @@ The system currently supports reusable:
 - event-relative opening offsets
 - event-relative closing offsets
 
-The remaining preset-administration work is focused on request-group editing and group-option mapping rather than basic parent, option, or qualification editing.
+The remaining preset-definition editing work is focused on group-option mappings rather than parent metadata, option definitions, qualification roles, or request-group definitions.
 
 ---
 
@@ -1253,27 +1198,28 @@ The following work is deliberately unfinished.
 
 ## Preset editing
 
-Preset editing is the immediate feature phase.
-
 Implemented editing currently includes:
 
-- preset name/description metadata
+- preset name and description metadata
 - role-option display name
 - role-option description
 - role-option request restriction
 - role-option capacity
 - complete qualification-role replacement
+- request-group name and description
+- request-group destination behaviour
+- complete ordered request-group notification-role replacement
+- request-group signup rule
+- request-group opening timing
+- request-group closing timing
 
-Remaining areas include:
+The remaining existing-definition mutation is:
 
-- request-group metadata editing
-- destination editing
-- editing an existing group's notification-role collection
-- signup-rule editing
-- opening/closing timing editing
-- group-option mapping editing
+```text
+group-option mapping editing
+```
 
-All remaining work must preserve the current preset mutation lock and event snapshot independence.
+That work must preserve the current preset mutation lock and event snapshot independence.
 
 ---
 
@@ -1368,45 +1314,34 @@ This remains planned.
 
 # Immediate Next Objective
 
-The notification-role collection prerequisite for P0.4 is now implemented.
+P0.4 preset request-group editing is complete.
 
-Role-request groups support:
-
-```text
-0 notification roles
-1 notification role
-2 notification roles
-3 notification roles
-4 notification roles
-```
-
-The collection is ordered and snapshotted.
-
-Preset-derived groups and manually-created event groups now converge on the same event-level child-table representation.
-
-The immediate next implementation slice returns to:
+The immediate next implementation area is:
 
 ```text
-P0.4
-preset request-group editing
+P0.5
+group-option mapping editing
 ```
 
-The existing group-edit work should be updated so notification mutation uses the new collection model.
+An existing reusable request group currently has ordered mappings to preset role options.
 
-The intended semantics are:
+P0.5 needs to provide administrator-facing mutation of that ordered relationship.
+
+The design still needs an explicit decision on whether the preferred operation should be:
 
 ```text
-undefined
-    -> leave notification-role collection unchanged
-
-explicit replacement collection
-    -> replace the complete ordered set
-
-explicit clear
-    -> store an empty notification-role collection
+incremental add/remove
 ```
 
-The existing P0.4 guarantees still apply:
+or:
+
+```text
+complete ordered replacement
+```
+
+A complete replacement operation is likely attractive because ordering and final-graph validation can be reasoned about atomically, but that choice should be made deliberately before implementation.
+
+Whatever interface is selected must preserve:
 
 - preset parent `FOR UPDATE`
 - application `FOR SHARE`
@@ -1414,10 +1349,11 @@ The existing P0.4 guarantees still apply:
 - child ownership
 - inactive-preset editability
 - idempotent no-op behaviour
-- existing event snapshots remain unchanged
-- group-option mappings remain outside the P0.4 mutation
+- existing event snapshot independence
+- deterministic mapping order
+- reuse of the same logical preset option across multiple groups
 
-The next step after P0.4 remains complete ordered group-option mapping editing.
+Preset application remains the final authoritative validator of the reusable graph.
 
 ---
 
@@ -1431,12 +1367,12 @@ completed:
     preset metadata editing
     role-option editing
     qualification-role editing
+    request-group definition editing
 
 next:
-    request-group editing
+    group-option mapping editing
 
 then:
-    group-option mapping editing
     complete command UX review
     full preset administration manual smoke test
 ```
@@ -2049,10 +1985,20 @@ manual role-group posting persists and pings multiple roles
 
 legacy singular notification columns remain temporary deployment compatibility shadows
 
+preset request-group definition editing is implemented
+
+request-group edits preserve omitted fields and require explicit destructive clears
+
+notification-role editing uses complete ordered replacement semantics
+
+request-group editing serialises against preset application through the parent lock
+
+existing event request-group snapshots remain independent after reusable group edits
+
 automated unit/integration/coverage/typechecking is green
 
 next production feature:
-    resume P0.4 preset request-group editing
+    P0.5 group-option mapping editing
 ```
 
 Do not resume an older reliability or preset-foundation task simply because an older chat or stale document says it is still pending.

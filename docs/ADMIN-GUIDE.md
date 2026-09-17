@@ -2628,6 +2628,218 @@ If the group uses apply-time default-channel resolution, final Discord notificat
 
 ---
 
+# `/role-preset group-edit`
+
+Edits the reusable definition of an existing preset request group.
+
+Use the group ID shown by:
+
+```text
+/role-preset show
+```
+
+Example:
+
+```text
+/role-preset group-edit
+preset-id: 7
+group-id: 21
+name: Command Roles
+description: Command and specialist applications
+notify-role-1: @Officers
+notify-role-2: @Naval
+requires-signup: No
+open-minutes-after-start: 5
+close-minutes-after-start: 30
+```
+
+Editable fields include:
+
+- name
+- description
+- fixed destination channel or apply-time default behaviour
+- complete ordered notification-role collection
+- positive-signup requirement
+- opening offset
+- closing offset
+
+Role-option mappings are deliberately not edited by this command.
+
+Those mappings remain independent reusable child configuration and are handled by the separate group-option mapping administration work.
+
+## Omitted fields
+
+An omitted edit field leaves the existing stored value unchanged.
+
+For example:
+
+```text
+/role-preset group-edit
+preset-id: 7
+group-id: 21
+name: Command Roles
+```
+
+changes only the group name.
+
+It does not implicitly clear:
+
+```text
+description
+channel
+notification roles
+signup requirement
+timing
+```
+
+## Clearing the description
+
+To explicitly remove the current description:
+
+```text
+/role-preset group-edit
+preset-id: 7
+group-id: 21
+clear-description: Yes
+```
+
+Do not supply both:
+
+```text
+description
+clear-description: Yes
+```
+
+in the same command.
+
+## Clearing a fixed channel
+
+To make future preset applications resolve the guild's role-request default instead of retaining the current fixed channel:
+
+```text
+/role-preset group-edit
+preset-id: 7
+group-id: 21
+clear-channel: Yes
+```
+
+This changes reusable source configuration only.
+
+Existing event snapshots retain their already-resolved destination.
+
+Do not supply both:
+
+```text
+channel
+clear-channel: Yes
+```
+
+in the same command.
+
+## Replacing notification roles
+
+Supplying notification-role selectors replaces the complete ordered notification-role collection.
+
+For example:
+
+```text
+/role-preset group-edit
+preset-id: 7
+group-id: 21
+notify-role-1: @Officers
+notify-role-2: @Naval
+```
+
+produces this reusable notification order:
+
+```text
+1. @Officers
+2. @Naval
+```
+
+It does not append those roles to the previous collection.
+
+The command supports up to four replacement notification roles.
+
+Duplicate roles and `@everyone` are rejected.
+
+If the group has a known fixed destination channel, current mentionability is validated against that destination.
+
+If the group uses apply-time default-channel resolution, final Discord usability remains a publication-time concern.
+
+## Clearing notification roles
+
+To explicitly remove the entire notification audience:
+
+```text
+/role-preset group-edit
+preset-id: 7
+group-id: 21
+clear-notification-roles: Yes
+```
+
+Do not combine replacement notification roles with:
+
+```text
+clear-notification-roles: Yes
+```
+
+Omitting all notification-role options leaves the current collection unchanged.
+
+## Editing timing
+
+The command uses administrator-facing before/after options rather than requiring signed integers directly.
+
+Examples:
+
+```text
+open-minutes-before-start: 60
+close-minutes-after-start: 10
+```
+
+or:
+
+```text
+open-minutes-after-start: 5
+close-minutes-after-start: 30
+```
+
+Do not supply both the before-start and after-start form for the same opening or closing value.
+
+The final combined window must always satisfy:
+
+```text
+opening strictly before closing
+```
+
+An edit to only one side of the window is validated against the other currently-stored side.
+
+## Snapshot behaviour
+
+`/role-preset group-edit` changes reusable source configuration for future preset applications.
+
+It does not rewrite request groups already snapshotted into existing events.
+
+Preset application and request-group editing also participate in the preset parent locking contract:
+
+```text
+preset application
+    -> role_request_presets FOR SHARE
+
+request-group edit
+    -> role_request_presets FOR UPDATE
+```
+
+An application therefore observes either the complete group definition before an edit or the complete definition after it.
+
+It cannot snapshot a partially-edited group.
+
+Inactive presets remain editable.
+
+A true no-op returns a no-change result rather than pretending a mutation occurred.
+
+---
+
 # Preset Group Channel Behaviour
 
 A preset group can either use:
@@ -2968,23 +3180,18 @@ option-add
 option-edit
 option-qualifications-set
 group-add
+group-edit
 apply
 set-active
 option-set-active
 group-set-active
 ```
 
-Preset parent metadata and core role-option definition editing are implemented.
+Preset parent metadata, core role-option definition editing, qualification-role replacement, and request-group definition editing are implemented.
 
-The remaining existing-definition editing work includes:
+The remaining existing-definition editing work is group-option mapping administration.
 
-- request-group metadata and timing
-- destination-channel behaviour
-- editing an existing group's notification-role collection
-- signup requirements
-- group-option mappings
-
-These remaining operations will continue to use the existing preset mutation-lock and snapshot-independence rules.
+That work must continue to use the existing preset mutation-lock and snapshot-independence rules.
 
 For now, lifecycle controls are non-destructive and can be used to temporarily retire configuration without deleting it.
 
@@ -3940,7 +4147,7 @@ Shown by:
 /role-preset show
 ```
 
-Used when changing reusable group lifecycle.
+Used when editing a reusable request-group definition or changing its lifecycle.
 
 When a command rejects a perfectly real ID, confirm that it is the correct **kind** of ID before assuming the bot has developed a philosophical objection to integers.
 

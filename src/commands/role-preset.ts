@@ -17,6 +17,7 @@ import {
   addPresetRequestGroup,
   addPresetRoleOption,
   createRoleRequestPreset,
+  editPresetRequestGroup,
   editPresetRoleOption,
   editRoleRequestPreset,
   replacePresetRoleOptionQualificationRoles,
@@ -103,6 +104,11 @@ export async function handleRolePresetCommand(
 
     case "group-add":
       await addPresetGroup(interaction, configuration.guildId);
+
+      return;
+
+    case "group-edit":
+      await editPresetGroup(interaction, configuration.guildId);
 
       return;
 
@@ -1589,6 +1595,517 @@ async function addPresetGroup(
   }
 }
 
+async function editPresetGroup(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const presetId = interaction.options.getInteger("preset-id", true);
+
+  const presetGroupId = interaction.options.getInteger("group-id", true);
+
+  const name = interaction.options.getString("name") ?? undefined;
+
+  const suppliedDescription = interaction.options.getString("description");
+
+  const clearDescription =
+    interaction.options.getBoolean("clear-description") ?? false;
+
+  if (suppliedDescription !== null && clearDescription) {
+    await interaction.editReply({
+      content:
+        "Choose either `description` or `clear-description:true`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const description = clearDescription
+    ? null
+    : (suppliedDescription ?? undefined);
+
+  const selectedChannel = interaction.options.getChannel("channel");
+
+  const clearChannel = interaction.options.getBoolean("clear-channel") ?? false;
+
+  if (selectedChannel !== null && clearChannel) {
+    await interaction.editReply({
+      content: "Choose either `channel` or `clear-channel:true`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const notificationRoles = [
+    interaction.options.getRole("notify-role-1"),
+
+    interaction.options.getRole("notify-role-2"),
+
+    interaction.options.getRole("notify-role-3"),
+
+    interaction.options.getRole("notify-role-4"),
+  ].filter((role): role is Role => role !== null);
+
+  const clearNotificationRoles =
+    interaction.options.getBoolean("clear-notification-roles") ?? false;
+
+  if (clearNotificationRoles && notificationRoles.length > 0) {
+    await interaction.editReply({
+      content:
+        "Choose either replacement notification roles or `clear-notification-roles:true`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const seenNotificationRoleIds = new Set<string>();
+
+  const duplicateNotificationRole = notificationRoles.find((role) => {
+    if (seenNotificationRoleIds.has(role.id)) {
+      return true;
+    }
+
+    seenNotificationRoleIds.add(role.id);
+
+    return false;
+  });
+
+  if (duplicateNotificationRole) {
+    await interaction.editReply({
+      content: `Notification role **${duplicateNotificationRole.name}** was selected more than once.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  if (notificationRoles.some((role) => role.id === interaction.guild.id)) {
+    await interaction.editReply({
+      content:
+        "`@everyone` cannot be used as a preset request-group notification role.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const openBefore = interaction.options.getInteger(
+    "open-minutes-before-start",
+  );
+
+  const openAfter = interaction.options.getInteger("open-minutes-after-start");
+
+  if (openBefore !== null && openAfter !== null) {
+    await interaction.editReply({
+      content:
+        "Choose either `open-minutes-before-start` or `open-minutes-after-start`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const closeBefore = interaction.options.getInteger(
+    "close-minutes-before-start",
+  );
+
+  const closeAfter = interaction.options.getInteger(
+    "close-minutes-after-start",
+  );
+
+  if (closeBefore !== null && closeAfter !== null) {
+    await interaction.editReply({
+      content:
+        "Choose either `close-minutes-before-start` or `close-minutes-after-start`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const openMinutesBeforeStart =
+    openBefore !== null
+      ? openBefore
+      : openAfter !== null
+        ? -openAfter
+        : undefined;
+
+  const closeMinutesBeforeStart =
+    closeBefore !== null
+      ? closeBefore
+      : closeAfter !== null
+        ? -closeAfter
+        : undefined;
+
+  /*
+   * Read current administration state only for friendly Discord validation.
+   *
+   * editPresetRequestGroup() repeats ownership and final-state validation
+   * under the preset FOR UPDATE lock and remains the authoritative mutation.
+   */
+  const presetResult = await getRoleRequestPresetDetails({
+    guildDatabaseId,
+
+    presetId,
+  });
+
+  if (presetResult.kind === "not_found") {
+    await interaction.editReply({
+      content: `Role-request preset #${presetId} was not found in this server.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const currentGroup = presetResult.preset.groups.find(
+    (group) => group.id === presetGroupId,
+  );
+
+  if (!currentGroup) {
+    await interaction.editReply({
+      content: `Request group #${presetGroupId} was not found in role-request preset #${presetId}.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  /*
+   * Validate the administrator-visible final window before asking the service
+   * to repeat the authoritative check under its lock.
+   */
+  const finalOpenMinutesBeforeStart =
+    openMinutesBeforeStart ?? currentGroup.openMinutesBeforeStart;
+
+  const finalCloseMinutesBeforeStart =
+    closeMinutesBeforeStart ?? currentGroup.closeMinutesBeforeStart;
+
+  if (finalOpenMinutesBeforeStart <= finalCloseMinutesBeforeStart) {
+    await interaction.editReply({
+      content: `The role-request group must open before it closes. The supplied final window would be ${formatRelativeOffset(
+        finalOpenMinutesBeforeStart,
+      )} → ${formatRelativeOffset(finalCloseMinutesBeforeStart)}.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  let channelId: string | null | undefined;
+
+  if (clearChannel) {
+    channelId = null;
+  } else if (selectedChannel !== null) {
+    channelId = selectedChannel.id;
+  } else {
+    channelId = undefined;
+  }
+
+  /*
+   * Validate an explicitly-selected replacement channel.
+   *
+   * When notification roles themselves are being replaced and the command
+   * leaves the channel unchanged, also validate those new roles against an
+   * existing fixed destination where one is known.
+   *
+   * A null destination remains intentionally unresolved until preset
+   * application, matching group-add behaviour.
+   */
+  const channelToValidateId =
+    selectedChannel !== null
+      ? selectedChannel.id
+      : notificationRoles.length > 0 && !clearChannel
+        ? currentGroup.channelId
+        : null;
+
+  if (channelToValidateId !== null) {
+    const channel = await interaction.guild.channels.fetch(channelToValidateId);
+
+    if (
+      !channel ||
+      (channel.type !== ChannelType.GuildText &&
+        channel.type !== ChannelType.GuildAnnouncement) ||
+      !channel.isSendable()
+    ) {
+      await interaction.editReply({
+        content: "The preset role-request channel is unavailable.",
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+    }
+
+    const botMember =
+      interaction.guild.members.me ??
+      (await interaction.guild.members.fetchMe());
+
+    const permissions = channel.permissionsFor(botMember);
+
+    const requiredPermissions = [
+      PermissionFlagsBits.ViewChannel,
+
+      PermissionFlagsBits.SendMessages,
+
+      PermissionFlagsBits.EmbedLinks,
+
+      PermissionFlagsBits.ReadMessageHistory,
+    ];
+
+    if (
+      requiredPermissions.some((permission) => !permissions.has(permission))
+    ) {
+      await interaction.editReply({
+        content:
+          "The bot does not currently have all required posting permissions in that preset role-request channel.",
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+    }
+
+    const unmentionableNotificationRole = notificationRoles.find(
+      (role) => !role.mentionable,
+    );
+
+    if (
+      unmentionableNotificationRole &&
+      !permissions.has(PermissionFlagsBits.MentionEveryone)
+    ) {
+      await interaction.editReply({
+        content: `The bot cannot currently mention **${unmentionableNotificationRole.name}** in that explicit preset channel.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+    }
+
+    if (selectedChannel !== null) {
+      channelId = channel.id;
+    }
+  }
+
+  const notificationRoleReplacement = clearNotificationRoles
+    ? []
+    : notificationRoles.length > 0
+      ? notificationRoles.map((role) => ({
+          discordRoleId: role.id,
+
+          roleNameSnapshot: role.name,
+        }))
+      : undefined;
+
+  const requiresPositiveSignup =
+    interaction.options.getBoolean("requires-signup") ?? undefined;
+
+  const result = await editPresetRequestGroup({
+    guildDatabaseId,
+
+    presetId,
+
+    presetGroupId,
+
+    name,
+
+    description,
+
+    channelId,
+
+    notificationRoles: notificationRoleReplacement,
+
+    requiresPositiveSignup,
+
+    openMinutesBeforeStart,
+
+    closeMinutesBeforeStart,
+  });
+
+  switch (result.kind) {
+    case "updated": {
+      await interaction.editReply({
+        content: [
+          `✅ Updated request group **${result.group.name}** (#${result.group.id}) in preset #${result.group.presetId}.`,
+
+          result.group.description
+            ? `**Description:** ${result.group.description}`
+            : "**Description:** None",
+
+          `**Channel:** ${
+            result.group.channelId
+              ? `<#${result.group.channelId}>`
+              : "Guild default at application"
+          }`,
+
+          `**Notification roles:** ${
+            result.group.notificationRoles.length > 0
+              ? result.group.notificationRoles
+                  .map(
+                    (role) =>
+                      `<@&${role.discordRoleId}>${
+                        role.roleNameSnapshot
+                          ? ` (${role.roleNameSnapshot})`
+                          : ""
+                      }`,
+                  )
+                  .join(", ")
+              : "None"
+          }`,
+
+          `**Requires positive signup:** ${
+            result.group.requiresPositiveSignup ? "Yes" : "No"
+          }`,
+
+          `**Window:** ${formatRelativeOffset(
+            result.group.openMinutesBeforeStart,
+          )} → ${formatRelativeOffset(result.group.closeMinutesBeforeStart)}`,
+
+          `**Status:** ${result.group.active ? "Active" : "Inactive"}`,
+
+          "",
+          "Existing role-option mappings are unchanged.",
+        ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: guildDatabaseId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "role_preset.group.edit",
+
+        outcome: "success",
+
+        summary: `Updated request group "${result.group.name}" (#${result.group.id}) in role-request preset #${result.group.presetId}.`,
+
+        targetType: "role_request_preset_group",
+
+        targetId: String(result.group.id),
+
+        details: {
+          presetId: result.group.presetId,
+
+          name: result.group.name,
+
+          description: result.group.description,
+
+          channelId: result.group.channelId,
+
+          notificationRoleIds: result.group.notificationRoles.map(
+            (role) => role.discordRoleId,
+          ),
+
+          requiresPositiveSignup: result.group.requiresPositiveSignup,
+
+          openMinutesBeforeStart: result.group.openMinutesBeforeStart,
+
+          closeMinutesBeforeStart: result.group.closeMinutesBeforeStart,
+
+          active: result.group.active,
+        },
+      });
+
+      return;
+    }
+
+    case "unchanged":
+      await interaction.editReply({
+        content: `Preset request group **${result.group.name}** (#${result.group.id}) already has the requested definition. No changes were made.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "preset_not_found":
+      await interaction.editReply({
+        content: `Role-request preset #${presetId} was not found in this server.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "group_not_found":
+      await interaction.editReply({
+        content: `Request group #${presetGroupId} was not found in role-request preset #${presetId}.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "invalid_input":
+      await interaction.editReply({
+        content: formatPresetGroupEditValidationError(
+          result.reason,
+
+          presetId,
+
+          result.discordRoleId,
+        ),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
+}
+
 async function applyPreset(
   interaction: CachedCommandInteraction,
   guildDatabaseId: number,
@@ -2291,6 +2808,39 @@ function formatInvalidPresetApplicationError(
         ? `Preset group #${presetGroupId} does not open before it closes.`
         : `Role-request preset #${presetId} contains an invalid request-group window.`;
   }
+}
+
+function formatPresetGroupEditValidationError(
+  reason:
+    | "no_changes_requested"
+    | "invalid_name"
+    | "invalid_channel_id"
+    | "too_many_notification_roles"
+    | "invalid_notify_role_id"
+    | "invalid_notify_role_name"
+    | "duplicate_notification_role"
+    | "everyone_notify_role"
+    | "invalid_open_offset"
+    | "invalid_close_offset"
+    | "invalid_group_window",
+
+  presetId: number,
+
+  discordRoleId?: string,
+): string {
+  if (reason === "no_changes_requested") {
+    return "Supply at least one request-group change: `name`, `description`, `clear-description:true`, `channel`, `clear-channel:true`, notification roles, `clear-notification-roles:true`, `requires-signup`, or an opening/closing offset.";
+  }
+
+  return formatPresetGroupValidationError(
+    reason,
+
+    presetId,
+
+    undefined,
+
+    discordRoleId,
+  );
 }
 
 function formatPresetGroupValidationError(
