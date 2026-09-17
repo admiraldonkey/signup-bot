@@ -235,6 +235,7 @@ Current preset commands support:
 - inspecting a complete preset definition
 - adding role options
 - editing existing role-option display names, descriptions, request restrictions, and capacities
+- replacing or explicitly clearing role-option qualification-role sets
 - adding request groups
 - applying a preset to an existing event
 - activating or deactivating a preset
@@ -259,9 +260,9 @@ Lifecycle controls are non-destructive:
 
 Deactivating an option can intentionally leave an active group with no active mapped options. The bot warns the administrator rather than silently changing neighbouring configuration. Preset application remains the final authoritative validator and rejects an unusable active configuration.
 
-Preset metadata and core role-option definition editing are implemented.
+Preset metadata, core role-option definition editing, and qualification-role replacement are implemented.
 
-Qualification-role replacement, request-group editing, and group-option mapping editing remain planned before the preset administration workflow is considered complete.
+Request-group editing and group-option mapping editing remain planned before the preset administration workflow is considered complete.
 
 ### Announcements and reminders
 
@@ -722,9 +723,9 @@ The following substantial areas are implemented:
 
 The current development focus is **completing editing of existing reusable role-request presets**.
 
-Preset metadata editing and core role-option definition editing are implemented.
+Preset metadata editing, core role-option definition editing, and qualification-role replacement are implemented.
 
-The remaining preset-editing work includes qualification-role replacement, request-group editing, and group-option mapping editing before moving on to event templates.
+The remaining preset-editing work includes request-group editing and group-option mapping editing before moving on to event templates.
 
 ### Event templates
 

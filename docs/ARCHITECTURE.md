@@ -2476,33 +2476,107 @@ An option belonging to preset B cannot be edited through preset A.
 
 Existing event-level snapshots remain independent and are not rewritten.
 
-## Qualification interaction
+## Qualification-Role Replacement
 
-Qualification-role replacement is a separate preset-editing operation.
+Qualification-role configuration for an existing preset option can be replaced atomically.
 
-Changing an option from:
-
-```text
-open
-```
-
-to:
+The mutation uses complete replacement semantics:
 
 ```text
-qualified_only
+current qualification set
+        |
+        v
+validate complete requested set
+        |
+        v
+delete old rows
+        |
+        v
+insert complete new set
 ```
 
-is allowed only when that option already has at least one stored qualification role.
+Validation completes before destructive work begins, and the delete/insert sequence remains inside the same PostgreSQL transaction.
 
-Changing an option back to:
+No observer can therefore see a partially-replaced authoritative qualification set.
+
+Qualification roles support two levels:
 
 ```text
-open
+qualified
+supervision_required
 ```
 
-preserves existing qualification rows.
+A single Discord role cannot appear at conflicting levels for the same preset option.
 
-This avoids destructive side effects while qualification editing remains an explicit separate mutation.
+`@everyone` is rejected.
+
+Role-name snapshots are retained alongside Discord role IDs.
+
+The qualification-role collection is logically a set rather than an ordered list.
+
+No-op comparison is therefore order-insensitive.
+
+## Qualified-Only Consistency
+
+A preset option with:
+
+```text
+requestRestriction = qualified_only
+```
+
+must have at least one qualification role.
+
+Replacing its qualification configuration with an empty set is rejected before the existing rows are changed.
+
+An `open` option may:
+
+```text
+retain qualification roles
+```
+
+for later reuse, or:
+
+```text
+explicitly clear all qualification roles
+```
+
+without changing its request restriction.
+
+Changing an option from `open` to `qualified_only` through role-option editing continues to require existing valid qualification configuration.
+
+## Locking and Snapshot Semantics
+
+Qualification replacement locks the preset parent row:
+
+```text
+role_request_presets FOR UPDATE
+```
+
+Preset application uses:
+
+```text
+role_request_presets FOR SHARE
+```
+
+Application therefore observes either:
+
+```text
+complete qualification set before replacement
+```
+
+or:
+
+```text
+complete qualification set after replacement
+```
+
+and never a partially-mutated graph.
+
+Existing event-level qualification snapshots remain unchanged.
+
+A real qualification replacement advances the option and parent preset update timestamps.
+
+A true no-op advances neither.
 
 ---
 
@@ -2512,7 +2586,6 @@ Complete editing of the remaining child preset graph is still planned.
 
 Remaining areas include:
 
-- qualification-role replacement
 - request-group metadata editing
 - request-group destination editing
 - notification-role editing

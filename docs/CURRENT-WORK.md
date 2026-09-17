@@ -1,6 +1,6 @@
 # Current Development State
 
-**Last reconciled:** 16 September 2026
+**Last reconciled:** 17 September 2026
 
 This document is the short-form handoff for the current development checkpoint.
 
@@ -320,7 +320,7 @@ The system currently supports reusable:
 - event-relative opening offsets
 - event-relative closing offsets
 
-The major missing administration capability is editing existing definitions.
+The remaining preset-administration work is focused on request-group editing and group-option mapping rather than basic parent, option, or qualification editing.
 
 ---
 
@@ -1288,10 +1288,10 @@ Implemented editing currently includes:
 - role-option description
 - role-option request restriction
 - role-option capacity
+- complete qualification-role replacement
 
 Remaining areas include:
 
-- qualification-role replacement
 - request-group metadata editing
 - destination editing
 - notification-role editing
@@ -1377,44 +1377,41 @@ This remains planned.
 
 # Immediate Next Objective
 
-The first two preset-editing slices are now implemented:
+The first three preset-editing slices are now implemented:
 
 ```text
 preset metadata editing
 preset role-option editing
+qualification-role replacement
 ```
 
-Current administrator commands include:
+Qualification editing now supports complete atomic replacement of:
 
 ```text
-/role-preset edit
-    -> rename preset
-    -> replace or clear description
-
-/role-preset option-edit
-    -> rename displayed role
-    -> replace or clear description
-    -> change request restriction
-    -> replace or clear capacity
+qualified
+supervision_required
 ```
 
-Preset role-option logical keys remain immutable after creation.
+Discord role mappings.
 
-A display-name edit therefore preserves logical identity.
-
-The role-option edit service also preserves:
+The replacement service preserves:
 
 - guild ownership
 - child ownership
 - inactive-preset editability
+- role-name snapshots
+- qualified_only consistency
 - idempotent no-op behaviour
-- qualification rows
 - existing event snapshots
 - the preset parent locking contract
 
-Changing an option to `qualified_only` requires existing qualification rows.
+Qualification-role replacement validates the complete requested set before deleting existing rows.
 
-Changing it back to `open` preserves those rows.
+For an `open` role option, an empty set may be explicitly stored.
+
+For a `qualified_only` option, an empty set is rejected.
+
+The Discord command requires `clear-all:true` for destructive clearing rather than treating omission as deletion.
 
 Deterministic PostgreSQL concurrency coverage verifies that preset application holding:
 
@@ -1422,7 +1419,7 @@ Deterministic PostgreSQL concurrency coverage verifies that preset application h
 role_request_presets FOR SHARE
 ```
 
-serialises correctly against role-option editing requesting:
+serialises correctly against qualification replacement requesting:
 
 ```text
 role_request_presets FOR UPDATE
@@ -1431,8 +1428,8 @@ role_request_presets FOR UPDATE
 The next implementation slice is:
 
 ```text
-P0.3
-qualification-role replacement
+P0.4
+preset request-group editing
 ```
 
 ---
@@ -1445,13 +1442,13 @@ A sensible initial sequence is:
 completed:
     edit command/service surface
     preset metadata editing
+    role-option editing
+    qualification-role editing
 
 next:
-    role-option editing
+    request-group editing
 
 then:
-    qualification-role editing
-    request-group editing
     group-option mapping editing
     complete command UX review
     full preset administration manual smoke test
