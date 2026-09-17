@@ -1584,6 +1584,8 @@ name: Naval Roles
 role-1: 15
 role-2: 16
 role-3: 17
+notify-role-1: @Naval
+notify-role-2: @Officers
 ```
 
 This command is for an **event-level manual group**.
@@ -1658,17 +1660,38 @@ The calculated close time must still be a valid future time when the group is cr
 
 ---
 
-# Manual Group Notification Role
+# Manual Group Notification Roles
 
-A request group may optionally ping a Discord role when it is first posted.
+A manually-posted request group may optionally ping up to four Discord roles when it is first posted.
 
-The role is independent from qualification roles.
+The notification audience remains separate from qualification roles.
 
-The bot rejects unsuitable notification choices such as `@everyone`.
+The command exposes:
 
-Required Discord mention permissions are validated where applicable.
+```text
+notify-role-1
+notify-role-2
+notify-role-3
+notify-role-4
+```
 
-Later refresh or recovery does not replay this normal opening ping.
+All four fields are optional.
+
+Supplying no notification roles creates and posts the group without a role ping.
+
+When multiple roles are selected, the initial Discord message mentions all configured roles in the selected order.
+
+The bot rejects:
+
+- `@everyone`
+- the same Discord role selected more than once
+- an unmentionable selected role when the bot lacks permission to mention it in the chosen channel
+
+Notification-role configuration is stored independently from the visible Discord message.
+
+Later message refresh or deleted-message recovery does not replay the original opening pings.
+
+`/event role-group-list` displays the stored notification roles for each group.
 
 ---
 
@@ -2572,6 +2595,8 @@ preset-id: 7
 name: Main Naval Roles
 role-1: 11
 role-2: 12
+notify-role-1: @Naval
+notify-role-2: @Officers
 open-minutes-before-start: 60
 close-minutes-after-start: 10
 ```
@@ -2581,6 +2606,25 @@ The role fields use **preset option IDs** shown by `/role-preset show`.
 Only suitable active preset options can be mapped into a new group.
 
 Duplicate role-option selections are rejected.
+
+A reusable group may also define up to four optional notification roles.
+
+The command exposes:
+
+```text
+notify-role-1
+notify-role-2
+notify-role-3
+notify-role-4
+```
+
+The selected order is retained in reusable configuration and copied into each event snapshot when the preset is applied.
+
+Duplicate notification-role selections and `@everyone` are rejected.
+
+If a fixed destination channel is selected, current mentionability is validated during preset configuration.
+
+If the group uses apply-time default-channel resolution, final Discord notification usability is checked when the snapshotted event group actually publishes.
 
 ---
 
@@ -2650,13 +2694,31 @@ Opening must occur strictly before closing.
 
 ---
 
-# Preset Group Notification Role
+# Preset Group Notification Roles
 
-A reusable request group can store a Discord role to notify when the group opens.
+A reusable request group may store up to four ordered Discord roles to notify when the group opens.
 
-That notification audience remains separate from qualification roles.
+Notification audience remains separate from qualification eligibility.
 
-The bot validates inappropriate notification roles such as `@everyone`.
+The reusable configuration is stored as an ordered child collection.
+
+When a preset is applied:
+
+```text
+preset notification-role collection
+        |
+        | snapshot
+        v
+event-level notification-role collection
+```
+
+The event snapshot is then independent from later reusable-preset changes.
+
+Scheduled publication resolves each snapshotted role independently.
+
+If one configured role has been deleted or cannot be mentioned, that role may be skipped without suppressing other usable notification roles or preventing the request group itself from publishing.
+
+Message refresh and recovery do not replay these original opening notifications.
 
 ---
 
@@ -2918,7 +2980,7 @@ The remaining existing-definition editing work includes:
 
 - request-group metadata and timing
 - destination-channel behaviour
-- notification roles
+- editing an existing group's notification-role collection
 - signup requirements
 - group-option mappings
 

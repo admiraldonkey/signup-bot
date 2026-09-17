@@ -21,59 +21,50 @@ If this document becomes substantially longer because completed work keeps being
 
 ## Current Repository Checkpoint
 
-The most recent completed development slice is the database-disruption resilience pass.
+The current development branch adds ordered multiple notification roles to role-request groups.
 
-It addressed two application-level weaknesses discovered while investigating PostgreSQL availability incidents:
+The historical model allowed one optional notification role per group.
 
-```text
-graceful process shutdown
-    -> wait for an already-running scheduler tick before closing shared resources
-
-PostgreSQL pool error logging
-    -> preserve useful diagnostics without logging the complete pg error/client object
-```
-
-The scheduler shutdown contract is now:
+The new model supports:
 
 ```text
-stop future polling
-    |
-    v
-drain active scheduler tick
-    |
-    v
-destroy Discord client
-    |
-    v
-close PostgreSQL pool
+0-4 ordered notification roles
 ```
 
-PostgreSQL pool errors now log only the useful diagnostic fields:
+for both:
 
 ```text
-message
-code
-cause message
-cause code
+reusable preset request groups
+event-level request groups
 ```
 
-rather than passing the raw error object to `console.error()`.
+The implementation now covers:
 
-Current automated verification is green across:
+- additive PostgreSQL child tables
+- migration backfill from historical singular notification fields
+- preset group creation
+- preset administration display
+- preset application snapshots
+- scheduled group publication
+- manual `/event role-group-post`
+- `/event role-group-list`
+- per-role notification delivery results
+- audit output
+- direct integration coverage
 
-```text
-npm run test:unit
-npm run test:integration
-npm run test:coverage
-npm run typecheck
-npm run typecheck:test
-```
+Preset application copies the complete ordered notification-role collection into ordinary event-level state.
 
-`git diff --check` is also clean.
+Scheduled publication resolves each snapshotted role independently and pings the usable subset.
 
-The scheduler shutdown regression uses a deterministic PostgreSQL table lock to prove that `stopEventScheduler()` does not resolve while a scheduler tick remains active.
+A missing or unmentionable role does not suppress unrelated valid notification roles.
 
-No scheduler retry-policy changes were made as part of this work.
+Manual group posting validates the known destination immediately and persists its selected notification roles atomically with the group.
+
+The first configured role is temporarily mirrored into the historical singular columns for deployment compatibility.
+
+New collection-aware reads prefer child rows and use the singular fields only as an old-revision fallback when no collection rows exist.
+
+Current automated verification for the feature is green across its targeted unit, integration, and typecheck gates.
 
 Always verify local branch and working-tree state before beginning the next development slice.
 
@@ -81,100 +72,83 @@ Always verify local branch and working-tree state before beginning the next deve
 
 # Current Activity
 
-The database-disruption resilience pass followed investigation of two PostgreSQL availability incidents on 11 September 2026.
+Multiple request-group notification roles were introduced as a prerequisite discovered while beginning P0.4 preset request-group editing.
 
-Northflank PostgreSQL addon logs showed the database process itself being shut down and restarted.
+The original P0.4 service branch assumed a singular notification role.
 
-During those incidents the application first received PostgreSQL administrator-shutdown errors and then connection refusal/timeouts while the database was unavailable.
+Rather than completing that public edit contract and immediately redesigning it, development paused P0.4 and first generalised notification state.
 
-The observed sequence included:
+The implemented collection model is:
 
 ```text
-PostgreSQL shutdown
-    -> existing application connection terminated with 57P01
-    -> database unavailable
-    -> ECONNREFUSED / connection timeout
-    -> PostgreSQL addon restarted
-    -> PostgreSQL recovered and became available again
+preset request group
+        |
+        v
+0-4 ordered notification roles
+        |
+        | apply
+        v
+event-level notification-role snapshot
+        |
+        v
+publication resolves each role independently
 ```
 
-Read-only production diagnostics subsequently confirmed:
+Manual event groups use the same event-level collection representation.
+
+The database itself does not enforce the current four-role limit.
+
+That limit is application-level policy so it can change later without another schema redesign.
+
+## Compatibility migration
+
+The notification-role schema change intentionally uses an expand-and-contract deployment.
+
+Migration `0020` adds the new child tables and backfills old singular role configuration.
+
+The existing singular columns remain temporarily in the schema so an older and newer app revision can overlap safely during deployment.
+
+During this period:
 
 ```text
-database migrations
-    -> current
+new child collection
+    -> authoritative
 
-scheduled actions
-    -> completed or cancelled only
-
-pending actions
-    -> none
-
-processing actions
-    -> none
-
-failed actions
-    -> none
-
-maximum observed attempt count
-    -> 1
+legacy singular columns
+    -> compatibility shadow only
 ```
 
-There was therefore no evidence that the outage exhausted scheduled-action retries or left scheduler work stranded.
+New writes mirror the first configured role into the legacy fields.
 
-The repeated scheduler-maintenance SQL containing:
+New reads fall back to those fields only when no child collection rows exist.
+
+A later cleanup migration should remove the compatibility columns after the collection-aware revision has been deployed safely.
+
+## Return to preset request-group editing
+
+After this prerequisite PR merges, development returns to:
 
 ```text
-attempt_count >= 5
+P0.4
+preset request-group editing
 ```
 
-was not evidence that a particular action had reached five attempts.
+The existing request-group edit work must be reconciled with the new collection model.
 
-That predicate is part of normal stale/exhausted-action maintenance and appeared in the logs because the maintenance query itself could not reach PostgreSQL while the database was unavailable.
+In particular, notification editing should operate on the complete ordered collection rather than a singular `notifyRole` value.
 
-The PostgreSQL addon also emits recurring Patroni/Kubernetes `ObjectCache.run ProtocolError` messages. These currently appear to recover automatically and have not normally coincided with application-visible database outages. They are an infrastructure concern to monitor or raise with Northflank rather than something to compensate for in application scheduler logic.
-
-The investigation did expose a separate application shutdown race.
-
-Previously:
+The remaining broad sequence is still:
 
 ```text
-SIGTERM
-    -> stop scheduler interval
-    -> destroy Discord client
-    -> close PostgreSQL pool
-
-already-running scheduler tick
-    -> could continue after the pool had been closed
-```
-
-This had previously produced:
-
-```text
-Cannot use a pool after calling end on the pool
-```
-
-The scheduler now tracks and drains its active tick before shared Discord and PostgreSQL resources are closed.
-
-The investigation also showed that raw PostgreSQL pool errors could include large nested `pg.Client` structures and connection details in application logs.
-
-Pool-error logging now emits only sanitised diagnostic fields rather than the raw object.
-
-The next production feature objective remains:
-
-```text
-editing existing reusable role-request presets
-```
-
-The intended sequence remains:
-
-```text
-preset editing
-    |
-    v
+preset request-group editing
+        |
+        v
+group-option mapping editing
+        |
+        v
 event templates
-    |
-    v
+        |
+        v
 recurrence
 ```
 
@@ -316,7 +290,7 @@ The system currently supports reusable:
 - signup requirements
 - fixed destination channels
 - apply-time default-channel resolution
-- notification-role snapshots
+- up to four ordered notification-role snapshots per request group
 - event-relative opening offsets
 - event-relative closing offsets
 
@@ -1294,12 +1268,29 @@ Remaining areas include:
 
 - request-group metadata editing
 - destination editing
-- notification-role editing
+- editing an existing group's notification-role collection
 - signup-rule editing
 - opening/closing timing editing
 - group-option mapping editing
 
 All remaining work must preserve the current preset mutation lock and event snapshot independence.
+
+---
+
+## Notification-role compatibility-column cleanup
+
+The historical singular request-group notification columns remain temporarily present:
+
+```text
+notify_role_id
+notify_role_name_snapshot
+```
+
+They are compatibility shadows for the expand-and-contract migration to notification-role child collections.
+
+Do not remove them in the current feature PR.
+
+After the collection-aware application revision has been deployed safely, add a separate cleanup migration that removes the legacy columns and then removes the fallback/mirroring code that exists only for mixed-version deployment compatibility.
 
 ---
 
@@ -1377,60 +1368,56 @@ This remains planned.
 
 # Immediate Next Objective
 
-The first three preset-editing slices are now implemented:
+The notification-role collection prerequisite for P0.4 is now implemented.
+
+Role-request groups support:
 
 ```text
-preset metadata editing
-preset role-option editing
-qualification-role replacement
+0 notification roles
+1 notification role
+2 notification roles
+3 notification roles
+4 notification roles
 ```
 
-Qualification editing now supports complete atomic replacement of:
+The collection is ordered and snapshotted.
 
-```text
-qualified
-supervision_required
-```
+Preset-derived groups and manually-created event groups now converge on the same event-level child-table representation.
 
-Discord role mappings.
-
-The replacement service preserves:
-
-- guild ownership
-- child ownership
-- inactive-preset editability
-- role-name snapshots
-- qualified_only consistency
-- idempotent no-op behaviour
-- existing event snapshots
-- the preset parent locking contract
-
-Qualification-role replacement validates the complete requested set before deleting existing rows.
-
-For an `open` role option, an empty set may be explicitly stored.
-
-For a `qualified_only` option, an empty set is rejected.
-
-The Discord command requires `clear-all:true` for destructive clearing rather than treating omission as deletion.
-
-Deterministic PostgreSQL concurrency coverage verifies that preset application holding:
-
-```text
-role_request_presets FOR SHARE
-```
-
-serialises correctly against qualification replacement requesting:
-
-```text
-role_request_presets FOR UPDATE
-```
-
-The next implementation slice is:
+The immediate next implementation slice returns to:
 
 ```text
 P0.4
 preset request-group editing
 ```
+
+The existing group-edit work should be updated so notification mutation uses the new collection model.
+
+The intended semantics are:
+
+```text
+undefined
+    -> leave notification-role collection unchanged
+
+explicit replacement collection
+    -> replace the complete ordered set
+
+explicit clear
+    -> store an empty notification-role collection
+```
+
+The existing P0.4 guarantees still apply:
+
+- preset parent `FOR UPDATE`
+- application `FOR SHARE`
+- guild ownership
+- child ownership
+- inactive-preset editability
+- idempotent no-op behaviour
+- existing event snapshots remain unchanged
+- group-option mappings remain outside the P0.4 mutation
+
+The next step after P0.4 remains complete ordered group-option mapping editing.
 
 ---
 
@@ -2052,10 +2039,20 @@ PostgreSQL pool error logging is sanitised and does not emit raw pg client inter
 
 11 September database outages were diagnosed as PostgreSQL addon restarts with no observed scheduler-state damage
 
+role-request groups support up to four ordered optional notification roles
+
+preset notification roles snapshot into independent event-level collections
+
+scheduled publication resolves notification roles independently
+
+manual role-group posting persists and pings multiple roles
+
+legacy singular notification columns remain temporary deployment compatibility shadows
+
 automated unit/integration/coverage/typechecking is green
 
 next production feature:
-    edit existing reusable role-request presets
+    resume P0.4 preset request-group editing
 ```
 
 Do not resume an older reliability or preset-foundation task simply because an older chat or stale document says it is still pending.

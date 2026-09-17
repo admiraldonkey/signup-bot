@@ -170,7 +170,7 @@ A group controls presentation and workflow concerns such as:
 
 - which event role options it displays
 - destination channel
-- optional notification role
+- up to four optional notification roles
 - whether a positive attendance signup is required
 - opening time relative to event start
 - closing time relative to event start
@@ -223,7 +223,7 @@ A preset can contain:
 - ordered option mappings
 - optional fixed channels
 - apply-time default-channel resolution
-- optional notification roles
+- up to four ordered optional notification roles per request group
 - signup requirements
 - event-relative opening and closing rules
 
@@ -372,7 +372,7 @@ Examples include:
 - organiser assignments
 - applied role-request presets
 - role qualification snapshots
-- role-request group destinations and notification metadata
+- role-request group destinations and notification-role collections
 
 This keeps historical and already-configured events independent from later changes to reusable configuration.
 
@@ -713,6 +713,7 @@ The following substantial areas are implemented:
 - durable role-request opening and closing
 - core Discord message recovery
 - reusable role-request presets
+- ordered multi-role notifications for role-request groups
 - preset application with snapshot semantics
 - reversible preset, option, and group lifecycle controls
 - PostgreSQL-backed audit logging
@@ -725,7 +726,11 @@ The current development focus is **completing editing of existing reusable role-
 
 Preset metadata editing, core role-option definition editing, and qualification-role replacement are implemented.
 
-The remaining preset-editing work includes request-group editing and group-option mapping editing before moving on to event templates.
+Role-request groups now support up to four ordered optional notification roles across reusable presets, preset application snapshots, scheduled publication, and manually-posted event groups.
+
+This notification-role collection work was completed as a prerequisite discovered while beginning request-group editing.
+
+The immediate development direction now returns to request-group editing, followed by group-option mapping editing before moving on to event templates.
 
 ### Event templates
 

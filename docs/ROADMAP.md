@@ -135,7 +135,7 @@ Recurrence should not be built before template-generated one-off events are reli
 
 Complete the administrator workflow for maintaining an existing reusable role-request preset without requiring it to be recreated.
 
-The current preset-management foundation, parent metadata editing, core role-option definition editing, and qualification-role replacement are implemented.
+The current preset-management foundation, parent metadata editing, core role-option definition editing, qualification-role replacement, and multi-role request-group notification foundation are implemented.
 
 The remaining work is request-group editing, group-option mapping editing, and final administrator UX review.
 
@@ -150,10 +150,16 @@ Candidate editable fields include:
 - name
 - description
 - destination channel override
-- notification role
+- notification-role collection
 - signup requirement
 - opening offset
 - closing offset
+
+The underlying notification-role collection foundation is already implemented.
+
+Reusable and event-level groups can currently store up to four ordered optional notification roles, preset application snapshots the complete collection, and publication resolves each role independently.
+
+P0.4 should therefore edit the existing collection model rather than reintroducing singular notification-role semantics.
 
 The current signed-offset semantics must remain:
 
@@ -1089,7 +1095,7 @@ Potential operations include:
 - change signup requirement
 - move future opening
 - change closing rule
-- change notification role
+- replace or edit notification-role collection
 - move destination before publication
 - retire/deactivate a planned group
 - reopen where domain rules permit it
