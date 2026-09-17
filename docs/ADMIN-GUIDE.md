@@ -1,6 +1,6 @@
 # Administrator Guide
 
-**Last reconciled:** 16 September 2026
+**Last reconciled:** 17 September 2026
 
 ## Purpose
 
@@ -2411,6 +2411,129 @@ If the requested values already match the stored definition, the command reports
 
 ---
 
+# `/role-preset option-qualifications-set`
+
+Replaces the complete qualification-role set for one existing reusable preset role option.
+
+Use the option ID shown by:
+
+```text
+/role-preset show
+```
+
+Example:
+
+```text
+/role-preset option-qualifications-set
+preset-id: 7
+option-id: 11
+qualified-role-1: @Captain
+supervised-role-1: @Midshipman
+```
+
+The supplied roles become the complete stored qualification set.
+
+Roles may be supplied at either qualification level:
+
+```text
+Fully qualified
+Supervision required
+```
+
+A Discord role cannot appear at both levels for the same option.
+
+`@everyone` cannot be used as a qualification role.
+
+Up to four roles of each qualification level can currently be supplied through the Discord command.
+
+## Complete replacement semantics
+
+This command does not incrementally add roles to the existing set.
+
+For example, if the stored set is:
+
+```text
+Qualified:
+    @Captain
+
+Supervision required:
+    @Midshipman
+```
+
+and the command supplies only:
+
+```text
+Qualified:
+    @Senior Captain
+```
+
+the resulting stored set is:
+
+```text
+Qualified:
+    @Senior Captain
+
+Supervision required:
+    none
+```
+
+The old `@Captain` and `@Midshipman` mappings are no longer part of the reusable preset option.
+
+## Explicit clearing
+
+Removing the complete qualification set is deliberately explicit.
+
+Use:
+
+```text
+/role-preset option-qualifications-set
+preset-id: 7
+option-id: 11
+clear-all: Yes
+```
+
+Do not combine `clear-all: Yes` with replacement roles.
+
+Supplying no roles without `clear-all: Yes` does not silently delete the existing configuration.
+
+An option with restriction:
+
+```text
+Qualified only
+```
+
+cannot be left with an empty qualification-role set.
+
+To remove all qualification roles from such an option, first change its restriction to:
+
+```text
+Open
+```
+
+using `/role-preset option-edit`, then explicitly clear the qualification set.
+
+## No-op behaviour
+
+Supplying the same logical qualification-role set already stored returns a no-change result.
+
+Input ordering does not matter.
+
+For example, supplying the same two roles in the opposite order is still considered the same qualification set.
+
+A true no-op does not create a false mutation audit or advance the preset/option update timestamps.
+
+## Snapshot behaviour
+
+Qualification replacement changes reusable source configuration for future preset applications.
+
+It does not alter qualification roles already snapshotted into existing events.
+
+Preset application and qualification replacement serialise through the preset parent lock so application sees either the complete qualification set before replacement or the complete set after replacement.
+
+Inactive presets remain editable.
+
+---
+
 # Preset Option Qualification Rules
 
 The same qualification principles as event-level options apply.
@@ -2781,6 +2904,7 @@ list
 show
 option-add
 option-edit
+option-qualifications-set
 group-add
 apply
 set-active
@@ -2792,7 +2916,6 @@ Preset parent metadata and core role-option definition editing are implemented.
 
 The remaining existing-definition editing work includes:
 
-- qualification-role replacement
 - request-group metadata and timing
 - destination-channel behaviour
 - notification roles

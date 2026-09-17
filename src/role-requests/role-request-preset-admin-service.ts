@@ -405,6 +405,66 @@ export type EditPresetRoleOptionResult =
         | "missing_qualification_roles";
     };
 
+export type ReplacePresetRoleOptionQualificationRolesInput = {
+  guildDatabaseId: number;
+
+  presetId: number;
+
+  presetOptionId: number;
+
+  /*
+   * This is a complete replacement set, not an incremental add/remove list.
+   *
+   * An empty array explicitly clears all qualification roles when the
+   * option's request restriction allows that final state.
+   */
+  qualificationRoles: PresetQualificationRoleInput[];
+};
+
+export type ReplacePresetRoleOptionQualificationRolesResult =
+  | {
+      kind: "updated" | "unchanged";
+
+      option: {
+        id: number;
+
+        presetId: number;
+
+        displayName: string;
+
+        requestRestriction: "open" | "qualified_only";
+
+        active: boolean;
+      };
+
+      qualificationRoles: {
+        discordRoleId: string;
+
+        roleNameSnapshot: string;
+
+        qualificationLevel: "qualified" | "supervision_required";
+      }[];
+    }
+  | {
+      kind: "preset_not_found";
+    }
+  | {
+      kind: "option_not_found";
+    }
+  | {
+      kind: "invalid_input";
+
+      reason:
+        | "invalid_qualification_level"
+        | "invalid_qualification_role_id"
+        | "invalid_qualification_role_name"
+        | "duplicate_qualification_role"
+        | "everyone_qualification_role"
+        | "missing_qualification_roles";
+
+      discordRoleId?: string;
+    };
+
 export type PresetNotifyRoleInput = {
   discordRoleId: string;
 
@@ -1116,6 +1176,275 @@ export async function editPresetRoleOption(
 
         requestRestriction: updatedOption.requestRestriction,
       },
+    } as const;
+  });
+}
+
+/**
+ * Atomically replaces the complete qualification-role set for one reusable
+ * preset role option.
+ *
+ * Preset application takes FOR SHARE on the parent preset. Qualification
+ * replacement therefore takes FOR UPDATE on the same row so application sees
+ * either the complete qualification graph before this mutation or the
+ * complete graph after it.
+ *
+ * Existing event-level snapshots remain independent.
+ */
+export async function replacePresetRoleOptionQualificationRoles(
+  input: ReplacePresetRoleOptionQualificationRolesInput,
+): Promise<ReplacePresetRoleOptionQualificationRolesResult> {
+  const qualificationResult = normaliseQualificationRoles(
+    input.qualificationRoles,
+  );
+
+  if (!qualificationResult.ok) {
+    return {
+      kind: "invalid_input",
+
+      reason: qualificationResult.reason,
+
+      ...(qualificationResult.discordRoleId
+        ? {
+            discordRoleId: qualificationResult.discordRoleId,
+          }
+        : {}),
+    };
+  }
+
+  const requestedQualificationRoles = sortQualificationRoles(
+    qualificationResult.roles,
+  );
+
+  return db.transaction(async (transaction) => {
+    /*
+     * Authoritative guild-ownership check and the shared/exclusive
+     * application-vs-mutation boundary.
+     *
+     * Inactive presets deliberately remain editable.
+     */
+    const [preset] = await transaction
+      .select({
+        id: roleRequestPresets.id,
+
+        ownerGuildId: roleRequestPresets.ownerGuildId,
+      })
+      .from(roleRequestPresets)
+      .where(
+        and(
+          eq(roleRequestPresets.id, input.presetId),
+
+          eq(roleRequestPresets.ownerGuildId, input.guildDatabaseId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    if (!preset) {
+      return {
+        kind: "preset_not_found",
+      } as const;
+    }
+
+    const [option] = await transaction
+      .select({
+        id: roleRequestPresetOptions.id,
+
+        presetId: roleRequestPresetOptions.presetId,
+
+        displayName: roleRequestPresetOptions.displayName,
+
+        requestRestriction: roleRequestPresetOptions.requestRestriction,
+
+        active: roleRequestPresetOptions.active,
+      })
+      .from(roleRequestPresetOptions)
+      .where(
+        and(
+          eq(roleRequestPresetOptions.id, input.presetOptionId),
+
+          eq(roleRequestPresetOptions.presetId, preset.id),
+        ),
+      )
+      .limit(1);
+
+    if (!option) {
+      return {
+        kind: "option_not_found",
+      } as const;
+    }
+
+    if (!isRequestRestriction(option.requestRestriction)) {
+      throw new Error(
+        `Preset role option #${option.id} has unsupported request restriction "${option.requestRestriction}".`,
+      );
+    }
+
+    /*
+     * Discord's @everyone role has the same snowflake as its guild.
+     *
+     * Resolve that identity from authoritative guild state instead of making
+     * callers reproduce the rule correctly.
+     */
+    const [guild] = await transaction
+      .select({
+        discordGuildId: discordGuilds.discordGuildId,
+      })
+      .from(discordGuilds)
+      .where(eq(discordGuilds.id, preset.ownerGuildId))
+      .limit(1);
+
+    if (!guild) {
+      throw new Error(
+        `Preset #${preset.id} references missing guild #${preset.ownerGuildId}.`,
+      );
+    }
+
+    const everyoneRole = requestedQualificationRoles.find(
+      (role) => role.discordRoleId === guild.discordGuildId,
+    );
+
+    if (everyoneRole) {
+      return {
+        kind: "invalid_input",
+
+        reason: "everyone_qualification_role",
+
+        discordRoleId: everyoneRole.discordRoleId,
+      } as const;
+    }
+
+    /*
+     * A qualified-only option may never become authoritative without at
+     * least one qualification rule.
+     *
+     * Open options may retain qualifications for later reuse, or explicitly
+     * clear the set entirely.
+     */
+    if (
+      option.requestRestriction === "qualified_only" &&
+      requestedQualificationRoles.length === 0
+    ) {
+      return {
+        kind: "invalid_input",
+
+        reason: "missing_qualification_roles",
+      } as const;
+    }
+
+    const existingRows = await transaction
+      .select({
+        discordRoleId: roleRequestPresetOptionQualificationRoles.discordRoleId,
+
+        roleNameSnapshot:
+          roleRequestPresetOptionQualificationRoles.roleNameSnapshot,
+
+        qualificationLevel:
+          roleRequestPresetOptionQualificationRoles.qualificationLevel,
+      })
+      .from(roleRequestPresetOptionQualificationRoles)
+      .where(
+        eq(roleRequestPresetOptionQualificationRoles.presetOptionId, option.id),
+      );
+
+    const existingQualificationRoles: NormalisedQualificationRole[] =
+      existingRows.map((role) => {
+        if (!isQualificationLevel(role.qualificationLevel)) {
+          throw new Error(
+            `Preset role option #${option.id} has unsupported qualification level "${role.qualificationLevel}".`,
+          );
+        }
+
+        return {
+          discordRoleId: role.discordRoleId,
+
+          roleNameSnapshot: role.roleNameSnapshot,
+
+          qualificationLevel: role.qualificationLevel,
+        };
+      });
+
+    const sortedExistingQualificationRoles = sortQualificationRoles(
+      existingQualificationRoles,
+    );
+
+    if (
+      qualificationRoleSetsEqual(
+        sortedExistingQualificationRoles,
+        requestedQualificationRoles,
+      )
+    ) {
+      return {
+        kind: "unchanged",
+
+        option: {
+          ...option,
+
+          requestRestriction: option.requestRestriction,
+        },
+
+        qualificationRoles: requestedQualificationRoles,
+      } as const;
+    }
+
+    /*
+     * Validation is complete before destructive work begins.
+     *
+     * Delete + insert remain inside this transaction, so no observer can see
+     * a partially-replaced qualification set.
+     */
+    await transaction
+      .delete(roleRequestPresetOptionQualificationRoles)
+      .where(
+        eq(roleRequestPresetOptionQualificationRoles.presetOptionId, option.id),
+      );
+
+    if (requestedQualificationRoles.length > 0) {
+      await transaction
+        .insert(roleRequestPresetOptionQualificationRoles)
+        .values(
+          requestedQualificationRoles.map((role) => ({
+            presetOptionId: option.id,
+
+            discordRoleId: role.discordRoleId,
+
+            roleNameSnapshot: role.roleNameSnapshot,
+
+            qualificationLevel: role.qualificationLevel,
+          })),
+        );
+    }
+
+    const now = new Date();
+
+    /*
+     * Qualification configuration is part of the option definition, so a
+     * real replacement advances both the option and parent preset timestamps.
+     */
+    await transaction
+      .update(roleRequestPresetOptions)
+      .set({
+        updatedAt: now,
+      })
+      .where(eq(roleRequestPresetOptions.id, option.id));
+
+    await transaction
+      .update(roleRequestPresets)
+      .set({
+        updatedAt: now,
+      })
+      .where(eq(roleRequestPresets.id, preset.id));
+
+    return {
+      kind: "updated",
+
+      option: {
+        ...option,
+
+        requestRestriction: option.requestRestriction,
+      },
+
+      qualificationRoles: requestedQualificationRoles,
     } as const;
   });
 }
@@ -2066,6 +2395,50 @@ export async function addPresetRequestGroup(
         presetOptionIds: [...input.presetOptionIds],
       },
     } as const;
+  });
+}
+
+function sortQualificationRoles(
+  roles: NormalisedQualificationRole[],
+): NormalisedQualificationRole[] {
+  return [...roles].sort((left, right) => {
+    const roleIdComparison = left.discordRoleId.localeCompare(
+      right.discordRoleId,
+    );
+
+    if (roleIdComparison !== 0) {
+      return roleIdComparison;
+    }
+
+    const levelComparison = left.qualificationLevel.localeCompare(
+      right.qualificationLevel,
+    );
+
+    if (levelComparison !== 0) {
+      return levelComparison;
+    }
+
+    return left.roleNameSnapshot.localeCompare(right.roleNameSnapshot);
+  });
+}
+
+function qualificationRoleSetsEqual(
+  left: NormalisedQualificationRole[],
+  right: NormalisedQualificationRole[],
+): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((role, index) => {
+    const other = right[index];
+
+    return (
+      other !== undefined &&
+      role.discordRoleId === other.discordRoleId &&
+      role.roleNameSnapshot === other.roleNameSnapshot &&
+      role.qualificationLevel === other.qualificationLevel
+    );
   });
 }
 

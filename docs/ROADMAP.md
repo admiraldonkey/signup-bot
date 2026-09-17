@@ -135,41 +135,9 @@ Recurrence should not be built before template-generated one-off events are reli
 
 Complete the administrator workflow for maintaining an existing reusable role-request preset without requiring it to be recreated.
 
-The current preset-management foundation, parent metadata editing, and core role-option definition editing are implemented.
+The current preset-management foundation, parent metadata editing, core role-option definition editing, and qualification-role replacement are implemented.
 
-The remaining work is qualification-role replacement, request-group editing, group-option mapping editing, and final administrator UX review.
-
----
-
-## P0.3 - Qualification-role replacement
-
-Qualification configuration should support editing after option creation.
-
-The service should be able to replace or otherwise deliberately update:
-
-```text
-qualified
-supervision_required
-```
-
-Discord role mappings.
-
-Requirements include:
-
-- reject `@everyone`
-- reject one Discord role appearing at conflicting qualification levels
-- preserve role-name snapshots
-- enforce `qualified_only` consistency
-- keep the complete mutation atomic
-- use the preset parent mutation lock
-
-If a role option is changed to:
-
-```text
-qualified_only
-```
-
-it must have at least one valid qualification role before the edit becomes authoritative.
+The remaining work is request-group editing, group-option mapping editing, and final administrator UX review.
 
 ---
 

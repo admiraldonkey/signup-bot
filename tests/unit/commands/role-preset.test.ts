@@ -20,6 +20,8 @@ const adminServiceMocks = vi.hoisted(() => ({
 
   editPresetRoleOption: vi.fn(),
 
+  replacePresetRoleOptionQualificationRoles: vi.fn(),
+
   addPresetRoleOption: vi.fn(),
 
   addPresetRequestGroup: vi.fn(),
@@ -128,6 +130,7 @@ describe("/role-preset command", () => {
       "show",
       "option-add",
       "option-edit",
+      "option-qualifications-set",
       "group-add",
       "apply",
       "set-active",
@@ -1169,6 +1172,467 @@ describe("/role-preset command", () => {
         parse: [],
       },
     });
+  });
+
+  it("replaces preset role-option qualification roles and audits the mutation", async () => {
+    // Arrange
+    adminServiceMocks.replacePresetRoleOptionQualificationRoles.mockResolvedValue(
+      {
+        kind: "updated",
+
+        option: {
+          id: 11,
+
+          presetId: 7,
+
+          displayName: "Captain",
+
+          requestRestriction: "qualified_only",
+
+          active: true,
+        },
+
+        qualificationRoles: [
+          {
+            discordRoleId: QUALIFIED_ROLE_ID,
+
+            roleNameSnapshot: "Qualified Captain",
+
+            qualificationLevel: "qualified",
+          },
+
+          {
+            discordRoleId: SUPERVISED_ROLE_ID,
+
+            roleNameSnapshot: "Captain Trainee",
+
+            qualificationLevel: "supervision_required",
+          },
+        ],
+      },
+    );
+
+    const interaction = createInteraction({
+      subcommand: "option-qualifications-set",
+
+      integers: {
+        "preset-id": 7,
+
+        "option-id": 11,
+      },
+
+      roles: {
+        "qualified-role-1": {
+          id: QUALIFIED_ROLE_ID,
+
+          name: "Qualified Captain",
+        },
+
+        "supervised-role-1": {
+          id: SUPERVISED_ROLE_ID,
+
+          name: "Captain Trainee",
+        },
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(
+      adminServiceMocks.replacePresetRoleOptionQualificationRoles,
+    ).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      presetId: 7,
+
+      presetOptionId: 11,
+
+      qualificationRoles: [
+        {
+          discordRoleId: QUALIFIED_ROLE_ID,
+
+          roleNameSnapshot: "Qualified Captain",
+
+          qualificationLevel: "qualified",
+        },
+
+        {
+          discordRoleId: SUPERVISED_ROLE_ID,
+
+          roleNameSnapshot: "Captain Trainee",
+
+          qualificationLevel: "supervision_required",
+        },
+      ],
+    });
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: [
+        "✅ Replaced qualification roles for **Captain** (#11) in preset #7.",
+        "**Restriction:** Qualified only",
+        `**Fully qualified roles:** <@&${QUALIFIED_ROLE_ID}>`,
+        `**Supervision-required roles:** <@&${SUPERVISED_ROLE_ID}>`,
+      ].join("\n"),
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        guildId: 42,
+
+        actorUserId: ADMIN_USER_ID,
+
+        action: "role_preset.option.qualifications.set",
+
+        outcome: "success",
+
+        targetType: "role_request_preset_option",
+
+        targetId: "11",
+
+        details: {
+          presetId: 7,
+
+          requestRestriction: "qualified_only",
+
+          qualifiedRoleIds: [QUALIFIED_ROLE_ID],
+
+          supervisedRoleIds: [SUPERVISED_ROLE_ID],
+
+          active: true,
+        },
+      }),
+    );
+  });
+
+  it("explicitly clears qualification roles from an open preset option", async () => {
+    // Arrange
+    adminServiceMocks.replacePresetRoleOptionQualificationRoles.mockResolvedValue(
+      {
+        kind: "updated",
+
+        option: {
+          id: 11,
+
+          presetId: 7,
+
+          displayName: "Captain",
+
+          requestRestriction: "open",
+
+          active: true,
+        },
+
+        qualificationRoles: [],
+      },
+    );
+
+    const interaction = createInteraction({
+      subcommand: "option-qualifications-set",
+
+      integers: {
+        "preset-id": 7,
+
+        "option-id": 11,
+      },
+
+      booleans: {
+        "clear-all": true,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(
+      adminServiceMocks.replacePresetRoleOptionQualificationRoles,
+    ).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      presetId: 7,
+
+      presetOptionId: 11,
+
+      qualificationRoles: [],
+    });
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: [
+        "✅ Replaced qualification roles for **Captain** (#11) in preset #7.",
+        "**Restriction:** Open",
+        "**Fully qualified roles:** None configured",
+        "**Supervision-required roles:** None configured",
+      ].join("\n"),
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  });
+
+  it("requires an explicit clear when no qualification roles are supplied", async () => {
+    // Arrange
+    const interaction = createInteraction({
+      subcommand: "option-qualifications-set",
+
+      integers: {
+        "preset-id": 7,
+
+        "option-id": 11,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(
+      adminServiceMocks.replacePresetRoleOptionQualificationRoles,
+    ).not.toHaveBeenCalled();
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "Select at least one qualification role, or use `clear-all:true` to explicitly remove the complete qualification-role set.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("rejects clear-all together with replacement qualification roles", async () => {
+    // Arrange
+    const interaction = createInteraction({
+      subcommand: "option-qualifications-set",
+
+      integers: {
+        "preset-id": 7,
+
+        "option-id": 11,
+      },
+
+      booleans: {
+        "clear-all": true,
+      },
+
+      roles: {
+        "qualified-role-1": {
+          id: QUALIFIED_ROLE_ID,
+
+          name: "Qualified Captain",
+        },
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(
+      adminServiceMocks.replacePresetRoleOptionQualificationRoles,
+    ).not.toHaveBeenCalled();
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "Choose either replacement qualification roles or `clear-all:true`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  });
+
+  it("rejects one Discord role at both qualification levels before replacement", async () => {
+    // Arrange
+    const interaction = createInteraction({
+      subcommand: "option-qualifications-set",
+
+      integers: {
+        "preset-id": 7,
+
+        "option-id": 11,
+      },
+
+      roles: {
+        "qualified-role-1": {
+          id: QUALIFIED_ROLE_ID,
+
+          name: "Qualified Captain",
+        },
+
+        "supervised-role-1": {
+          id: QUALIFIED_ROLE_ID,
+
+          name: "Qualified Captain",
+        },
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(
+      adminServiceMocks.replacePresetRoleOptionQualificationRoles,
+    ).not.toHaveBeenCalled();
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "**Qualified Captain** cannot be both fully qualified and supervision-required for the same preset role option.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  });
+
+  it("rejects @everyone before replacing preset qualification roles", async () => {
+    // Arrange
+    const interaction = createInteraction({
+      subcommand: "option-qualifications-set",
+
+      integers: {
+        "preset-id": 7,
+
+        "option-id": 11,
+      },
+
+      roles: {
+        "qualified-role-1": {
+          id: DISCORD_GUILD_ID,
+
+          name: "@everyone",
+        },
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(
+      adminServiceMocks.replacePresetRoleOptionQualificationRoles,
+    ).not.toHaveBeenCalled();
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: "`@everyone` cannot be used as a preset qualification role.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  });
+
+  it("reports an unchanged qualification-role replacement without auditing", async () => {
+    // Arrange
+    adminServiceMocks.replacePresetRoleOptionQualificationRoles.mockResolvedValue(
+      {
+        kind: "unchanged",
+
+        option: {
+          id: 11,
+
+          presetId: 7,
+
+          displayName: "Captain",
+
+          requestRestriction: "qualified_only",
+
+          active: true,
+        },
+
+        qualificationRoles: [
+          {
+            discordRoleId: QUALIFIED_ROLE_ID,
+
+            roleNameSnapshot: "Qualified Captain",
+
+            qualificationLevel: "qualified",
+          },
+        ],
+      },
+    );
+
+    const interaction = createInteraction({
+      subcommand: "option-qualifications-set",
+
+      integers: {
+        "preset-id": 7,
+
+        "option-id": 11,
+      },
+
+      roles: {
+        "qualified-role-1": {
+          id: QUALIFIED_ROLE_ID,
+
+          name: "Qualified Captain",
+        },
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "Preset role option **Captain** (#11) already has the requested qualification-role set. No changes were made.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("reports when clearing qualifications would invalidate a qualified-only option", async () => {
+    // Arrange
+    adminServiceMocks.replacePresetRoleOptionQualificationRoles.mockResolvedValue(
+      {
+        kind: "invalid_input",
+
+        reason: "missing_qualification_roles",
+      },
+    );
+
+    const interaction = createInteraction({
+      subcommand: "option-qualifications-set",
+
+      integers: {
+        "preset-id": 7,
+
+        "option-id": 11,
+      },
+
+      booleans: {
+        "clear-all": true,
+      },
+    });
+
+    // Act
+    await handleRolePresetCommand(interaction.interaction);
+
+    // Assert
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content:
+        "A `Qualified only` preset role option must have at least one configured qualification role.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
   });
 
   it("adds a preset request group with ordered options, an explicit channel and a notification role", async () => {

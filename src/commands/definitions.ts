@@ -1439,6 +1439,79 @@ export const commandDefinitions = [
 
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("option-qualifications-set")
+        .setDescription(
+          "Replaces all qualification roles for a reusable preset role option.",
+        )
+        /*
+         * Required options must precede optional options in Discord command
+         * definitions.
+         */
+        .addIntegerOption((option) =>
+          option
+            .setName("preset-id")
+            .setDescription("Preset ID shown by /role-preset list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("option-id")
+            .setDescription("Role-option ID shown by /role-preset show.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("qualified-role-1")
+            .setDescription("Discord role indicating full qualification."),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("qualified-role-2")
+            .setDescription("Additional fully-qualified Discord role."),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("qualified-role-3")
+            .setDescription("Additional fully-qualified Discord role."),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("qualified-role-4")
+            .setDescription("Additional fully-qualified Discord role."),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("supervised-role-1")
+            .setDescription("Qualification requiring supervision."),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("supervised-role-2")
+            .setDescription("Additional supervision-required Discord role."),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("supervised-role-3")
+            .setDescription("Additional supervision-required Discord role."),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("supervised-role-4")
+            .setDescription("Additional supervision-required Discord role."),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("clear-all")
+            .setDescription(
+              "Explicitly remove all configured qualification roles.",
+            ),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("group-add")
         .setDescription("Adds a reusable role-request group to a preset.")
 

@@ -9,6 +9,7 @@ import { applyRoleRequestPresetToEvent } from "../../../src/role-requests/role-r
 import {
   editRoleRequestPreset,
   editPresetRoleOption,
+  replacePresetRoleOptionQualificationRoles,
 } from "../../../src/role-requests/role-request-preset-admin-service.js";
 
 import {
@@ -945,6 +946,159 @@ describe("role-request preset application service", () => {
     }
   });
 
+  it("serialises qualification replacement behind an in-flight preset application", async () => {
+    // Arrange
+    const fixture = await createFixture(pool);
+
+    const blockerClient = await pool.connect();
+
+    let blockerReleased = false;
+
+    let applicationPromise: ReturnType<
+      typeof applyRoleRequestPresetToEvent
+    > | null = null;
+
+    let editPromise: ReturnType<
+      typeof replacePresetRoleOptionQualificationRoles
+    > | null = null;
+
+    try {
+      await blockerClient.query("BEGIN");
+
+      await blockerClient.query(`
+        LOCK TABLE "event_role_request_preset_applications"
+        IN ACCESS EXCLUSIVE MODE
+      `);
+
+      applicationPromise = applyRoleRequestPresetToEvent({
+        guildDatabaseId: fixture.guildId,
+
+        eventId: fixture.eventId,
+
+        presetId: fixture.presetId,
+
+        appliedByUserId: ADMIN_USER_ID,
+      });
+
+      await waitForBlockedDatabaseQuery(
+        pool,
+        '%from "event_role_request_preset_applications"%',
+      );
+
+      let editResolved = false;
+
+      editPromise = replacePresetRoleOptionQualificationRoles({
+        guildDatabaseId: fixture.guildId,
+
+        presetId: fixture.presetId,
+
+        presetOptionId: fixture.captainPresetOptionId,
+
+        qualificationRoles: [
+          {
+            discordRoleId: CAPTAIN_QUALIFIED_ROLE_ID,
+
+            roleNameSnapshot: "Senior Captain",
+
+            qualificationLevel: "qualified",
+          },
+        ],
+      }).then((result) => {
+        editResolved = true;
+
+        return result;
+      });
+
+      await waitForBlockedDatabaseQuery(
+        pool,
+        '%from "role_request_presets"%for update%',
+      );
+
+      expect(editResolved).toBe(false);
+
+      await blockerClient.query("COMMIT");
+
+      blockerReleased = true;
+
+      const applicationResult = await applicationPromise;
+
+      const editResult = await editPromise;
+
+      // Assert
+      expect(applicationResult.kind).toBe("applied");
+
+      expect(editResult.kind).toBe("updated");
+
+      /*
+       * Application acquired FOR SHARE first, so its event snapshot must
+       * contain the complete pre-replacement qualification set.
+       */
+      const eventQualifications = await pool.query<{
+        discord_role_id: string;
+
+        role_name_snapshot: string;
+
+        qualification_level: string;
+      }>(
+        `
+          SELECT
+            "qualification"."discord_role_id",
+            "qualification"."role_name_snapshot",
+            "qualification"."qualification_level"
+          FROM
+            "event_role_option_qualification_roles" AS "qualification"
+          INNER JOIN
+            "event_role_options" AS "option"
+          ON
+            "option"."id" = "qualification"."event_role_option_id"
+          WHERE
+            "option"."event_id" = $1
+            AND
+            "option"."source_role_request_preset_option_id" = $2
+          ORDER BY
+            "qualification"."discord_role_id"
+        `,
+        [fixture.eventId, fixture.captainPresetOptionId],
+      );
+
+      expect(eventQualifications.rows).toEqual([
+        {
+          discord_role_id: CAPTAIN_QUALIFIED_ROLE_ID,
+
+          role_name_snapshot: "Qualified Captain",
+
+          qualification_level: "qualified",
+        },
+
+        {
+          discord_role_id: MIDSHIPMAN_ROLE_ID,
+
+          role_name_snapshot: "Midshipman",
+
+          qualification_level: "supervision_required",
+        },
+      ]);
+    } finally {
+      if (!blockerReleased) {
+        await blockerClient.query("ROLLBACK").catch(() => undefined);
+      }
+
+      blockerClient.release();
+
+      const pendingOperations: Promise<unknown>[] = [];
+
+      if (applicationPromise) {
+        pendingOperations.push(applicationPromise);
+      }
+
+      if (editPromise) {
+        pendingOperations.push(editPromise);
+      }
+
+      await Promise.allSettled(pendingOperations);
+    }
+  });
+
   it("keeps applied event state independent from later preset edits", async () => {
     // Arrange
     const fixture = await createFixture(pool);
@@ -984,17 +1138,26 @@ describe("role-request preset application service", () => {
 
     expect(optionEditResult.kind).toBe("updated");
 
-    await pool.query(
-      `
-        UPDATE
-          "role_request_preset_option_qualification_roles"
-        SET
-          "role_name_snapshot" = 'Changed Qualification'
-        WHERE
-          "preset_option_id" = $1
-      `,
-      [fixture.captainPresetOptionId],
-    );
+    const qualificationEditResult =
+      await replacePresetRoleOptionQualificationRoles({
+        guildDatabaseId: fixture.guildId,
+
+        presetId: fixture.presetId,
+
+        presetOptionId: fixture.captainPresetOptionId,
+
+        qualificationRoles: [
+          {
+            discordRoleId: CAPTAIN_QUALIFIED_ROLE_ID,
+
+            roleNameSnapshot: "Senior Captain",
+
+            qualificationLevel: "qualified",
+          },
+        ],
+      });
+
+    expect(qualificationEditResult.kind).toBe("updated");
 
     await pool.query(
       `

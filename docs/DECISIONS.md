@@ -2112,8 +2112,9 @@ This invariant is currently implemented for:
 
 - preset metadata editing
 - preset role-option definition editing
+- preset qualification-role replacement
 
-Future qualification, request-group, and mapping edits must preserve the same behaviour.
+Future request-group and mapping edits must preserve the same behaviour.
 
 ### Reason
 
@@ -3022,6 +3023,51 @@ It should not turn an existing reusable role into a different logical role.
 
 ---
 
+## D128 - Preset qualification editing replaces the complete role set atomically
+
+**Status: Current**
+
+Editing qualification roles for an existing preset option uses complete replacement semantics.
+
+The requested qualification configuration is validated as a complete final set before existing rows are removed.
+
+The replacement then occurs inside one PostgreSQL transaction.
+
+Conceptually:
+
+```text
+validate complete requested set
+        |
+        v
+delete existing qualification rows
+        |
+        v
+insert replacement rows
+        |
+        v
+commit
+```
+
+An empty replacement is valid for an `open` option.
+
+An empty replacement is rejected for a `qualified_only` option.
+
+The Discord command requires an explicit clear operation rather than interpreting omitted optional role arguments as destructive intent.
+
+Qualification-role ordering is not meaningful.
+
+Equivalent sets supplied in a different order are treated as an idempotent no-op.
+
+### Reason
+
+Qualification configuration is a small dependent set whose correctness is defined by its complete final state.
+
+A single replacement operation provides simpler validation and stronger atomicity than exposing a sequence of independent add/remove mutations.
+
+Explicit clearing also reduces the risk that omitted Discord options accidentally destroy existing reusable configuration.
+
+---
+
 # Summary of Highest-Risk Invariants
 
 The following decisions are especially easy to break during an otherwise well-intentioned refactor.
@@ -3115,6 +3161,9 @@ inactive child
 
 option deactivation
     -> no hidden cascading group mutation
+
+qualification replacement
+    -> complete set validated and replaced atomically
 ```
 
 ## Message recovery
