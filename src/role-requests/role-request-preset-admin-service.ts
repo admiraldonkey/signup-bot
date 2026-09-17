@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 
@@ -564,6 +564,101 @@ export type AddPresetRequestGroupResult =
         | "invalid_group_window";
 
       presetOptionId?: number;
+
+      discordRoleId?: string;
+    };
+
+export type EditPresetRequestGroupInput = {
+  guildDatabaseId: number;
+
+  presetId: number;
+
+  presetGroupId: number;
+
+  /*
+   * undefined means "leave unchanged".
+   *
+   * Nullable scalar fields use null as an explicit clear:
+   *
+   * description -> no description
+   * channelId   -> resolve the guild default when applied
+   *
+   * Notification roles use complete replacement semantics:
+   *
+   * undefined -> leave the existing collection unchanged
+   * []        -> explicitly clear the complete collection
+   * [...roles] -> replace the complete ordered collection
+   */
+  name?: string;
+
+  description?: string | null;
+
+  channelId?: string | null;
+
+  notificationRoles?: RoleRequestGroupNotificationRoleInput[];
+
+  requiresPositiveSignup?: boolean;
+
+  openMinutesBeforeStart?: number;
+
+  closeMinutesBeforeStart?: number;
+};
+
+export type EditPresetRequestGroupResult =
+  | {
+      kind: "updated" | "unchanged";
+
+      group: {
+        id: number;
+
+        presetId: number;
+
+        name: string;
+
+        description: string | null;
+
+        channelId: string | null;
+
+        notificationRoles: {
+          discordRoleId: string;
+
+          roleNameSnapshot: string | null;
+
+          sortOrder: number;
+        }[];
+
+        requiresPositiveSignup: boolean;
+
+        openMinutesBeforeStart: number;
+
+        closeMinutesBeforeStart: number;
+
+        sortOrder: number;
+
+        active: boolean;
+      };
+    }
+  | {
+      kind: "preset_not_found";
+    }
+  | {
+      kind: "group_not_found";
+    }
+  | {
+      kind: "invalid_input";
+
+      reason:
+        | "no_changes_requested"
+        | "invalid_name"
+        | "invalid_channel_id"
+        | "too_many_notification_roles"
+        | "invalid_notify_role_id"
+        | "invalid_notify_role_name"
+        | "duplicate_notification_role"
+        | "everyone_notify_role"
+        | "invalid_open_offset"
+        | "invalid_close_offset"
+        | "invalid_group_window";
 
       discordRoleId?: string;
     };
@@ -2418,6 +2513,541 @@ export async function addPresetRequestGroup(
         presetOptionIds: [...input.presetOptionIds],
       },
     } as const;
+  });
+}
+
+/**
+ * Edits one reusable preset request-group definition.
+ *
+ * Group-option mappings are deliberately outside this mutation. They remain
+ * separate authoritative child state and will be edited through their own
+ * complete ordered replacement operation.
+ *
+ * Notification-role editing uses complete ordered replacement semantics.
+ *
+ * Preset application takes FOR SHARE on the parent preset row. Group editing
+ * therefore takes FOR UPDATE on that row so application observes either the
+ * complete definition before this mutation or the complete definition after
+ * it.
+ *
+ * Existing event-level snapshots remain independent.
+ */
+export async function editPresetRequestGroup(
+  input: EditPresetRequestGroupInput,
+): Promise<EditPresetRequestGroupResult> {
+  if (
+    input.name === undefined &&
+    input.description === undefined &&
+    input.channelId === undefined &&
+    input.notificationRoles === undefined &&
+    input.requiresPositiveSignup === undefined &&
+    input.openMinutesBeforeStart === undefined &&
+    input.closeMinutesBeforeStart === undefined
+  ) {
+    return {
+      kind: "invalid_input",
+
+      reason: "no_changes_requested",
+    };
+  }
+
+  const requestedName =
+    input.name === undefined ? undefined : input.name.trim();
+
+  if (
+    requestedName !== undefined &&
+    (requestedName.length === 0 || requestedName.length > 100)
+  ) {
+    return {
+      kind: "invalid_input",
+
+      reason: "invalid_name",
+    };
+  }
+
+  const requestedDescription =
+    input.description === undefined
+      ? undefined
+      : normaliseOptionalText(input.description);
+
+  let requestedChannelId: string | null | undefined;
+
+  if (input.channelId === undefined) {
+    requestedChannelId = undefined;
+  } else if (input.channelId === null) {
+    requestedChannelId = null;
+  } else {
+    const channelId = input.channelId.trim();
+
+    if (channelId.length === 0) {
+      return {
+        kind: "invalid_input",
+
+        reason: "invalid_channel_id",
+      };
+    }
+
+    requestedChannelId = channelId;
+  }
+
+  let requestedNotificationRoles:
+    | {
+        discordRoleId: string;
+
+        roleNameSnapshot: string;
+
+        sortOrder: number;
+      }[]
+    | undefined;
+
+  if (input.notificationRoles !== undefined) {
+    const notificationResult = normaliseRoleRequestGroupNotificationRoles(
+      input.notificationRoles,
+    );
+
+    if (!notificationResult.ok) {
+      return {
+        kind: "invalid_input",
+
+        reason: notificationResult.reason,
+
+        ...(notificationResult.discordRoleId
+          ? {
+              discordRoleId: notificationResult.discordRoleId,
+            }
+          : {}),
+      };
+    }
+
+    requestedNotificationRoles = notificationResult.roles;
+  }
+
+  if (
+    input.openMinutesBeforeStart !== undefined &&
+    !isPostgresInteger(input.openMinutesBeforeStart)
+  ) {
+    return {
+      kind: "invalid_input",
+
+      reason: "invalid_open_offset",
+    };
+  }
+
+  if (
+    input.closeMinutesBeforeStart !== undefined &&
+    !isPostgresInteger(input.closeMinutesBeforeStart)
+  ) {
+    return {
+      kind: "invalid_input",
+
+      reason: "invalid_close_offset",
+    };
+  }
+
+  return db.transaction(async (transaction) => {
+    /*
+     * This is both the authoritative guild-ownership check and the
+     * mutation/application concurrency boundary.
+     *
+     * Inactive presets deliberately remain editable.
+     */
+    const [preset] = await transaction
+      .select({
+        id: roleRequestPresets.id,
+
+        ownerGuildId: roleRequestPresets.ownerGuildId,
+      })
+      .from(roleRequestPresets)
+      .where(
+        and(
+          eq(roleRequestPresets.id, input.presetId),
+
+          eq(roleRequestPresets.ownerGuildId, input.guildDatabaseId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    if (!preset) {
+      return {
+        kind: "preset_not_found",
+      } as const;
+    }
+
+    const [group] = await transaction
+      .select({
+        id: roleRequestPresetGroups.id,
+
+        presetId: roleRequestPresetGroups.presetId,
+
+        name: roleRequestPresetGroups.name,
+
+        description: roleRequestPresetGroups.description,
+
+        channelId: roleRequestPresetGroups.channelId,
+
+        /*
+         * Temporary expand-and-contract compatibility shadows.
+         */
+        notifyRoleId: roleRequestPresetGroups.notifyRoleId,
+
+        notifyRoleNameSnapshot: roleRequestPresetGroups.notifyRoleNameSnapshot,
+
+        requiresPositiveSignup: roleRequestPresetGroups.requiresPositiveSignup,
+
+        openMinutesBeforeStart: roleRequestPresetGroups.openMinutesBeforeStart,
+
+        closeMinutesBeforeStart:
+          roleRequestPresetGroups.closeMinutesBeforeStart,
+
+        sortOrder: roleRequestPresetGroups.sortOrder,
+
+        active: roleRequestPresetGroups.active,
+      })
+      .from(roleRequestPresetGroups)
+      .where(
+        and(
+          eq(roleRequestPresetGroups.id, input.presetGroupId),
+
+          eq(roleRequestPresetGroups.presetId, preset.id),
+        ),
+      )
+      .limit(1);
+
+    if (!group) {
+      return {
+        kind: "group_not_found",
+      } as const;
+    }
+
+    const storedNotificationRoles = await transaction
+      .select({
+        discordRoleId: roleRequestPresetGroupNotificationRoles.discordRoleId,
+
+        roleNameSnapshot:
+          roleRequestPresetGroupNotificationRoles.roleNameSnapshot,
+
+        sortOrder: roleRequestPresetGroupNotificationRoles.sortOrder,
+      })
+      .from(roleRequestPresetGroupNotificationRoles)
+      .where(
+        eq(roleRequestPresetGroupNotificationRoles.presetGroupId, group.id),
+      )
+      .orderBy(
+        asc(roleRequestPresetGroupNotificationRoles.sortOrder),
+
+        asc(roleRequestPresetGroupNotificationRoles.discordRoleId),
+      );
+
+    /*
+     * Prefer the authoritative collection.
+     *
+     * The singular fallback exists only for a group which may have been
+     * created by an older application revision during the mixed-version
+     * deployment window.
+     */
+    const currentNotificationRoles =
+      storedNotificationRoles.length > 0
+        ? storedNotificationRoles
+        : group.notifyRoleId
+          ? [
+              {
+                discordRoleId: group.notifyRoleId,
+
+                roleNameSnapshot: group.notifyRoleNameSnapshot,
+
+                sortOrder: 0,
+              },
+            ]
+          : [];
+
+    if (
+      requestedNotificationRoles !== undefined &&
+      requestedNotificationRoles.length > 0
+    ) {
+      const [guild] = await transaction
+        .select({
+          discordGuildId: discordGuilds.discordGuildId,
+        })
+        .from(discordGuilds)
+        .where(eq(discordGuilds.id, preset.ownerGuildId))
+        .limit(1);
+
+      if (!guild) {
+        throw new Error(
+          `Preset #${preset.id} references missing guild #${preset.ownerGuildId}.`,
+        );
+      }
+
+      const everyoneRole = requestedNotificationRoles.find(
+        (role) => role.discordRoleId === guild.discordGuildId,
+      );
+
+      if (everyoneRole) {
+        return {
+          kind: "invalid_input",
+
+          reason: "everyone_notify_role",
+
+          discordRoleId: everyoneRole.discordRoleId,
+        } as const;
+      }
+    }
+
+    const name = requestedName ?? group.name;
+
+    const description =
+      requestedDescription === undefined
+        ? group.description
+        : requestedDescription;
+
+    const channelId =
+      requestedChannelId === undefined ? group.channelId : requestedChannelId;
+
+    const notificationRoles =
+      requestedNotificationRoles ?? currentNotificationRoles;
+
+    const requiresPositiveSignup =
+      input.requiresPositiveSignup === undefined
+        ? group.requiresPositiveSignup
+        : input.requiresPositiveSignup;
+
+    const openMinutesBeforeStart =
+      input.openMinutesBeforeStart === undefined
+        ? group.openMinutesBeforeStart
+        : input.openMinutesBeforeStart;
+
+    const closeMinutesBeforeStart =
+      input.closeMinutesBeforeStart === undefined
+        ? group.closeMinutesBeforeStart
+        : input.closeMinutesBeforeStart;
+
+    /*
+     * Positive offsets are before event start and negative offsets are after.
+     *
+     * Opening therefore has to use the numerically larger signed offset.
+     */
+    if (openMinutesBeforeStart <= closeMinutesBeforeStart) {
+      return {
+        kind: "invalid_input",
+
+        reason: "invalid_group_window",
+      } as const;
+    }
+
+    /*
+     * An explicit non-empty notification replacement should materialise the
+     * authoritative child collection even if it happens to match a temporary
+     * legacy-only fallback row.
+     *
+     * An explicit empty replacement against an already-empty group remains a
+     * genuine no-op.
+     */
+    const notificationRolesUnchanged =
+      requestedNotificationRoles === undefined ||
+      (notificationRoleCollectionsEqual(
+        currentNotificationRoles,
+        requestedNotificationRoles,
+      ) &&
+        (requestedNotificationRoles.length === 0 ||
+          storedNotificationRoles.length > 0));
+
+    if (
+      name === group.name &&
+      description === group.description &&
+      channelId === group.channelId &&
+      notificationRolesUnchanged &&
+      requiresPositiveSignup === group.requiresPositiveSignup &&
+      openMinutesBeforeStart === group.openMinutesBeforeStart &&
+      closeMinutesBeforeStart === group.closeMinutesBeforeStart
+    ) {
+      return {
+        kind: "unchanged",
+
+        group: {
+          id: group.id,
+
+          presetId: group.presetId,
+
+          name: group.name,
+
+          description: group.description,
+
+          channelId: group.channelId,
+
+          notificationRoles: currentNotificationRoles,
+
+          requiresPositiveSignup: group.requiresPositiveSignup,
+
+          openMinutesBeforeStart: group.openMinutesBeforeStart,
+
+          closeMinutesBeforeStart: group.closeMinutesBeforeStart,
+
+          sortOrder: group.sortOrder,
+
+          active: group.active,
+        },
+      } as const;
+    }
+
+    /*
+     * Only an explicit notification collection request mutates child rows or
+     * compatibility shadows.
+     *
+     * An unrelated metadata/timing edit leaves notification state untouched.
+     */
+    const notificationReplacementRequested =
+      requestedNotificationRoles !== undefined;
+
+    const primaryNotificationRole = notificationReplacementRequested
+      ? (notificationRoles[0] ?? null)
+      : null;
+
+    const notifyRoleId = notificationReplacementRequested
+      ? (primaryNotificationRole?.discordRoleId ?? null)
+      : group.notifyRoleId;
+
+    const notifyRoleNameSnapshot = notificationReplacementRequested
+      ? (primaryNotificationRole?.roleNameSnapshot ?? null)
+      : group.notifyRoleNameSnapshot;
+
+    const now = new Date();
+
+    const [updatedGroup] = await transaction
+      .update(roleRequestPresetGroups)
+      .set({
+        name,
+
+        description,
+
+        channelId,
+
+        notifyRoleId,
+
+        notifyRoleNameSnapshot,
+
+        requiresPositiveSignup,
+
+        openMinutesBeforeStart,
+
+        closeMinutesBeforeStart,
+
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(roleRequestPresetGroups.id, group.id),
+
+          eq(roleRequestPresetGroups.presetId, preset.id),
+        ),
+      )
+      .returning({
+        id: roleRequestPresetGroups.id,
+
+        presetId: roleRequestPresetGroups.presetId,
+
+        name: roleRequestPresetGroups.name,
+
+        description: roleRequestPresetGroups.description,
+
+        channelId: roleRequestPresetGroups.channelId,
+
+        requiresPositiveSignup: roleRequestPresetGroups.requiresPositiveSignup,
+
+        openMinutesBeforeStart: roleRequestPresetGroups.openMinutesBeforeStart,
+
+        closeMinutesBeforeStart:
+          roleRequestPresetGroups.closeMinutesBeforeStart,
+
+        sortOrder: roleRequestPresetGroups.sortOrder,
+
+        active: roleRequestPresetGroups.active,
+      });
+
+    if (!updatedGroup) {
+      throw new Error(
+        `Preset request group #${group.id} disappeared while its definition was being edited.`,
+      );
+    }
+
+    if (notificationReplacementRequested) {
+      /*
+       * Validation is complete before destructive work starts.
+       *
+       * Delete + insert stay inside this transaction, so application cannot
+       * observe a partial replacement.
+       */
+      await transaction
+        .delete(roleRequestPresetGroupNotificationRoles)
+        .where(
+          eq(roleRequestPresetGroupNotificationRoles.presetGroupId, group.id),
+        );
+
+      if (notificationRoles.length > 0) {
+        await transaction
+          .insert(roleRequestPresetGroupNotificationRoles)
+          .values(
+            notificationRoles.map((role) => ({
+              presetGroupId: group.id,
+
+              discordRoleId: role.discordRoleId,
+
+              roleNameSnapshot: role.roleNameSnapshot,
+
+              sortOrder: role.sortOrder,
+            })),
+          );
+      }
+    }
+
+    await transaction
+      .update(roleRequestPresets)
+      .set({
+        updatedAt: now,
+      })
+      .where(eq(roleRequestPresets.id, preset.id));
+
+    return {
+      kind: "updated",
+
+      group: {
+        ...updatedGroup,
+
+        notificationRoles,
+      },
+    } as const;
+  });
+}
+
+function notificationRoleCollectionsEqual(
+  left: {
+    discordRoleId: string;
+
+    roleNameSnapshot: string | null;
+
+    sortOrder: number;
+  }[],
+  right: {
+    discordRoleId: string;
+
+    roleNameSnapshot: string | null;
+
+    sortOrder: number;
+  }[],
+): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((role, index) => {
+    const other = right[index];
+
+    return (
+      other !== undefined &&
+      role.discordRoleId === other.discordRoleId &&
+      role.roleNameSnapshot === other.roleNameSnapshot &&
+      role.sortOrder === other.sortOrder
+    );
   });
 }
 
