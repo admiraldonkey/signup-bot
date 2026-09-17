@@ -19,6 +19,7 @@ import {
   createRoleRequestPreset,
   editPresetRoleOption,
   editRoleRequestPreset,
+  replacePresetRoleOptionQualificationRoles,
   setRoleRequestPresetActive,
   setRoleRequestPresetGroupActive,
   setRoleRequestPresetOptionActive,
@@ -92,6 +93,11 @@ export async function handleRolePresetCommand(
 
     case "option-edit":
       await editPresetOption(interaction, configuration.guildId);
+
+      return;
+
+    case "option-qualifications-set":
+      await setPresetOptionQualifications(interaction, configuration.guildId);
 
       return;
 
@@ -889,6 +895,243 @@ async function editPresetOption(
 
       return;
     }
+  }
+}
+
+async function setPresetOptionQualifications(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const presetId = interaction.options.getInteger("preset-id", true);
+
+  const presetOptionId = interaction.options.getInteger("option-id", true);
+
+  const qualifiedRoles = getSelectedRoles(interaction, [
+    "qualified-role-1",
+    "qualified-role-2",
+    "qualified-role-3",
+    "qualified-role-4",
+  ]);
+
+  const supervisedRoles = getSelectedRoles(interaction, [
+    "supervised-role-1",
+    "supervised-role-2",
+    "supervised-role-3",
+    "supervised-role-4",
+  ]);
+
+  const clearAll = interaction.options.getBoolean("clear-all") ?? false;
+
+  const allQualificationRoles = [...qualifiedRoles, ...supervisedRoles];
+
+  /*
+   * Clearing is deliberately explicit.
+   *
+   * Omitting all optional roles is not enough to destroy existing
+   * qualification configuration accidentally.
+   */
+  if (clearAll && allQualificationRoles.length > 0) {
+    await interaction.editReply({
+      content:
+        "Choose either replacement qualification roles or `clear-all:true`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  if (!clearAll && allQualificationRoles.length === 0) {
+    await interaction.editReply({
+      content:
+        "Select at least one qualification role, or use `clear-all:true` to explicitly remove the complete qualification-role set.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const overlappingRole = qualifiedRoles.find((qualified) =>
+    supervisedRoles.some((supervised) => supervised.id === qualified.id),
+  );
+
+  if (overlappingRole) {
+    await interaction.editReply({
+      content: `**${overlappingRole.name}** cannot be both fully qualified and supervision-required for the same preset role option.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  if (allQualificationRoles.some((role) => role.id === interaction.guild.id)) {
+    await interaction.editReply({
+      content: "`@everyone` cannot be used as a preset qualification role.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const result = await replacePresetRoleOptionQualificationRoles({
+    guildDatabaseId,
+
+    presetId,
+
+    presetOptionId,
+
+    qualificationRoles: clearAll
+      ? []
+      : [
+          ...qualifiedRoles.map((role) => ({
+            discordRoleId: role.id,
+
+            roleNameSnapshot: role.name,
+
+            qualificationLevel: "qualified",
+          })),
+
+          ...supervisedRoles.map((role) => ({
+            discordRoleId: role.id,
+
+            roleNameSnapshot: role.name,
+
+            qualificationLevel: "supervision_required",
+          })),
+        ],
+  });
+
+  switch (result.kind) {
+    case "updated": {
+      const storedQualifiedRoles = result.qualificationRoles.filter(
+        (role) => role.qualificationLevel === "qualified",
+      );
+
+      const storedSupervisedRoles = result.qualificationRoles.filter(
+        (role) => role.qualificationLevel === "supervision_required",
+      );
+
+      await interaction.editReply({
+        content: [
+          `✅ Replaced qualification roles for **${result.option.displayName}** (#${result.option.id}) in preset #${result.option.presetId}.`,
+          `**Restriction:** ${formatRequestRestriction(
+            result.option.requestRestriction,
+          )}`,
+          `**Fully qualified roles:** ${
+            storedQualifiedRoles.length > 0
+              ? storedQualifiedRoles
+                  .map((role) => `<@&${role.discordRoleId}>`)
+                  .join(", ")
+              : "None configured"
+          }`,
+          `**Supervision-required roles:** ${
+            storedSupervisedRoles.length > 0
+              ? storedSupervisedRoles
+                  .map((role) => `<@&${role.discordRoleId}>`)
+                  .join(", ")
+              : "None configured"
+          }`,
+        ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: guildDatabaseId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "role_preset.option.qualifications.set",
+
+        outcome: "success",
+
+        summary: `Replaced qualification roles for preset role option "${result.option.displayName}" (#${result.option.id}) in preset #${result.option.presetId}.`,
+
+        targetType: "role_request_preset_option",
+
+        targetId: String(result.option.id),
+
+        details: {
+          presetId: result.option.presetId,
+
+          requestRestriction: result.option.requestRestriction,
+
+          qualifiedRoleIds: storedQualifiedRoles.map(
+            (role) => role.discordRoleId,
+          ),
+
+          supervisedRoleIds: storedSupervisedRoles.map(
+            (role) => role.discordRoleId,
+          ),
+
+          active: result.option.active,
+        },
+      });
+
+      return;
+    }
+
+    case "unchanged":
+      await interaction.editReply({
+        content: `Preset role option **${result.option.displayName}** (#${result.option.id}) already has the requested qualification-role set. No changes were made.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "preset_not_found":
+      await interaction.editReply({
+        content: `Role-request preset #${presetId} was not found in this server.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "option_not_found":
+      await interaction.editReply({
+        content: `Role option #${presetOptionId} was not found in role-request preset #${presetId}.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "invalid_input":
+      await interaction.editReply({
+        content: formatPresetOptionValidationError(
+          result.reason,
+          result.discordRoleId,
+        ),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
   }
 }
 
