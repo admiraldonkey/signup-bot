@@ -27,6 +27,12 @@ const ROLE_REQUEST_CHANNEL_ID = "984000000000000002";
 
 const NOTIFY_ROLE_ID = "984000000000000003";
 
+const SECOND_NOTIFY_ROLE_ID = "984000000000000013";
+
+const THIRD_NOTIFY_ROLE_ID = "984000000000000014";
+
+const FOURTH_NOTIFY_ROLE_ID = "984000000000000015";
+
 const ADMIN_USER_ID = "984000000000000004";
 
 const FIRST_MESSAGE_ID = "984000000000000005";
@@ -101,13 +107,15 @@ describe("role-request group publication service", () => {
 
       messageUrl: `https://discord.test/messages/${FIRST_MESSAGE_ID}`,
 
-      notification: {
-        kind: "pinged",
+      notifications: [
+        {
+          kind: "pinged",
 
-        roleId: NOTIFY_ROLE_ID,
+          roleId: NOTIFY_ROLE_ID,
 
-        roleNameSnapshot: "Naval",
-      },
+          roleNameSnapshot: "Naval",
+        },
+      ],
     });
 
     expect(sendMessage).toHaveBeenCalledTimes(1);
@@ -155,6 +163,258 @@ describe("role-request group publication service", () => {
     ]);
   });
 
+  it("independently resolves multiple notification roles and pings only the usable subset", async () => {
+    // Arrange
+    const fixture = await createPlannedRoleRequestGroup(pool);
+
+    await pool.query(
+      `
+      DELETE FROM
+        "role_request_group_notification_roles"
+      WHERE
+        "group_id" = $1
+    `,
+      [fixture.groupId],
+    );
+
+    await pool.query(
+      `
+      INSERT INTO
+        "role_request_group_notification_roles" (
+          "group_id",
+          "discord_role_id",
+          "role_name_snapshot",
+          "sort_order"
+        )
+      VALUES
+        ($1, $2, 'Naval', 0),
+        ($1, $3, 'Missing Officers', 1),
+        ($1, $4, 'Unmentionable Reserve', 2),
+        ($1, $5, 'Command', 3)
+    `,
+      [
+        fixture.groupId,
+
+        NOTIFY_ROLE_ID,
+
+        SECOND_NOTIFY_ROLE_ID,
+
+        THIRD_NOTIFY_ROLE_ID,
+
+        FOURTH_NOTIFY_ROLE_ID,
+      ],
+    );
+
+    const sentMessage = {
+      id: FIRST_MESSAGE_ID,
+
+      url: `https://discord.test/messages/${FIRST_MESSAGE_ID}`,
+
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const sendMessage = vi.fn().mockResolvedValue(sentMessage);
+
+    const fetchRole = vi.fn(async (roleId: string) => {
+      switch (roleId) {
+        case NOTIFY_ROLE_ID:
+          return {
+            id: NOTIFY_ROLE_ID,
+
+            name: "Naval",
+
+            mentionable: true,
+          };
+
+        case SECOND_NOTIFY_ROLE_ID:
+          throw Object.assign(new Error("Unknown Role"), {
+            code: 10011,
+
+            status: 404,
+          });
+
+        case THIRD_NOTIFY_ROLE_ID:
+          return {
+            id: THIRD_NOTIFY_ROLE_ID,
+
+            name: "Unmentionable Reserve",
+
+            mentionable: false,
+          };
+
+        case FOURTH_NOTIFY_ROLE_ID:
+          return {
+            id: FOURTH_NOTIFY_ROLE_ID,
+
+            name: "Command",
+
+            mentionable: true,
+          };
+
+        default:
+          throw new Error(`Unexpected role lookup: ${roleId}`);
+      }
+    });
+
+    const guild = createGuild({
+      sendMessage,
+
+      fetchRole,
+
+      canMentionUnmentionableRoles: false,
+    });
+
+    // Act
+    const result = await publishRoleRequestGroup(guild, fixture.groupId);
+
+    // Assert
+    expect(result).toEqual({
+      ok: true,
+
+      eventId: fixture.eventId,
+
+      groupId: fixture.groupId,
+
+      messageId: FIRST_MESSAGE_ID,
+
+      messageUrl: `https://discord.test/messages/${FIRST_MESSAGE_ID}`,
+
+      notifications: [
+        {
+          kind: "pinged",
+
+          roleId: NOTIFY_ROLE_ID,
+
+          roleNameSnapshot: "Naval",
+        },
+        {
+          kind: "skipped",
+
+          roleId: SECOND_NOTIFY_ROLE_ID,
+
+          roleNameSnapshot: "Missing Officers",
+
+          reason: "missing-role",
+        },
+        {
+          kind: "skipped",
+
+          roleId: THIRD_NOTIFY_ROLE_ID,
+
+          roleNameSnapshot: "Unmentionable Reserve",
+
+          reason: "not-mentionable",
+        },
+        {
+          kind: "pinged",
+
+          roleId: FOURTH_NOTIFY_ROLE_ID,
+
+          roleNameSnapshot: "Command",
+        },
+      ],
+    });
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: `<@&${NOTIFY_ROLE_ID}> ` + `<@&${FOURTH_NOTIFY_ROLE_ID}>`,
+
+        allowedMentions: {
+          parse: [],
+
+          roles: [NOTIFY_ROLE_ID, FOURTH_NOTIFY_ROLE_ID],
+        },
+      }),
+    );
+
+    expect(fetchRole).toHaveBeenCalledTimes(4);
+
+    expect(fetchRole).toHaveBeenNthCalledWith(1, NOTIFY_ROLE_ID);
+
+    expect(fetchRole).toHaveBeenNthCalledWith(2, SECOND_NOTIFY_ROLE_ID);
+
+    expect(fetchRole).toHaveBeenNthCalledWith(3, THIRD_NOTIFY_ROLE_ID);
+
+    expect(fetchRole).toHaveBeenNthCalledWith(4, FOURTH_NOTIFY_ROLE_ID);
+
+    expect(sentMessage.delete).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the legacy singular notification role when no collection rows exist", async () => {
+    // Arrange
+    const fixture = await createPlannedRoleRequestGroup(pool);
+
+    await pool.query(
+      `
+      DELETE FROM
+        "role_request_group_notification_roles"
+      WHERE
+        "group_id" = $1
+    `,
+      [fixture.groupId],
+    );
+
+    const sentMessage = {
+      id: FIRST_MESSAGE_ID,
+
+      url: `https://discord.test/messages/${FIRST_MESSAGE_ID}`,
+
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const sendMessage = vi.fn().mockResolvedValue(sentMessage);
+
+    const fetchRole = vi.fn().mockResolvedValue({
+      id: NOTIFY_ROLE_ID,
+
+      name: "Naval",
+
+      mentionable: true,
+    });
+
+    const guild = createGuild({
+      sendMessage,
+
+      fetchRole,
+    });
+
+    // Act
+    const result = await publishRoleRequestGroup(guild, fixture.groupId);
+
+    // Assert
+    expect(result).toMatchObject({
+      ok: true,
+
+      eventId: fixture.eventId,
+
+      groupId: fixture.groupId,
+
+      notifications: [
+        {
+          kind: "pinged",
+
+          roleId: NOTIFY_ROLE_ID,
+
+          roleNameSnapshot: "Naval",
+        },
+      ],
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: `<@&${NOTIFY_ROLE_ID}>`,
+
+        allowedMentions: {
+          parse: [],
+
+          roles: [NOTIFY_ROLE_ID],
+        },
+      }),
+    );
+  });
+
   it("posts without pinging when the snapshotted notification role no longer exists", async () => {
     // Arrange
     const fixture = await createPlannedRoleRequestGroup(pool);
@@ -198,15 +458,17 @@ describe("role-request group publication service", () => {
 
       messageUrl: `https://discord.test/messages/${FIRST_MESSAGE_ID}`,
 
-      notification: {
-        kind: "skipped",
+      notifications: [
+        {
+          kind: "skipped",
 
-        roleId: NOTIFY_ROLE_ID,
+          roleId: NOTIFY_ROLE_ID,
 
-        roleNameSnapshot: "Naval",
+          roleNameSnapshot: "Naval",
 
-        reason: "missing-role",
-      },
+          reason: "missing-role",
+        },
+      ],
     });
 
     /*
@@ -291,15 +553,17 @@ describe("role-request group publication service", () => {
 
       messageUrl: `https://discord.test/messages/${FIRST_MESSAGE_ID}`,
 
-      notification: {
-        kind: "skipped",
+      notifications: [
+        {
+          kind: "skipped",
 
-        roleId: NOTIFY_ROLE_ID,
+          roleId: NOTIFY_ROLE_ID,
 
-        roleNameSnapshot: "Naval",
+          roleNameSnapshot: "Naval",
 
-        reason: "not-mentionable",
-      },
+          reason: "not-mentionable",
+        },
+      ],
     });
 
     expect(sendMessage).toHaveBeenCalledWith(
@@ -1223,6 +1487,25 @@ async function createPlannedRoleRequestGroup(pool: Pool): Promise<Fixture> {
   if (!groupId) {
     throw new Error("The integration-test role-request group was not created.");
   }
+
+  await pool.query(
+    `
+    INSERT INTO
+      "role_request_group_notification_roles" (
+        "group_id",
+        "discord_role_id",
+        "role_name_snapshot",
+        "sort_order"
+      )
+    VALUES (
+      $1,
+      $2,
+      'Naval',
+      0
+    )
+  `,
+    [groupId, NOTIFY_ROLE_ID],
+  );
 
   await pool.query(
     `

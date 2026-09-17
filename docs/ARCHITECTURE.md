@@ -1620,7 +1620,7 @@ A group includes presentation and workflow configuration such as:
 - description
 - channel
 - authoritative message linkage
-- notification role snapshot
+- ordered notification-role snapshots
 - signup requirement
 - opening rule
 - resolved opening time
@@ -1630,6 +1630,43 @@ A group includes presentation and workflow configuration such as:
 - source-preset provenance
 
 One event may have several request groups.
+
+---
+
+# Role-Request Group Notification Collections
+
+Notification audience is represented as ordered child state rather than a fixed set of numbered columns.
+
+Event-level notification roles are stored in:
+
+```text
+role_request_group_notification_roles
+```
+
+Reusable preset notification roles are stored in:
+
+```text
+role_request_preset_group_notification_roles
+```
+
+Each row stores:
+
+```text
+parent group ID
+Discord role ID
+role-name snapshot
+sort order
+```
+
+The application currently limits a request group to four notification roles.
+
+That limit belongs to the application/domain layer rather than the database schema.
+
+The database therefore models a general ordered collection so a future adjustment to the administrator-facing limit does not require another structural redesign.
+
+A group may have zero notification roles.
+
+Notification audience remains independent from qualification eligibility.
 
 ---
 
@@ -1889,7 +1926,7 @@ Publication re-checks:
 - closing time
 - channel availability
 - channel permissions
-- notification role state
+- notification-role collection state
 
 Possible outcomes distinguish normal obsolete or deferred states from environmental failure.
 
@@ -1925,6 +1962,31 @@ scheduled publication overdue but event still unpublished
 Discord lookups and message sends cross an external boundary.
 
 The service therefore re-checks authoritative state before sending and again before claiming the final message linkage.
+
+Each configured notification role is resolved independently.
+
+Publication therefore behaves conceptually as:
+
+```text
+configured notification roles
+        |
+        v
+resolve each Discord role
+        |
+        +---- usable
+        |       -> include in opening ping
+        |
+        +---- missing/unmentionable
+                -> record skipped delivery
+```
+
+One unusable notification role does not suppress other valid notification roles.
+
+The request group itself may still publish when one or more optional role pings cannot be delivered.
+
+Only the successfully-resolved roles are included in Discord `allowedMentions`.
+
+Refresh and deleted-message recovery deliberately suppress the original notification pings.
 
 If publication intent changes while the Discord send is in flight:
 
@@ -2114,7 +2176,7 @@ A reusable preset group may contain:
 - name
 - description
 - fixed channel or apply-time default resolution
-- optional notification role
+- ordered collection of up to four optional notification roles
 - positive-signup requirement
 - signed opening offset
 - signed closing offset
@@ -2169,7 +2231,7 @@ It validates and copies:
 - qualification-role snapshots
 - active preset groups
 - resolved channels
-- notification-role snapshots
+- ordered notification-role collection snapshots
 - signup requirements
 - opening and closing offsets
 - group-option mappings
@@ -3165,6 +3227,48 @@ Applied migrations are historical records.
 
 Once a migration may have run outside a disposable local environment, later changes should normally use a new migration rather than rewriting the old one.
 
+## Expand-and-Contract Notification-Role Migration
+
+The move from one request-group notification role to an ordered collection uses an expand-and-contract deployment.
+
+Migration `0020` adds:
+
+```text
+role_request_preset_group_notification_roles
+role_request_group_notification_roles
+```
+
+and backfills each existing singular notification role as collection entry:
+
+```text
+sortOrder = 0
+```
+
+The legacy singular columns remain temporarily present:
+
+```text
+notify_role_id
+notify_role_name_snapshot
+```
+
+During the compatibility period:
+
+```text
+new writes
+    -> child collection is authoritative
+    -> first configured role is mirrored into legacy columns
+
+new reads
+    -> prefer child collection
+    -> fall back to legacy singular columns only when no child rows exist
+```
+
+This permits an older and newer application revision to overlap briefly during deployment without either revision depending on columns already removed by the other.
+
+The legacy singular columns are compatibility shadows, not the new domain model.
+
+They should be removed in a later cleanup migration after the collection-based application version has been deployed safely.
+
 ---
 
 # PostgreSQL Identifier Length
@@ -3210,6 +3314,7 @@ role_request_presets
 role_request_preset_options
 role_request_preset_option_qualification_roles
 role_request_preset_groups
+role_request_preset_group_notification_roles
 role_request_preset_group_options
 ```
 
@@ -3234,6 +3339,7 @@ actual_attendance
 event_role_options
 event_role_option_qualification_roles
 role_request_groups
+role_request_group_notification_roles
 role_request_group_options
 role_requests
 event_role_request_preset_applications

@@ -967,8 +967,8 @@ Example:
 Who may request Captain?
     -> qualification rules
 
-Who should be informed that Captain requests are open?
-    -> notification role
+Who should be informed that this request group opened?
+    -> notification roles
 ```
 
 These must remain independently configurable.
@@ -1335,20 +1335,26 @@ Deferral must also remain durable and restart-safe without wasting scheduler ret
 
 ---
 
-## D049 - Role-request notification failures should degrade safely
+## D049 - Role-request notification failures should degrade safely per role
 
 **Status: Current**
 
-When a request group has an optional notification role:
+A request group may have zero or more optional notification roles.
+
+For each configured notification role independently:
 
 - a missing role may be skipped
 - an unmentionable role may be skipped if permissions do not allow it
 - `@everyone` is not treated as a normal role-notification choice
-- the request group may still publish without the ping
+- failure to deliver one role ping does not suppress other usable configured roles
+
+The request group may still publish even when one or more optional notification pings cannot be delivered.
 
 ### Reason
 
 Notification delivery and existence of the request surface are separate concerns.
+
+Treating the notification collection per-role also prevents one stale Discord role from suppressing valid notifications to unrelated audiences.
 
 ---
 
@@ -1832,7 +1838,7 @@ Applying a preset copies relevant active configuration into ordinary event-level
 - request groups
 - group mappings
 - resolved channels
-- notification-role snapshots
+- ordered notification-role collection snapshots
 - signup rules
 - opening rules
 - closing rules
@@ -3068,6 +3074,66 @@ Explicit clearing also reduces the risk that omitted Discord options accidentall
 
 ---
 
+## D129 - Request-group notification audiences are ordered child collections
+
+**Status: Current**
+
+Role-request groups may have zero or more notification roles.
+
+The current administrator-facing limit is four roles per group.
+
+Notification roles are represented as ordered child collections:
+
+```text
+role_request_preset_group_notification_roles
+role_request_group_notification_roles
+```
+
+rather than as fixed numbered columns such as:
+
+```text
+notify_role_1_id
+notify_role_2_id
+notify_role_3_id
+notify_role_4_id
+```
+
+The collection stores Discord role identity, a human-readable name snapshot, and explicit ordering.
+
+Preset application snapshots the complete ordered collection into event-level state.
+
+Runtime publication reads the event-level collection and resolves each role independently.
+
+### Migration compatibility
+
+The move from the historical singular notification-role columns uses an expand-and-contract migration.
+
+The new child tables are authoritative for collection-aware code.
+
+During the compatibility period:
+
+```text
+write
+    -> persist complete child collection
+    -> mirror first role into legacy singular columns
+
+read
+    -> use child collection when rows exist
+    -> otherwise fall back to legacy singular columns
+```
+
+The old singular fields are temporary deployment compatibility shadows.
+
+They should be removed only after the collection-aware application has been deployed safely and a later cleanup migration can no longer overlap with an older revision expecting those columns.
+
+### Reason
+
+A child collection avoids schema growth for each additional role, preserves ordering, provides clean preset snapshot semantics, and lets the application-level role limit change independently from database structure.
+
+The expand-and-contract approach also avoids a deployment window where old and new application revisions require incompatible schemas.
+
+---
+
 # Summary of Highest-Risk Invariants
 
 The following decisions are especially easy to break during an otherwise well-intentioned refactor.
@@ -3164,6 +3230,10 @@ option deactivation
 
 qualification replacement
     -> complete set validated and replaced atomically
+
+notification-role collection
+    -> snapshot complete ordered collection
+    -> existing event snapshot remains independent
 ```
 
 ## Message recovery

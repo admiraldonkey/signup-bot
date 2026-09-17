@@ -28,6 +28,10 @@ const NAVAL_NOTIFY_ROLE_ID = "987000000000000006";
 
 const EXPLICIT_CHANNEL_ID = "987000000000000007";
 
+const OFFICER_NOTIFY_ROLE_ID = "987000000000000008";
+
+const RESERVE_NOTIFY_ROLE_ID = "987000000000000009";
+
 type Fixture = {
   guildId: number;
 
@@ -281,9 +285,7 @@ describe("role-request preset query service", () => {
 
           channelId: EXPLICIT_CHANNEL_ID,
 
-          notifyRoleId: null,
-
-          notifyRoleNameSnapshot: null,
+          notificationRoles: [],
 
           requiresPositiveSignup: false,
 
@@ -311,9 +313,31 @@ describe("role-request preset query service", () => {
            */
           channelId: null,
 
-          notifyRoleId: NAVAL_NOTIFY_ROLE_ID,
+          notificationRoles: [
+            {
+              discordRoleId: NAVAL_NOTIFY_ROLE_ID,
 
-          notifyRoleNameSnapshot: "Naval",
+              roleNameSnapshot: "Naval",
+
+              sortOrder: 0,
+            },
+
+            {
+              discordRoleId: OFFICER_NOTIFY_ROLE_ID,
+
+              roleNameSnapshot: "Officers",
+
+              sortOrder: 1,
+            },
+
+            {
+              discordRoleId: RESERVE_NOTIFY_ROLE_ID,
+
+              roleNameSnapshot: "Reserve",
+
+              sortOrder: 2,
+            },
+          ],
 
           requiresPositiveSignup: true,
 
@@ -340,9 +364,7 @@ describe("role-request preset query service", () => {
 
           channelId: null,
 
-          notifyRoleId: null,
-
-          notifyRoleNameSnapshot: null,
+          notificationRoles: [],
 
           requiresPositiveSignup: false,
 
@@ -358,6 +380,49 @@ describe("role-request preset query service", () => {
         },
       ],
     });
+  });
+
+  it("falls back to the legacy singular preset notification role when no collection rows exist", async () => {
+    // Arrange
+    const fixture = await createFixture(pool);
+
+    await pool.query(
+      `
+      DELETE FROM
+        "role_request_preset_group_notification_roles"
+      WHERE
+        "preset_group_id" = $1
+    `,
+      [fixture.generalGroupId],
+    );
+
+    // Act
+    const result = await getRoleRequestPresetDetails({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.navalPresetId,
+    });
+
+    // Assert
+    expect(result.kind).toBe("found");
+
+    if (result.kind !== "found") {
+      throw new Error(`Expected preset details, received "${result.kind}".`);
+    }
+
+    const generalGroup = result.preset.groups.find(
+      (group) => group.id === fixture.generalGroupId,
+    );
+
+    expect(generalGroup?.notificationRoles).toEqual([
+      {
+        discordRoleId: NAVAL_NOTIFY_ROLE_ID,
+
+        roleNameSnapshot: "Naval",
+
+        sortOrder: 0,
+      },
+    ]);
   });
 
   it("treats another guild's preset as not found", async () => {
@@ -654,6 +719,46 @@ async function createFixture(pool: Pool): Promise<Fixture> {
   if (!commandGroupId || !generalGroupId || !inactiveGroupId) {
     throw new Error("The integration-test preset groups were not created.");
   }
+
+  await pool.query(
+    `
+    INSERT INTO
+      "role_request_preset_group_notification_roles" (
+        "preset_group_id",
+        "discord_role_id",
+        "role_name_snapshot",
+        "sort_order"
+      )
+    VALUES
+      (
+        $1,
+        $2,
+        'Naval',
+        0
+      ),
+      (
+        $1,
+        $3,
+        'Officers',
+        1
+      ),
+      (
+        $1,
+        $4,
+        'Reserve',
+        2
+      )
+  `,
+    [
+      generalGroupId,
+
+      NAVAL_NOTIFY_ROLE_ID,
+
+      OFFICER_NOTIFY_ROLE_ID,
+
+      RESERVE_NOTIFY_ROLE_ID,
+    ],
+  );
 
   await pool.query(
     `

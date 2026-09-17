@@ -9,8 +9,10 @@ import {
   events,
   eventTypes,
   guildSettings,
+  roleRequestGroupNotificationRoles,
   roleRequestGroupOptions,
   roleRequestGroups,
+  roleRequestPresetGroupNotificationRoles,
   roleRequestPresetGroupOptions,
   roleRequestPresetGroups,
   roleRequestPresetOptionQualificationRoles,
@@ -412,6 +414,60 @@ export async function applyRoleRequestPresetToEvent(
           (group) => group.id,
         );
 
+        const presetNotificationRows = await transaction
+          .select({
+            presetGroupId:
+              roleRequestPresetGroupNotificationRoles.presetGroupId,
+
+            discordRoleId:
+              roleRequestPresetGroupNotificationRoles.discordRoleId,
+
+            roleNameSnapshot:
+              roleRequestPresetGroupNotificationRoles.roleNameSnapshot,
+
+            sortOrder: roleRequestPresetGroupNotificationRoles.sortOrder,
+          })
+          .from(roleRequestPresetGroupNotificationRoles)
+          .where(
+            inArray(
+              roleRequestPresetGroupNotificationRoles.presetGroupId,
+              activePresetGroupIds,
+            ),
+          )
+          .orderBy(
+            asc(roleRequestPresetGroupNotificationRoles.presetGroupId),
+
+            asc(roleRequestPresetGroupNotificationRoles.sortOrder),
+
+            asc(roleRequestPresetGroupNotificationRoles.discordRoleId),
+          );
+
+        const notificationRolesByPresetGroupId = new Map<
+          number,
+          {
+            discordRoleId: string;
+
+            roleNameSnapshot: string | null;
+
+            sortOrder: number;
+          }[]
+        >();
+
+        for (const row of presetNotificationRows) {
+          const roles =
+            notificationRolesByPresetGroupId.get(row.presetGroupId) ?? [];
+
+          roles.push({
+            discordRoleId: row.discordRoleId,
+
+            roleNameSnapshot: row.roleNameSnapshot,
+
+            sortOrder: row.sortOrder,
+          });
+
+          notificationRolesByPresetGroupId.set(row.presetGroupId, roles);
+        }
+
         const presetGroupMappings = await transaction
           .select({
             groupId: roleRequestPresetGroupOptions.groupId,
@@ -535,6 +591,32 @@ export async function applyRoleRequestPresetToEvent(
         for (const group of activePresetGroups) {
           const channelId = group.channelId ?? defaultRoleRequestChannelId;
 
+          const storedNotificationRoles =
+            notificationRolesByPresetGroupId.get(group.id) ?? [];
+
+          /*
+           * During the expand-and-contract deployment, an old app revision may still
+           * have created a preset group using only the legacy singular columns after
+           * migration 0020 performed its initial backfill.
+           *
+           * Prefer the authoritative collection whenever present. Fall back to the
+           * singular compatibility shadow only when no child rows exist.
+           */
+          const notificationRoles =
+            storedNotificationRoles.length > 0
+              ? storedNotificationRoles
+              : group.notifyRoleId
+                ? [
+                    {
+                      discordRoleId: group.notifyRoleId,
+
+                      roleNameSnapshot: group.notifyRoleNameSnapshot,
+
+                      sortOrder: 0,
+                    },
+                  ]
+                : [];
+
           if (channelId === null) {
             return {
               kind: "missing_default_channel",
@@ -547,6 +629,8 @@ export async function applyRoleRequestPresetToEvent(
             ...group,
 
             channelId,
+
+            notificationRoles,
 
             opensAt: resolveStartRelativeTime(
               event.startsAt,
@@ -737,9 +821,10 @@ export async function applyRoleRequestPresetToEvent(
 
               messageId: null,
 
-              notifyRoleId: group.notifyRoleId,
+              notifyRoleId: group.notificationRoles[0]?.discordRoleId ?? null,
 
-              notifyRoleNameSnapshot: group.notifyRoleNameSnapshot,
+              notifyRoleNameSnapshot:
+                group.notificationRoles[0]?.roleNameSnapshot ?? null,
 
               requiresPositiveSignup: group.requiresPositiveSignup,
 
@@ -785,6 +870,30 @@ export async function applyRoleRequestPresetToEvent(
 
             group.id,
           );
+        }
+
+        const eventNotificationRoleValues = resolvedGroups.flatMap((group) =>
+          group.notificationRoles.map((role) => ({
+            groupId: requireMappedId(
+              eventGroupIdByPresetGroupId,
+
+              group.id,
+
+              "preset group",
+            ),
+
+            discordRoleId: role.discordRoleId,
+
+            roleNameSnapshot: role.roleNameSnapshot,
+
+            sortOrder: role.sortOrder,
+          })),
+        );
+
+        if (eventNotificationRoleValues.length > 0) {
+          await transaction
+            .insert(roleRequestGroupNotificationRoles)
+            .values(eventNotificationRoleValues);
         }
 
         if (activeGroupMappings.length > 0) {

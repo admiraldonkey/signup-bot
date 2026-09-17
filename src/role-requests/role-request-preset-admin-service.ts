@@ -4,12 +4,18 @@ import { db } from "../db/client.js";
 
 import {
   discordGuilds,
+  roleRequestPresetGroupNotificationRoles,
   roleRequestPresetGroupOptions,
   roleRequestPresetGroups,
   roleRequestPresetOptionQualificationRoles,
   roleRequestPresetOptions,
   roleRequestPresets,
 } from "../db/schema.js";
+
+import {
+  normaliseRoleRequestGroupNotificationRoles,
+  type RoleRequestGroupNotificationRoleInput,
+} from "./role-request-group-notification-roles.js";
 
 export type CreateRoleRequestPresetInput = {
   guildDatabaseId: number;
@@ -465,12 +471,6 @@ export type ReplacePresetRoleOptionQualificationRolesResult =
       discordRoleId?: string;
     };
 
-export type PresetNotifyRoleInput = {
-  discordRoleId: string;
-
-  roleNameSnapshot: string;
-};
-
 export type AddPresetRequestGroupInput = {
   guildDatabaseId: number;
 
@@ -488,7 +488,15 @@ export type AddPresetRequestGroupInput = {
    */
   channelId: string | null;
 
-  notifyRole: PresetNotifyRoleInput | null;
+  /*
+   * Ordered collection of Discord roles to ping when this group opens.
+   *
+   * An empty array means no notification roles.
+   *
+   * The domain currently allows at most four roles, but the database models
+   * this as a general ordered child collection.
+   */
+  notificationRoles: RoleRequestGroupNotificationRoleInput[];
 
   requiresPositiveSignup: boolean;
 
@@ -512,9 +520,13 @@ export type AddPresetRequestGroupResult =
 
         channelId: string | null;
 
-        notifyRoleId: string | null;
+        notificationRoles: {
+          discordRoleId: string;
 
-        notifyRoleNameSnapshot: string | null;
+          roleNameSnapshot: string;
+
+          sortOrder: number;
+        }[];
 
         requiresPositiveSignup: boolean;
 
@@ -542,8 +554,10 @@ export type AddPresetRequestGroupResult =
         | "duplicate_option"
         | "option_not_found_or_inactive"
         | "invalid_channel_id"
+        | "too_many_notification_roles"
         | "invalid_notify_role_id"
         | "invalid_notify_role_name"
+        | "duplicate_notification_role"
         | "everyone_notify_role"
         | "invalid_open_offset"
         | "invalid_close_offset"
@@ -2120,41 +2134,25 @@ export async function addPresetRequestGroup(
     }
   }
 
-  let notifyRole: {
-    discordRoleId: string;
+  const notificationResult = normaliseRoleRequestGroupNotificationRoles(
+    input.notificationRoles,
+  );
 
-    roleNameSnapshot: string;
-  } | null = null;
+  if (!notificationResult.ok) {
+    return {
+      kind: "invalid_input",
 
-  if (input.notifyRole !== null) {
-    const discordRoleId = input.notifyRole.discordRoleId.trim();
+      reason: notificationResult.reason,
 
-    if (discordRoleId.length === 0) {
-      return {
-        kind: "invalid_input",
-
-        reason: "invalid_notify_role_id",
-      };
-    }
-
-    const roleNameSnapshot = input.notifyRole.roleNameSnapshot.trim();
-
-    if (roleNameSnapshot.length === 0 || roleNameSnapshot.length > 100) {
-      return {
-        kind: "invalid_input",
-
-        reason: "invalid_notify_role_name",
-
-        discordRoleId,
-      };
-    }
-
-    notifyRole = {
-      discordRoleId,
-
-      roleNameSnapshot,
+      ...(notificationResult.discordRoleId
+        ? {
+            discordRoleId: notificationResult.discordRoleId,
+          }
+        : {}),
     };
   }
+
+  const notificationRoles = notificationResult.roles;
 
   if (!isPostgresInteger(input.openMinutesBeforeStart)) {
     return {
@@ -2228,8 +2226,8 @@ export async function addPresetRequestGroup(
      * Resolve the owning Discord guild only for stable snowflake semantics,
      * not for live Discord validation.
      *
-     * The future command adapter remains responsible for checking whether
-     * selected roles/channels currently exist and are usable.
+     * The command adapter remains responsible for checking whether selected
+     * roles/channels currently exist and are usable.
      */
     const [guild] = await transaction
       .select({
@@ -2245,13 +2243,17 @@ export async function addPresetRequestGroup(
       );
     }
 
-    if (notifyRole?.discordRoleId === guild.discordGuildId) {
+    const everyoneRole = notificationRoles.find(
+      (role) => role.discordRoleId === guild.discordGuildId,
+    );
+
+    if (everyoneRole) {
       return {
         kind: "invalid_input",
 
         reason: "everyone_notify_role",
 
-        discordRoleId: notifyRole.discordRoleId,
+        discordRoleId: everyoneRole.discordRoleId,
       } as const;
     }
 
@@ -2305,6 +2307,14 @@ export async function addPresetRequestGroup(
 
     const sortOrder = (sortRow?.maximum ?? -1) + 1;
 
+    /*
+     * Keep the first configured role mirrored into the legacy singular
+     * columns during the expand-and-contract deployment.
+     *
+     * New code treats the child collection as authoritative.
+     */
+    const primaryNotificationRole = notificationRoles[0] ?? null;
+
     const [group] = await transaction
       .insert(roleRequestPresetGroups)
       .values({
@@ -2316,9 +2326,10 @@ export async function addPresetRequestGroup(
 
         channelId,
 
-        notifyRoleId: notifyRole?.discordRoleId ?? null,
+        notifyRoleId: primaryNotificationRole?.discordRoleId ?? null,
 
-        notifyRoleNameSnapshot: notifyRole?.roleNameSnapshot ?? null,
+        notifyRoleNameSnapshot:
+          primaryNotificationRole?.roleNameSnapshot ?? null,
 
         requiresPositiveSignup: input.requiresPositiveSignup,
 
@@ -2341,10 +2352,6 @@ export async function addPresetRequestGroup(
 
         channelId: roleRequestPresetGroups.channelId,
 
-        notifyRoleId: roleRequestPresetGroups.notifyRoleId,
-
-        notifyRoleNameSnapshot: roleRequestPresetGroups.notifyRoleNameSnapshot,
-
         requiresPositiveSignup: roleRequestPresetGroups.requiresPositiveSignup,
 
         openMinutesBeforeStart: roleRequestPresetGroups.openMinutesBeforeStart,
@@ -2360,6 +2367,20 @@ export async function addPresetRequestGroup(
     if (!group) {
       throw new Error(
         `Failed to create a role-request group for preset #${preset.id}.`,
+      );
+    }
+
+    if (notificationRoles.length > 0) {
+      await transaction.insert(roleRequestPresetGroupNotificationRoles).values(
+        notificationRoles.map((role) => ({
+          presetGroupId: group.id,
+
+          discordRoleId: role.discordRoleId,
+
+          roleNameSnapshot: role.roleNameSnapshot,
+
+          sortOrder: role.sortOrder,
+        })),
       );
     }
 
@@ -2391,6 +2412,8 @@ export async function addPresetRequestGroup(
 
       group: {
         ...group,
+
+        notificationRoles,
 
         presetOptionIds: [...input.presetOptionIds],
       },

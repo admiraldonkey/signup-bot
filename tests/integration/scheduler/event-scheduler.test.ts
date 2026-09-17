@@ -417,13 +417,15 @@ describe("event scheduler", () => {
 
       messageUrl: "https://discord.test/messages/role-request-open",
 
-      notification: {
-        kind: "pinged",
+      notifications: [
+        {
+          kind: "pinged",
 
-        roleId: "300000000000000021",
+          roleId: "300000000000000021",
 
-        roleNameSnapshot: "Naval",
-      },
+          roleNameSnapshot: "Naval",
+        },
+      ],
     });
 
     const client = createSchedulerClient();
@@ -522,13 +524,15 @@ describe("event scheduler", () => {
         details: {
           messageUrl: "https://discord.test/messages/role-request-open",
 
-          notification: {
-            kind: "pinged",
+          notifications: [
+            {
+              kind: "pinged",
 
-            roleId: "300000000000000021",
+              roleId: "300000000000000021",
 
-            roleNameSnapshot: "Naval",
-          },
+              roleNameSnapshot: "Naval",
+            },
+          ],
         },
       },
     ]);

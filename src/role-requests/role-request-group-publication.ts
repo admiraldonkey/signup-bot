@@ -1,19 +1,21 @@
 import { ChannelType, PermissionFlagsBits, type Guild } from "discord.js";
 
-import { and, eq, gt, isNull, lte } from "drizzle-orm";
+import { and, asc, eq, gt, isNull, lte } from "drizzle-orm";
 
 import { TransactionRollbackError } from "drizzle-orm/errors";
 
 import { db } from "../db/client.js";
 
-import { discordGuilds, events, roleRequestGroups } from "../db/schema.js";
+import {
+  discordGuilds,
+  events,
+  roleRequestGroupNotificationRoles,
+  roleRequestGroups,
+} from "../db/schema.js";
 
 import { buildRoleRequestGroupMessagePayload } from "./role-request-message.js";
 
 export type RoleRequestGroupNotificationDelivery =
-  | {
-      kind: "none";
-    }
   | {
       kind: "pinged";
 
@@ -43,7 +45,7 @@ export type PublishRoleRequestGroupResult =
 
       messageUrl: string;
 
-      notification: RoleRequestGroupNotificationDelivery;
+      notifications: RoleRequestGroupNotificationDelivery[];
     }
   | {
       ok: false;
@@ -128,9 +130,13 @@ type LoadedRoleRequestGroup = {
 
   messageId: string | null;
 
-  notifyRoleId: string | null;
+  notificationRoles: {
+    discordRoleId: string;
 
-  notifyRoleNameSnapshot: string | null;
+    roleNameSnapshot: string | null;
+
+    sortOrder: number;
+  }[];
 
   opensAt: Date;
 
@@ -227,9 +233,11 @@ export async function publishRoleRequestGroup(
     };
   }
 
-  const notification = await resolveNotificationDelivery(
+  const notifications = await resolveNotificationDeliveries(
     guild,
-    initialGroup,
+
+    initialGroup.notificationRoles,
+
     permissions,
   );
 
@@ -270,7 +278,22 @@ export async function publishRoleRequestGroup(
     );
   }
 
+  if (
+    !notificationRoleConfigurationsEqual(
+      currentGroup.notificationRoles,
+      initialGroup.notificationRoles,
+    )
+  ) {
+    throw new Error(
+      `Role-request group ${groupId} changed notification roles while publication was in flight.`,
+    );
+  }
+
   const payload = await buildRoleRequestGroupMessagePayload(groupId);
+
+  const pingedRoleIds = notifications.flatMap((notification) =>
+    notification.kind === "pinged" ? [notification.roleId] : [],
+  );
 
   let sentMessage: {
     id: string;
@@ -283,8 +306,8 @@ export async function publishRoleRequestGroup(
   try {
     sentMessage = await channel.send({
       content:
-        notification.kind === "pinged"
-          ? `<@&${notification.roleId}>`
+        pingedRoleIds.length > 0
+          ? pingedRoleIds.map((roleId) => `<@&${roleId}>`).join(" ")
           : undefined,
 
       ...payload,
@@ -292,10 +315,9 @@ export async function publishRoleRequestGroup(
       allowedMentions: {
         parse: [],
 
-        roles: notification.kind === "pinged" ? [notification.roleId] : [],
+        roles: pingedRoleIds,
       },
     });
-
     const linkageTime = new Date();
 
     let linkageClaimed = false;
@@ -495,7 +517,7 @@ export async function publishRoleRequestGroup(
 
       messageUrl: sentMessage.url,
 
-      notification,
+      notifications,
     };
   } catch (error) {
     if (sentMessage) {
@@ -528,6 +550,12 @@ async function loadRoleRequestGroup(
 
       messageId: roleRequestGroups.messageId,
 
+      /*
+       * These singular fields remain only as expand-and-contract
+       * compatibility shadows.
+       *
+       * New rows should have authoritative child collection rows below.
+       */
       notifyRoleId: roleRequestGroups.notifyRoleId,
 
       notifyRoleNameSnapshot: roleRequestGroups.notifyRoleNameSnapshot,
@@ -550,7 +578,73 @@ async function loadRoleRequestGroup(
     )
     .limit(1);
 
-  return group ?? null;
+  if (!group) {
+    return null;
+  }
+
+  const storedNotificationRoles = await db
+    .select({
+      discordRoleId: roleRequestGroupNotificationRoles.discordRoleId,
+
+      roleNameSnapshot: roleRequestGroupNotificationRoles.roleNameSnapshot,
+
+      sortOrder: roleRequestGroupNotificationRoles.sortOrder,
+    })
+    .from(roleRequestGroupNotificationRoles)
+    .where(eq(roleRequestGroupNotificationRoles.groupId, group.id))
+    .orderBy(
+      asc(roleRequestGroupNotificationRoles.sortOrder),
+
+      asc(roleRequestGroupNotificationRoles.discordRoleId),
+    );
+
+  /*
+   * Prefer the new authoritative collection.
+   *
+   * During the expand-and-contract deployment an old app revision may have
+   * created a group using only the legacy singular fields after migration
+   * 0020 performed its initial backfill.
+   */
+  const notificationRoles =
+    storedNotificationRoles.length > 0
+      ? storedNotificationRoles
+      : group.notifyRoleId
+        ? [
+            {
+              discordRoleId: group.notifyRoleId,
+
+              roleNameSnapshot: group.notifyRoleNameSnapshot,
+
+              sortOrder: 0,
+            },
+          ]
+        : [];
+
+  return {
+    id: group.id,
+
+    eventId: group.eventId,
+
+    eventStatus: group.eventStatus,
+
+    eventPublishedAt: group.eventPublishedAt,
+
+    eventPublishMinutesBeforeStart: group.eventPublishMinutesBeforeStart,
+
+    eventStartsAt: group.eventStartsAt,
+
+    channelId: group.channelId,
+
+    messageId: group.messageId,
+
+    notificationRoles,
+
+    opensAt: group.opensAt,
+
+    closesAt: group.closesAt,
+
+    closedAt: group.closedAt,
+  };
 }
 
 function classifyUnpublishableState(
@@ -664,79 +758,105 @@ function isAwaitingEventPublication(
   return scheduledPublicationAt <= now;
 }
 
-async function resolveNotificationDelivery(
+async function resolveNotificationDeliveries(
   guild: Guild,
-  group: LoadedRoleRequestGroup,
+  notificationRoles: LoadedRoleRequestGroup["notificationRoles"],
   permissions: {
     has: (permission: bigint) => boolean;
   },
-): Promise<RoleRequestGroupNotificationDelivery> {
-  if (!group.notifyRoleId) {
-    return {
-      kind: "none",
-    };
-  }
+): Promise<RoleRequestGroupNotificationDelivery[]> {
+  const deliveries: RoleRequestGroupNotificationDelivery[] = [];
 
-  /*
-   * Preset administration should reject @everyone up front, but publication
-   * remains defensive against malformed/legacy rows.
-   */
-  if (group.notifyRoleId === guild.id) {
-    return {
-      kind: "skipped",
+  for (const notificationRole of notificationRoles) {
+    /*
+     * Administration should reject @everyone before persistence, but
+     * publication remains defensive against malformed or legacy rows.
+     */
+    if (notificationRole.discordRoleId === guild.id) {
+      deliveries.push({
+        kind: "skipped",
 
-      roleId: group.notifyRoleId,
+        roleId: notificationRole.discordRoleId,
 
-      roleNameSnapshot: group.notifyRoleNameSnapshot,
+        roleNameSnapshot: notificationRole.roleNameSnapshot,
 
-      reason: "everyone-not-allowed",
-    };
-  }
+        reason: "everyone-not-allowed",
+      });
 
-  const role = await guild.roles
-    .fetch(group.notifyRoleId)
-    .catch((error: unknown) => {
-      if (isUnknownRoleError(error)) {
-        return null;
-      }
+      continue;
+    }
 
-      throw error;
+    const role = await guild.roles
+      .fetch(notificationRole.discordRoleId)
+      .catch((error: unknown) => {
+        if (isUnknownRoleError(error)) {
+          return null;
+        }
+
+        throw error;
+      });
+
+    if (!role) {
+      deliveries.push({
+        kind: "skipped",
+
+        roleId: notificationRole.discordRoleId,
+
+        roleNameSnapshot: notificationRole.roleNameSnapshot,
+
+        reason: "missing-role",
+      });
+
+      continue;
+    }
+
+    if (
+      !role.mentionable &&
+      !permissions.has(PermissionFlagsBits.MentionEveryone)
+    ) {
+      deliveries.push({
+        kind: "skipped",
+
+        roleId: notificationRole.discordRoleId,
+
+        roleNameSnapshot: notificationRole.roleNameSnapshot,
+
+        reason: "not-mentionable",
+      });
+
+      continue;
+    }
+
+    deliveries.push({
+      kind: "pinged",
+
+      roleId: notificationRole.discordRoleId,
+
+      roleNameSnapshot: notificationRole.roleNameSnapshot,
     });
-
-  if (!role) {
-    return {
-      kind: "skipped",
-
-      roleId: group.notifyRoleId,
-
-      roleNameSnapshot: group.notifyRoleNameSnapshot,
-
-      reason: "missing-role",
-    };
   }
 
-  if (
-    !role.mentionable &&
-    !permissions.has(PermissionFlagsBits.MentionEveryone)
-  ) {
-    return {
-      kind: "skipped",
+  return deliveries;
+}
 
-      roleId: group.notifyRoleId,
-
-      roleNameSnapshot: group.notifyRoleNameSnapshot,
-
-      reason: "not-mentionable",
-    };
+function notificationRoleConfigurationsEqual(
+  left: LoadedRoleRequestGroup["notificationRoles"],
+  right: LoadedRoleRequestGroup["notificationRoles"],
+): boolean {
+  if (left.length !== right.length) {
+    return false;
   }
 
-  return {
-    kind: "pinged",
+  return left.every((role, index) => {
+    const other = right[index];
 
-    roleId: group.notifyRoleId,
-
-    roleNameSnapshot: group.notifyRoleNameSnapshot,
-  };
+    return (
+      other !== undefined &&
+      role.discordRoleId === other.discordRoleId &&
+      role.roleNameSnapshot === other.roleNameSnapshot &&
+      role.sortOrder === other.sortOrder
+    );
+  });
 }
 
 async function deleteUnlinkedMessage(

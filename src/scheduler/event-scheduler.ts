@@ -2111,7 +2111,7 @@ async function executeRoleRequestGroupOpen(
     details: {
       messageUrl: result.messageUrl,
 
-      notification: result.notification,
+      notifications: result.notifications,
     },
   });
 
