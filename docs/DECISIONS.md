@@ -2966,7 +2966,7 @@ implemented
     -> core message recovery
 
 planned
-    -> remaining preset qualification/group/mapping editing
+    -> remaining preset group-option mapping editing and final UX review
     -> full event templates
     -> recurring event generation
     -> confirmed-organiser unavailability workflow
@@ -3134,6 +3134,72 @@ The expand-and-contract approach also avoids a deployment window where old and n
 
 ---
 
+## D130 - Preset request-group edits use explicit partial-field semantics and complete notification replacement
+
+**Status: Current**
+
+Editing an existing reusable preset request group is a partial definition mutation.
+
+Omitted fields preserve their current values.
+
+Conceptually:
+
+```text
+field omitted
+    -> preserve
+
+replacement value supplied
+    -> replace
+
+explicit clear supplied
+    -> clear nullable value
+```
+
+For the ordered notification-role collection:
+
+```text
+notificationRoles = undefined
+    -> preserve complete collection
+
+notificationRoles = []
+    -> clear complete collection
+
+notificationRoles = [A, B, ...]
+    -> replace complete ordered collection
+```
+
+Notification replacement is not incremental append/remove behaviour.
+
+The complete requested collection is validated before existing rows are replaced inside the authoritative transaction.
+
+Group-option mappings are not part of this mutation and remain unchanged.
+
+Request-group editing participates in the preset graph locking contract:
+
+```text
+preset application
+    -> role_request_presets FOR SHARE
+
+request-group edit
+    -> role_request_presets FOR UPDATE
+```
+
+Existing event-level snapshots remain independent.
+
+A true no-op does not advance group or parent preset timestamps and does not produce a false successful mutation audit.
+
+### Reason
+
+Administrators need to edit one part of a reusable group without accidentally clearing unrelated configuration.
+
+Destructive actions therefore require explicit intent.
+
+Treating notification roles as one complete ordered collection also provides atomic validation and avoids partially-mutated notification state.
+
+Keeping group-option mappings outside the request-group definition edit gives that ordered many-to-many relationship its own clear mutation boundary.
+
+---
+
 # Summary of Highest-Risk Invariants
 
 The following decisions are especially easy to break during an otherwise well-intentioned refactor.
@@ -3233,6 +3299,13 @@ qualification replacement
 
 notification-role collection
     -> snapshot complete ordered collection
+    -> existing event snapshot remains independent
+
+request-group edit
+    -> omitted field preserves stored value
+    -> explicit clear is destructive intent
+    -> notification roles replace complete ordered collection
+    -> group-option mappings remain separate
     -> existing event snapshot remains independent
 ```
 

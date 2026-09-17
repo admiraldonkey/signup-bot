@@ -135,17 +135,17 @@ Recurrence should not be built before template-generated one-off events are reli
 
 Complete the administrator workflow for maintaining an existing reusable role-request preset without requiring it to be recreated.
 
-The current preset-management foundation, parent metadata editing, core role-option definition editing, qualification-role replacement, and multi-role request-group notification foundation are implemented.
+The current preset-management foundation, parent metadata editing, core role-option definition editing, qualification-role replacement, multi-role request-group notification foundation, and request-group definition editing are implemented.
 
-The remaining work is request-group editing, group-option mapping editing, and final administrator UX review.
+The remaining work is group-option mapping editing and final administrator UX review.
 
 ---
 
 ## P0.4 - Preset request-group editing
 
-Add editing for reusable request-group fields.
+**Implemented**
 
-Candidate editable fields include:
+Existing reusable request groups can now edit:
 
 - name
 - description
@@ -155,33 +155,25 @@ Candidate editable fields include:
 - opening offset
 - closing offset
 
-The underlying notification-role collection foundation is already implemented.
+Omitted fields preserve current state.
 
-Reusable and event-level groups can currently store up to four ordered optional notification roles, preset application snapshots the complete collection, and publication resolves each role independently.
+Description, destination, and notification configuration support explicit destructive clearing.
 
-P0.4 should therefore edit the existing collection model rather than reintroducing singular notification-role semantics.
+Notification roles use complete ordered replacement semantics.
 
-The current signed-offset semantics must remain:
+Group-option mappings deliberately remain outside this mutation and are handled by P0.5.
 
-```text
-positive = before event start
-zero     = at event start
-negative = after event start
-```
-
-Discord-facing options should continue using clearer concepts such as:
+Request-group editing participates in the established preset lock:
 
 ```text
-open-minutes-before-start
-open-minutes-after-start
+application
+    -> parent FOR SHARE
 
-close-minutes-before-start
-close-minutes-after-start
+group edit
+    -> parent FOR UPDATE
 ```
 
-rather than requiring administrators to enter negative values directly.
-
-Opening must remain strictly before closing.
+Existing event snapshots remain independent.
 
 ---
 

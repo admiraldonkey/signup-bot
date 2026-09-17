@@ -2642,22 +2642,174 @@ A true no-op advances neither.
 
 ---
 
+# Preset Request-Group Editing
+
+Existing reusable preset request groups can be edited without recreating the group or altering already-applied events.
+
+Editable definition fields currently include:
+
+```text
+name
+description
+destination channel override
+notification-role collection
+positive-signup requirement
+opening offset
+closing offset
+```
+
+Group-option mappings are deliberately outside this mutation.
+
+That child collection remains independently authoritative and is handled by separate mapping administration.
+
+## Optional-field semantics
+
+Request-group editing distinguishes omission from explicit clearing.
+
+For scalar nullable fields:
+
+```text
+undefined
+    -> leave unchanged
+
+value
+    -> replace
+
+null
+    -> explicitly clear
+```
+
+This applies to:
+
+```text
+description
+channelId
+```
+
+For notification roles:
+
+```text
+undefined
+    -> leave complete collection unchanged
+
+[]
+    -> explicitly clear complete collection
+
+[role A, role B, ...]
+    -> replace complete ordered collection
+```
+
+Supplying a replacement notification collection is therefore not an append operation.
+
+The complete final collection is validated before destructive child-row mutation begins.
+
+## Notification replacement
+
+The authoritative reusable collection lives in:
+
+```text
+role_request_preset_group_notification_roles
+```
+
+An explicit replacement occurs transactionally:
+
+```text
+validate requested collection
+        |
+        v
+delete existing child rows
+        |
+        v
+insert complete ordered replacement
+        |
+        v
+commit
+```
+
+During the expand-and-contract compatibility period, the first configured role is also mirrored into:
+
+```text
+notify_role_id
+notify_role_name_snapshot
+```
+
+An explicit clear empties the child collection and clears those compatibility shadows.
+
+An unrelated request-group edit does not rewrite notification child rows or compatibility fields.
+
+## Timing
+
+Opening and closing retain the established signed-offset representation:
+
+```text
+positive = before event start
+zero     = at event start
+negative = after event start
+```
+
+The final group definition must satisfy:
+
+```text
+openMinutesBeforeStart > closeMinutesBeforeStart
+```
+
+This is validated against the complete resulting definition, including cases where only one side of the window is being edited.
+
+## Locking and snapshot semantics
+
+Request-group editing locks the preset parent:
+
+```text
+role_request_presets FOR UPDATE
+```
+
+Preset application continues to use:
+
+```text
+role_request_presets FOR SHARE
+```
+
+Application therefore observes either:
+
+```text
+complete request-group definition before edit
+```
+
+or:
+
+```text
+complete request-group definition after edit
+```
+
+and never a partially-mutated group.
+
+This contract covers both scalar group fields and the ordered notification-role child collection.
+
+Existing event-level request-group snapshots remain unchanged.
+
+## Ownership and lifecycle
+
+Request-group editing:
+
+- enforces guild ownership
+- enforces that the group belongs to the supplied preset
+- permits inactive presets and inactive groups to be edited
+- preserves group-option mappings
+- preserves existing event snapshots
+- advances group and parent preset timestamps only for a real mutation
+- returns an explicit unchanged result for a true no-op
+
+The operation changes reusable source configuration for future applications.
+
+It is not a propagation mechanism for events which already received the preset.
+
+---
+
 # Remaining Preset Editing
 
-Complete editing of the remaining child preset graph is still planned.
+The remaining child-graph editing work is group-option mapping administration.
 
-Remaining areas include:
-
-- request-group metadata editing
-- request-group destination editing
-- notification-role editing
-- signup-gate editing
-- opening and closing timing editing
-- group-option mapping editing
-
-These mutations must continue using the parent `FOR UPDATE` locking contract.
-
-Existing event snapshots must remain unchanged.
+That operation must continue to use the same parent `FOR UPDATE` locking contract and preserve existing event snapshots.
 
 ---
 

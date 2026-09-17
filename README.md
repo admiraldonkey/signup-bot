@@ -237,6 +237,7 @@ Current preset commands support:
 - editing existing role-option display names, descriptions, request restrictions, and capacities
 - replacing or explicitly clearing role-option qualification-role sets
 - adding request groups
+- editing existing request-group definitions, including metadata, destination behaviour, notification roles, signup requirements, and opening/closing timing
 - applying a preset to an existing event
 - activating or deactivating a preset
 - activating or deactivating individual preset role options
@@ -260,9 +261,9 @@ Lifecycle controls are non-destructive:
 
 Deactivating an option can intentionally leave an active group with no active mapped options. The bot warns the administrator rather than silently changing neighbouring configuration. Preset application remains the final authoritative validator and rejects an unusable active configuration.
 
-Preset metadata, core role-option definition editing, and qualification-role replacement are implemented.
+Preset metadata, core role-option definition editing, qualification-role replacement, and request-group definition editing are implemented.
 
-Request-group editing and group-option mapping editing remain planned before the preset administration workflow is considered complete.
+Group-option mapping editing remains planned before the preset administration workflow is considered complete.
 
 ### Announcements and reminders
 
@@ -714,6 +715,7 @@ The following substantial areas are implemented:
 - core Discord message recovery
 - reusable role-request presets
 - ordered multi-role notifications for role-request groups
+- reusable preset request-group definition editing
 - preset application with snapshot semantics
 - reversible preset, option, and group lifecycle controls
 - PostgreSQL-backed audit logging
@@ -724,13 +726,18 @@ The following substantial areas are implemented:
 
 The current development focus is **completing editing of existing reusable role-request presets**.
 
-Preset metadata editing, core role-option definition editing, and qualification-role replacement are implemented.
+Implemented editing now covers:
 
-Role-request groups now support up to four ordered optional notification roles across reusable presets, preset application snapshots, scheduled publication, and manually-posted event groups.
+- preset name and description metadata
+- role-option definitions
+- qualification-role collections
+- request-group metadata and description
+- request-group destination behaviour
+- ordered notification-role collections
+- signup requirements
+- opening and closing timing
 
-This notification-role collection work was completed as a prerequisite discovered while beginning request-group editing.
-
-The immediate development direction now returns to request-group editing, followed by group-option mapping editing before moving on to event templates.
+The immediate next step is group-option mapping editing, followed by a final administrator-facing preset-editing UX review before moving on to event templates.
 
 ### Event templates
 
