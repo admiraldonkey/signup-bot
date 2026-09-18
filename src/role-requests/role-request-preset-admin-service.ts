@@ -663,6 +663,66 @@ export type EditPresetRequestGroupResult =
       discordRoleId?: string;
     };
 
+export type ReplacePresetRequestGroupOptionsInput = {
+  guildDatabaseId: number;
+
+  presetId: number;
+
+  presetGroupId: number;
+
+  /*
+   * Complete ordered replacement.
+   *
+   * The supplied order becomes the authoritative presentation order.
+   *
+   * At least one mapping is required.
+   */
+  presetOptionIds: number[];
+};
+
+export type ReplacePresetRequestGroupOptionsResult =
+  | {
+      kind: "updated" | "unchanged";
+
+      group: {
+        id: number;
+
+        presetId: number;
+
+        name: string;
+
+        active: boolean;
+      };
+
+      presetOptionIds: number[];
+
+      /*
+       * Mapping membership and option lifecycle are independent.
+       *
+       * Returning inactive mapped IDs allows the Discord adapter to warn
+       * administrators when the resulting group currently has no usable
+       * active option.
+       */
+      inactivePresetOptionIds: number[];
+    }
+  | {
+      kind: "preset_not_found";
+    }
+  | {
+      kind: "group_not_found";
+    }
+  | {
+      kind: "invalid_input";
+
+      reason:
+        | "no_options"
+        | "invalid_option_id"
+        | "duplicate_option"
+        | "option_not_found";
+
+      presetOptionId?: number;
+    };
+
 type RequestRestriction = "open" | "qualified_only";
 
 type QualificationLevel = "qualified" | "supervision_required";
@@ -3015,6 +3075,249 @@ export async function editPresetRequestGroup(
 
         notificationRoles,
       },
+    } as const;
+  });
+}
+
+/**
+ * Atomically replaces the complete ordered role-option mapping for one
+ * reusable preset request group.
+ *
+ * Mapping membership and option lifecycle are deliberately independent.
+ * Inactive preset options may remain mapped so administrators can prepare or
+ * temporarily retire reusable configuration without destroying structure.
+ *
+ * At least one mapping is always required.
+ *
+ * Preset application takes FOR SHARE on the parent preset row. Mapping
+ * replacement therefore takes FOR UPDATE on the same parent so application
+ * observes either the complete mapping set before this mutation or the
+ * complete mapping set after it.
+ *
+ * Existing event-level snapshots remain independent.
+ */
+export async function replacePresetRequestGroupOptions(
+  input: ReplacePresetRequestGroupOptionsInput,
+): Promise<ReplacePresetRequestGroupOptionsResult> {
+  if (input.presetOptionIds.length === 0) {
+    return {
+      kind: "invalid_input",
+
+      reason: "no_options",
+    };
+  }
+
+  const seenOptionIds = new Set<number>();
+
+  for (const presetOptionId of input.presetOptionIds) {
+    if (!isPostgresPositiveInteger(presetOptionId)) {
+      return {
+        kind: "invalid_input",
+
+        reason: "invalid_option_id",
+
+        presetOptionId,
+      };
+    }
+
+    if (seenOptionIds.has(presetOptionId)) {
+      return {
+        kind: "invalid_input",
+
+        reason: "duplicate_option",
+
+        presetOptionId,
+      };
+    }
+
+    seenOptionIds.add(presetOptionId);
+  }
+
+  return db.transaction(async (transaction) => {
+    /*
+     * Authoritative guild ownership and application/mutation concurrency
+     * boundary.
+     *
+     * Inactive presets deliberately remain editable.
+     */
+    const [preset] = await transaction
+      .select({
+        id: roleRequestPresets.id,
+      })
+      .from(roleRequestPresets)
+      .where(
+        and(
+          eq(roleRequestPresets.id, input.presetId),
+
+          eq(roleRequestPresets.ownerGuildId, input.guildDatabaseId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    if (!preset) {
+      return {
+        kind: "preset_not_found",
+      } as const;
+    }
+
+    const [group] = await transaction
+      .select({
+        id: roleRequestPresetGroups.id,
+
+        presetId: roleRequestPresetGroups.presetId,
+
+        name: roleRequestPresetGroups.name,
+
+        active: roleRequestPresetGroups.active,
+      })
+      .from(roleRequestPresetGroups)
+      .where(
+        and(
+          eq(roleRequestPresetGroups.id, input.presetGroupId),
+
+          eq(roleRequestPresetGroups.presetId, preset.id),
+        ),
+      )
+      .limit(1);
+
+    if (!group) {
+      return {
+        kind: "group_not_found",
+      } as const;
+    }
+
+    /*
+     * Mapping membership is independent from option lifecycle.
+     *
+     * Validate ownership against every option in the preset, not only active
+     * options.
+     */
+    const requestedOptions = await transaction
+      .select({
+        id: roleRequestPresetOptions.id,
+
+        active: roleRequestPresetOptions.active,
+      })
+      .from(roleRequestPresetOptions)
+      .where(
+        and(
+          eq(roleRequestPresetOptions.presetId, preset.id),
+
+          inArray(roleRequestPresetOptions.id, input.presetOptionIds),
+        ),
+      );
+
+    const requestedOptionById = new Map(
+      requestedOptions.map((option) => [option.id, option]),
+    );
+
+    const missingOptionId = input.presetOptionIds.find(
+      (presetOptionId) => !requestedOptionById.has(presetOptionId),
+    );
+
+    if (missingOptionId !== undefined) {
+      return {
+        kind: "invalid_input",
+
+        reason: "option_not_found",
+
+        presetOptionId: missingOptionId,
+      } as const;
+    }
+
+    const currentMappings = await transaction
+      .select({
+        presetOptionId: roleRequestPresetGroupOptions.presetOptionId,
+
+        sortOrder: roleRequestPresetGroupOptions.sortOrder,
+      })
+      .from(roleRequestPresetGroupOptions)
+      .where(eq(roleRequestPresetGroupOptions.groupId, group.id))
+      .orderBy(
+        asc(roleRequestPresetGroupOptions.sortOrder),
+
+        asc(roleRequestPresetGroupOptions.presetOptionId),
+      );
+
+    const currentOptionIds = currentMappings.map(
+      (mapping) => mapping.presetOptionId,
+    );
+
+    const inactivePresetOptionIds = input.presetOptionIds.filter(
+      (presetOptionId) =>
+        requestedOptionById.get(presetOptionId)?.active === false,
+    );
+
+    const unchanged =
+      currentOptionIds.length === input.presetOptionIds.length &&
+      currentOptionIds.every(
+        (presetOptionId, index) =>
+          presetOptionId === input.presetOptionIds[index],
+      );
+
+    if (unchanged) {
+      return {
+        kind: "unchanged",
+
+        group,
+
+        presetOptionIds: [...currentOptionIds],
+
+        inactivePresetOptionIds,
+      } as const;
+    }
+
+    /*
+     * Validation is complete before destructive mutation.
+     *
+     * Delete + insert occur in this transaction while application is excluded
+     * by the parent FOR UPDATE lock.
+     */
+    await transaction
+      .delete(roleRequestPresetGroupOptions)
+      .where(eq(roleRequestPresetGroupOptions.groupId, group.id));
+
+    await transaction.insert(roleRequestPresetGroupOptions).values(
+      input.presetOptionIds.map((presetOptionId, index) => ({
+        groupId: group.id,
+
+        presetOptionId,
+
+        sortOrder: index,
+      })),
+    );
+
+    const now = new Date();
+
+    await transaction
+      .update(roleRequestPresetGroups)
+      .set({
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(roleRequestPresetGroups.id, group.id),
+
+          eq(roleRequestPresetGroups.presetId, preset.id),
+        ),
+      );
+
+    await transaction
+      .update(roleRequestPresets)
+      .set({
+        updatedAt: now,
+      })
+      .where(eq(roleRequestPresets.id, preset.id));
+
+    return {
+      kind: "updated",
+
+      group,
+
+      presetOptionIds: [...input.presetOptionIds],
+
+      inactivePresetOptionIds,
     } as const;
   });
 }
