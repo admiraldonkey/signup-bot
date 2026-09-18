@@ -2338,6 +2338,307 @@ describe("event scheduler", () => {
     ]);
   });
 
+  it("does not retry the organiser cover safety deadline when delivery is definitively unavailable", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserCoverDeadline(pool);
+
+    organiserNotificationMocks.sendOrganiserCoverRequest.mockResolvedValueOnce({
+      kind: "failed",
+
+      delivery: "failed",
+    });
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    expect(
+      organiserNotificationMocks.sendOrganiserCoverRequest,
+    ).toHaveBeenCalledTimes(1);
+
+    const actionResult = await pool.query<{
+      status: string;
+
+      attempt_count: number;
+
+      locked_at: Date | null;
+
+      completed_at: Date | null;
+
+      last_error: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at",
+        "last_error"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+
+      attempt_count: 1,
+
+      locked_at: null,
+
+      last_error: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    /*
+     * The PostgreSQL safety transition happens before Discord delivery.
+     *
+     * A deleted administration destination must therefore not roll back the
+     * authoritative retirement of unresolved nominated organisers.
+     */
+    const assignments = await pool.query<{
+      id: number;
+
+      status: string;
+
+      is_current: boolean;
+    }>(
+      `
+      SELECT
+        "id",
+        "status",
+        "is_current"
+      FROM "event_organiser_assignments"
+      WHERE "event_id" = $1
+      ORDER BY "id"
+    `,
+      [fixture.eventId],
+    );
+
+    expect(assignments.rows).toEqual([
+      {
+        id: fixture.primaryAssignmentId,
+
+        status: "removed",
+
+        is_current: false,
+      },
+
+      {
+        id: fixture.backupAssignmentId,
+
+        status: "removed",
+
+        is_current: false,
+      },
+    ]);
+
+    /*
+     * No Discord cover message was created, so no durable message linkage may
+     * exist.
+     */
+    const messageResult = await pool.query<{
+      count: number;
+    }>(
+      `
+      SELECT
+        COUNT(*)::int AS "count"
+      FROM "event_messages"
+      WHERE
+        "event_id" = $1
+        AND "kind"::text = 'organiser_cover'
+    `,
+      [fixture.eventId],
+    );
+
+    expect(messageResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+
+    const auditResult = await pool.query<{
+      action: string;
+
+      outcome: string;
+
+      delivery: string | null;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome",
+        "details" ->> 'delivery' AS "delivery"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'event'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.organiser_cover_deadline'
+    `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "scheduler.organiser_cover_deadline",
+
+        outcome: "failure",
+
+        delivery: "failed",
+      },
+    ]);
+  });
+
+  it("retries the organiser cover safety deadline after an unexpected transient delivery failure", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserCoverDeadline(pool);
+
+    const transientError = new Error(
+      "Temporary Discord organiser safety-cover transport failure.",
+    );
+
+    organiserNotificationMocks.sendOrganiserCoverRequest.mockRejectedValueOnce(
+      transientError,
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionAttemptSettled(pool, fixture.actionId, 1);
+
+    stopEventScheduler();
+
+    // Assert
+    const actionResult = await pool.query<{
+      status: string;
+
+      attempt_count: number;
+
+      locked_at: Date | null;
+
+      completed_at: Date | null;
+
+      last_error: string | null;
+
+      due_at: Date;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at",
+        "last_error",
+        "due_at"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect(actionResult.rows[0]).toMatchObject({
+      status: "pending",
+
+      attempt_count: 1,
+
+      locked_at: null,
+
+      completed_at: null,
+    });
+
+    expect(actionResult.rows[0]?.last_error).toContain(
+      "Temporary Discord organiser safety-cover transport failure.",
+    );
+
+    expect(actionResult.rows[0]?.due_at.getTime()).toBeGreaterThan(Date.now());
+
+    expect(
+      organiserNotificationMocks.sendOrganiserCoverRequest,
+    ).toHaveBeenCalledTimes(1);
+
+    /*
+     * The authoritative safety transition committed before the transient
+     * Discord failure.
+     *
+     * Retrying notification work must not resurrect the retired nominees.
+     */
+    const assignments = await pool.query<{
+      id: number;
+
+      status: string;
+
+      is_current: boolean;
+    }>(
+      `
+      SELECT
+        "id",
+        "status",
+        "is_current"
+      FROM "event_organiser_assignments"
+      WHERE "event_id" = $1
+      ORDER BY "id"
+    `,
+      [fixture.eventId],
+    );
+
+    expect(assignments.rows).toEqual([
+      {
+        id: fixture.primaryAssignmentId,
+
+        status: "removed",
+
+        is_current: false,
+      },
+
+      {
+        id: fixture.backupAssignmentId,
+
+        status: "removed",
+
+        is_current: false,
+      },
+    ]);
+
+    /*
+     * A thrown transient error has not established a definitive cover-delivery
+     * outcome, so the executor must not write success or failure yet.
+     */
+    const auditResult = await pool.query<{
+      count: number;
+    }>(
+      `
+      SELECT
+        COUNT(*)::int AS "count"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'event'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.organiser_cover_deadline'
+    `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+  });
+
   it("tracks the organiser cover message created at the safety deadline", async () => {
     // Arrange
     const fixture = await createOpenEventWithDueOrganiserCoverDeadline(pool);
@@ -2642,6 +2943,278 @@ describe("event scheduler", () => {
         delivery: "pinged",
 
         prior_cover_state: "cover_already_requested",
+      },
+    ]);
+  });
+
+  it("does not retry the missing-organiser start alert when delivery is definitively unavailable", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserMissingAtStart(pool);
+
+    organiserNotificationMocks.sendOrganiserMissingAtStartAlert.mockResolvedValueOnce(
+      {
+        kind: "failed",
+
+        delivery: "failed",
+      },
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    expect(
+      organiserNotificationMocks.sendOrganiserMissingAtStartAlert,
+    ).toHaveBeenCalledTimes(1);
+
+    const actionResult = await pool.query<{
+      status: string;
+
+      attempt_count: number;
+
+      locked_at: Date | null;
+
+      completed_at: Date | null;
+
+      last_error: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at",
+        "last_error"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+
+      attempt_count: 1,
+
+      locked_at: null,
+
+      last_error: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    const messageResult = await pool.query<{
+      count: number;
+    }>(
+      `
+      SELECT
+        COUNT(*)::int AS "count"
+      FROM "event_messages"
+      WHERE
+        "event_id" = $1
+        AND "kind"::text = 'organiser_missing_at_start'
+    `,
+      [fixture.eventId],
+    );
+
+    expect(messageResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+
+    const auditResult = await pool.query<{
+      action: string;
+
+      outcome: string;
+
+      delivery: string | null;
+
+      prior_cover_state: string | null;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome",
+        "details" ->> 'delivery'
+          AS "delivery",
+        "details" ->> 'priorCoverState'
+          AS "prior_cover_state"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'event'
+        AND "target_id" = $1
+        AND "action" =
+          'scheduler.organiser_missing_at_start'
+    `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "scheduler.organiser_missing_at_start",
+
+        outcome: "failure",
+
+        delivery: "failed",
+
+        prior_cover_state: "cover_already_requested",
+      },
+    ]);
+  });
+
+  it("retries the missing-organiser start alert after an unexpected transient delivery failure", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserMissingAtStart(pool);
+
+    const transientError = new Error(
+      "Temporary Discord missing-organiser transport failure.",
+    );
+
+    organiserNotificationMocks.sendOrganiserMissingAtStartAlert.mockRejectedValueOnce(
+      transientError,
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionAttemptSettled(pool, fixture.actionId, 1);
+
+    stopEventScheduler();
+
+    // Assert
+    const actionResult = await pool.query<{
+      status: string;
+
+      attempt_count: number;
+
+      locked_at: Date | null;
+
+      completed_at: Date | null;
+
+      last_error: string | null;
+
+      due_at: Date;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at",
+        "last_error",
+        "due_at"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect(actionResult.rows[0]).toMatchObject({
+      status: "pending",
+
+      attempt_count: 1,
+
+      locked_at: null,
+
+      completed_at: null,
+    });
+
+    expect(actionResult.rows[0]?.last_error).toContain(
+      "Temporary Discord missing-organiser transport failure.",
+    );
+
+    expect(actionResult.rows[0]?.due_at.getTime()).toBeGreaterThan(Date.now());
+
+    expect(
+      organiserNotificationMocks.sendOrganiserMissingAtStartAlert,
+    ).toHaveBeenCalledTimes(1);
+
+    /*
+     * No successful Discord message crossed the boundary, so no durable T+0
+     * message may have been created.
+     */
+    const messageResult = await pool.query<{
+      count: number;
+    }>(
+      `
+      SELECT
+        COUNT(*)::int AS "count"
+      FROM "event_messages"
+      WHERE
+        "event_id" = $1
+        AND "kind"::text = 'organiser_missing_at_start'
+    `,
+      [fixture.eventId],
+    );
+
+    expect(messageResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+
+    /*
+     * The executor has not reached a definitive notification outcome yet.
+     */
+    const auditResult = await pool.query<{
+      count: number;
+    }>(
+      `
+      SELECT
+        COUNT(*)::int AS "count"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'event'
+        AND "target_id" = $1
+        AND "action" =
+          'scheduler.organiser_missing_at_start'
+    `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+
+    /*
+     * The historical failed nominee remains historical evidence of why the
+     * event already needed general cover.
+     */
+    const sourceAssignmentResult = await pool.query<{
+      status: string;
+
+      is_current: boolean;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current"
+      FROM "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [fixture.sourceAssignmentId],
+    );
+
+    expect(sourceAssignmentResult.rows).toEqual([
+      {
+        status: "timed_out",
+
+        is_current: false,
       },
     ]);
   });
@@ -3890,6 +4463,136 @@ describe("event scheduler", () => {
         outcome: "failure",
 
         delivery: "failed",
+      },
+    ]);
+  });
+
+  it("retries an organiser warning after an unexpected transient delivery failure", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserWarning(pool);
+
+    const transientError = new Error(
+      "Temporary Discord organiser-warning transport failure.",
+    );
+
+    organiserNotificationMocks.sendOrganiserPendingWarning.mockRejectedValueOnce(
+      transientError,
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionAttemptSettled(pool, fixture.actionId, 1);
+
+    stopEventScheduler();
+
+    // Assert
+    const actionResult = await pool.query<{
+      status: string;
+
+      attempt_count: number;
+
+      locked_at: Date | null;
+
+      completed_at: Date | null;
+
+      last_error: string | null;
+
+      due_at: Date;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "locked_at",
+        "completed_at",
+        "last_error",
+        "due_at"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect(actionResult.rows[0]).toMatchObject({
+      status: "pending",
+
+      attempt_count: 1,
+
+      locked_at: null,
+
+      completed_at: null,
+    });
+
+    expect(actionResult.rows[0]?.last_error).toContain(
+      "Temporary Discord organiser-warning transport failure.",
+    );
+
+    expect(actionResult.rows[0]?.due_at.getTime()).toBeGreaterThan(Date.now());
+
+    /*
+     * The transient failure happened before a Discord warning was created, so
+     * no warning linkage may have appeared on the authoritative assignment.
+     */
+    const assignmentResult = await pool.query<{
+      status: string;
+
+      is_current: boolean;
+
+      warning_channel_id: string | null;
+
+      warning_message_id: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "is_current",
+        "warning_channel_id",
+        "warning_message_id"
+      FROM "event_organiser_assignments"
+      WHERE "id" = $1
+    `,
+      [fixture.assignmentId],
+    );
+
+    expect(assignmentResult.rows).toEqual([
+      {
+        status: "pending",
+
+        is_current: true,
+
+        warning_channel_id: null,
+
+        warning_message_id: null,
+      },
+    ]);
+
+    /*
+     * A thrown transport failure has not established a definitive warning
+     * delivery outcome yet.
+     */
+    const auditResult = await pool.query<{
+      count: number;
+    }>(
+      `
+      SELECT
+        COUNT(*)::int AS "count"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'organiser_assignment'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.organiser_warning'
+    `,
+      [String(fixture.assignmentId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        count: 0,
       },
     ]);
   });
