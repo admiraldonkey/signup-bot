@@ -262,9 +262,9 @@ Lifecycle controls are non-destructive:
 
 Deactivating an option can intentionally leave an active group with no active mapped options. The bot warns the administrator rather than silently changing neighbouring configuration. Preset application remains the final authoritative validator and rejects an unusable active configuration.
 
-Preset metadata, core role-option definition editing, qualification-role replacement, request-group definition editing, and ordered group-option mapping replacement are implemented.
+Preset metadata, core role-option definition editing, qualification-role replacement, request-group definition editing, ordered group-option mapping replacement, and the final administrator-facing preset UX review are implemented.
 
-The remaining preset-administration work is a final administrator-facing UX review rather than missing definition-mutation capability.
+The planned reusable preset administration milestone is complete.
 
 ### Announcements and reminders
 
@@ -719,6 +719,7 @@ The following substantial areas are implemented:
 - reusable preset request-group definition editing
 - ordered preset request-group option-mapping replacement
 - administrator-facing role-preset UX review and lifecycle guidance
+- deleted Event Administration channel reliability coverage for organiser delivery and scheduler retries
 - preset application with snapshot semantics
 - reversible preset, option, and group lifecycle controls
 - PostgreSQL-backed audit logging
@@ -761,7 +762,9 @@ provides deterministic guild-scoped discovery without adding a separate autocomp
 
 Autocomplete can be reconsidered if real administration experience shows meaningful friction, but it is not required merely to avoid entering IDs.
 
-The next focused work is the remaining organiser deletion-behaviour reliability review described in the roadmap, followed by event-template development.
+P0.10 Event Administration channel deletion behaviour is now verified.
+
+The next focused reliability review is P0.11 deleted organiser notification-role behaviour. After that, event-template development becomes the next major feature area.
 
 ### Event templates
 

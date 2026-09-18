@@ -1345,6 +1345,32 @@ This affects new assignment notification delivery.
 
 It does not disable the organiser workflow itself.
 
+## If the Event Administration channel is deleted
+
+Deleting the configured Event Administration channel does not delete or roll back authoritative organiser state.
+
+When Discord explicitly reports that the configured channel no longer exists, the bot treats that destination as definitively unavailable.
+
+It does not guess another administrative channel.
+
+For scheduled organiser notifications such as warnings, cover escalation, safety cover, or the event-start missing-organiser alert, a definitively deleted channel does not cause endless retry attempts.
+
+The scheduled action can complete with a failure recorded in audit output.
+
+Unexpected or transient Discord failures are handled differently.
+
+They remain observable and retain normal scheduler retry behaviour where the action is retryable.
+
+After discovering that the configured Event Administration channel has been deleted:
+
+1. create or choose the intended replacement private administration channel
+2. rerun `/setup configure`
+3. supply the current required setup values and the replacement `event-admin-channel`
+4. run `/setup status`
+5. confirm the new Event Administration channel is shown
+
+Changing the configured destination does not retroactively recreate organiser notifications that were definitively missed while the old channel was unavailable.
+
 ---
 
 # Confirmed Organiser Becomes Unavailable
@@ -4423,6 +4449,26 @@ Check:
 - the organiser workflow is still current
 
 If Organiser DMs are disabled, the administrative channel is the expected delivery route.
+
+---
+
+## Event Administration channel was deleted
+
+Authoritative organiser assignments and event state remain stored even if the configured administrative channel disappears.
+
+Check:
+
+- `/setup status`
+- audit output for failed organiser notification delivery
+- whether the configured channel still exists
+- whether an intended replacement channel has been configured
+- whether the bot can view and send in the replacement channel
+
+Do not manually alter organiser database state merely because an administrative notification could not be posted.
+
+A confirmed Discord `Unknown Channel` result is treated as a permanent destination failure.
+
+A transient or unexpected Discord error is not treated as proof that the channel was deleted.
 
 ---
 

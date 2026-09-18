@@ -1075,6 +1075,68 @@ The Event Administration channel is an administrative fallback and should remain
 
 ---
 
+## Deleted Event Administration channel behaviour
+
+Discord delivery failures are not all treated as equivalent.
+
+The organiser notification boundary distinguishes:
+
+```text
+Discord explicitly reports Unknown Channel (10003)
+        |
+        v
+destination is definitively unavailable
+```
+
+from:
+
+```text
+unexpected or transient Discord failure
+        |
+        v
+propagate error
+        |
+        v
+retain normal scheduler retry behaviour where applicable
+```
+
+A definitively deleted Event Administration channel is not replaced by another guessed destination.
+
+Authoritative organiser state remains in PostgreSQL.
+
+Depending on the workflow, a definitive delivery failure may therefore mean:
+
+```text
+organiser state transition
+        -> committed
+
+Discord presentation
+        -> unavailable
+
+scheduled action
+        -> completed with failure audit
+```
+
+By contrast, an unexpected transport or Discord error remains observable and leaves retryable scheduled work pending according to the normal scheduler backoff rules.
+
+This distinction applies to organiser administration delivery including:
+
+```text
+assignment fallback
+pending warnings
+general cover requests
+T-15 organiser safety cover
+T+0 missing-organiser alerts
+```
+
+For the T-15 safety path, authoritative retirement of unresolved nominated organisers occurs before Discord cover delivery.
+
+A transient delivery retry therefore does not resurrect those retired assignments.
+
+For the T+0 path, failed or transient notification delivery does not invent a replacement destination or corrupt the historical organiser state that led to general cover.
+
+---
+
 ## Organiser DM feature switch
 
 A server-level flag controls DM-first delivery.

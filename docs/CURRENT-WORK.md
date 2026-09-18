@@ -96,47 +96,92 @@ The planned reusable preset administration work is now complete.
 
 # Current Activity
 
-P0.8 preset administration UX is implemented.
+P0.10 Event Administration channel deletion behaviour is implemented and verified.
 
-The review focused on real administrator friction rather than adding another mutation or speculative abstraction.
+No production correction was required.
 
-The final UX rules are:
+The existing organiser notification boundary already distinguishes:
 
 ```text
-IDs remain explicit
-
-list discovers presets
-
-show discovers child IDs and complete reusable state
-
-inactive reusable state is visible
-
-temporarily unusable active state is warned about
-
-activation does not imply guaranteed applicability
-
-application errors explain how to repair the graph
-
-no-op operations remain clearly distinguished from mutations
+Discord 10003 Unknown Channel
+        -> definitive unavailable destination
 ```
 
-No autocomplete path was added.
-
-That remains a deliberate choice unless real usage demonstrates enough benefit to justify another deterministic guild-scoped lookup mechanism.
-
-The next known reliability work is:
+from:
 
 ```text
-P0.10
-Event Administration channel deletion behaviour
+unexpected or transient Discord failure
+        -> propagate
+        -> normal retry/error behaviour
+```
 
+Direct notification regressions now cover:
+
+```text
+assignment fallback
+pending organiser warning
+general cover
+missing-organiser-at-start alert
+```
+
+Scheduler regressions now cover the definitive-versus-transient matrix for:
+
+```text
+organiser warning
+
+ordinary general cover
+
+T-15 organiser safety cover
+
+T+0 missing-organiser alert
+```
+
+The scheduler contract is:
+
+```text
+definitive unavailable destination
+        |
+        v
+complete scheduled action
+        |
+        v
+record failure audit
+        |
+        v
+do not retry forever
+```
+
+versus:
+
+```text
+transient or unexpected failure
+        |
+        v
+return action to pending
+        |
+        v
+retain retry/backoff
+        |
+        v
+store last_error
+```
+
+PostgreSQL organiser state remains authoritative.
+
+For the T-15 safety path, unresolved nominated organisers may already have been retired before Discord delivery is attempted.
+
+A transient notification retry does not undo or recreate those assignments.
+
+No replacement administrative channel is guessed when the configured destination has been deleted.
+
+The next focused reliability review is:
+
+```text
 P0.11
-deleted organiser notification role behaviour
+Deleted organiser notification role
 ```
 
-These are focused organiser resilience reviews rather than another repository-wide reliability pass.
-
-After those checks, the next major feature area is event templates.
+After P0.11, event templates remain the next major feature area unless that review exposes another concrete reliability defect.
 
 ---
 
@@ -1326,41 +1371,36 @@ This remains planned.
 
 # Immediate Next Objective
 
-The role-request preset administration milestone is complete.
+P0.10 Event Administration channel deletion behaviour is complete.
 
 The next focused task is:
 
 ```text
-P0.10
-Event Administration channel deletion behaviour
+P0.11
+Deleted organiser notification role
 ```
 
-Review organiser notification and escalation behaviour when the configured private Event Administration channel no longer exists.
-
-The review must distinguish:
-
-```text
-Discord explicitly reports unknown/deleted channel
-```
-
-from:
-
-```text
-transient or unexpected Discord failure
-```
+Review organiser notification and escalation behaviour when the configured Event Organiser notification role no longer exists in Discord.
 
 Preserve these principles:
 
-- PostgreSQL organiser state remains authoritative
-- missing presentation must not corrupt assignment state
-- do not guess a replacement channel
-- transient failures should retain appropriate retry behaviour
-- unknown/deleted-channel handling must avoid duplicate side effects
-- unexpected failures must remain observable
+```text
+PostgreSQL organiser state remains authoritative
 
-After P0.10, review P0.11 deleted organiser notification-role behaviour.
+missing ping presentation must not corrupt assignment state
 
-Then proceed into P1 event templates unless those focused checks expose another concrete reliability defect.
+where appropriate, notification may degrade to an unpinged message
+
+@everyone must never become an accidental fallback
+
+unexpected Discord failures remain observable
+```
+
+The review should first inspect existing role-resolution behaviour and add regressions before changing production code.
+
+Do not perform another broad organiser or scheduler rewrite unless a concrete failing regression demonstrates one is required.
+
+After P0.11, proceed into P1 event templates unless the focused review exposes another specific reliability defect.
 
 ---
 
@@ -2020,8 +2060,18 @@ autocomplete was reviewed and deliberately not added
 
 automated unit/integration/coverage/typechecking is green
 
+P0.10 Event Administration channel deletion behaviour is verified
+
+Discord 10003 is treated as definitive destination loss
+
+unexpected Discord failures retain retry/error behaviour
+
+organiser state remains authoritative when notification presentation fails
+
+T-15 safety transitions remain committed across notification retries
+
 next production activity:
-    P0.10 Event Administration channel deletion behaviour
+    P0.11 Deleted organiser notification role
 ```
 
 Do not resume an older reliability or preset-foundation task simply because an older chat or stale document says it is still pending.
