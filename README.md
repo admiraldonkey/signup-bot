@@ -238,6 +238,7 @@ Current preset commands support:
 - replacing or explicitly clearing role-option qualification-role sets
 - adding request groups
 - editing existing request-group definitions, including metadata, destination behaviour, notification roles, signup requirements, and opening/closing timing
+- replacing a request group's complete ordered role-option mapping
 - applying a preset to an existing event
 - activating or deactivating a preset
 - activating or deactivating individual preset role options
@@ -261,9 +262,9 @@ Lifecycle controls are non-destructive:
 
 Deactivating an option can intentionally leave an active group with no active mapped options. The bot warns the administrator rather than silently changing neighbouring configuration. Preset application remains the final authoritative validator and rejects an unusable active configuration.
 
-Preset metadata, core role-option definition editing, qualification-role replacement, and request-group definition editing are implemented.
+Preset metadata, core role-option definition editing, qualification-role replacement, request-group definition editing, and ordered group-option mapping replacement are implemented.
 
-Group-option mapping editing remains planned before the preset administration workflow is considered complete.
+The remaining preset-administration work is a final administrator-facing UX review rather than missing definition-mutation capability.
 
 ### Announcements and reminders
 
@@ -716,6 +717,7 @@ The following substantial areas are implemented:
 - reusable role-request presets
 - ordered multi-role notifications for role-request groups
 - reusable preset request-group definition editing
+- ordered preset request-group option-mapping replacement
 - preset application with snapshot semantics
 - reversible preset, option, and group lifecycle controls
 - PostgreSQL-backed audit logging
@@ -724,9 +726,9 @@ The following substantial areas are implemented:
 
 ### Immediate development direction
 
-The current development focus is **completing editing of existing reusable role-request presets**.
+The planned reusable preset definition-editing operations are now implemented.
 
-Implemented editing now covers:
+Current editing support covers:
 
 - preset name and description metadata
 - role-option definitions
@@ -736,8 +738,11 @@ Implemented editing now covers:
 - ordered notification-role collections
 - signup requirements
 - opening and closing timing
+- complete ordered request-group option mappings
 
-The immediate next step is group-option mapping editing, followed by a final administrator-facing preset-editing UX review before moving on to event templates.
+The immediate next step is a final administrator-facing `/role-preset` UX review before moving on to event templates.
+
+That review should focus on consistency, discoverability, inactive-state presentation, warnings, and whether any existing ID-based workflow would materially benefit from a carefully-bounded usability improvement.
 
 ### Event templates
 

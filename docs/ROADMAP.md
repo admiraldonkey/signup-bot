@@ -92,9 +92,9 @@ Major established areas now include:
 - unit and real-PostgreSQL integration testing
 - regression coverage for important race conditions
 
-The immediate development focus is no longer establishing the preset subsystem.
+The reusable preset definition-management surface is now substantially complete.
 
-The next phase is to make existing reusable presets fully maintainable, then use the resulting stable configuration model as a foundation for event templates and recurring event generation.
+The immediate remaining preset task is a final administrator-facing UX review before using the stable reusable configuration model as a foundation for event templates and recurring event generation.
 
 ---
 
@@ -135,9 +135,9 @@ Recurrence should not be built before template-generated one-off events are reli
 
 Complete the administrator workflow for maintaining an existing reusable role-request preset without requiring it to be recreated.
 
-The current preset-management foundation, parent metadata editing, core role-option definition editing, qualification-role replacement, multi-role request-group notification foundation, and request-group definition editing are implemented.
+The current preset-management foundation, parent metadata editing, core role-option definition editing, qualification-role replacement, multi-role request-group notification foundation, request-group definition editing, and ordered group-option mapping replacement are implemented.
 
-The remaining work is group-option mapping editing and final administrator UX review.
+The remaining P0 preset work is the final administrator-facing UX review.
 
 ---
 
@@ -179,29 +179,37 @@ Existing event snapshots remain independent.
 
 ## P0.5 - Group-option mapping editing
 
-Administrators need to change which reusable role options appear in an existing preset request group.
+**Implemented**
 
-Likely requirements include:
+Administrators can replace the complete ordered role-option mapping for an existing reusable request group.
 
-- add an option to an existing group
-- remove an option from an existing group
-- replace the complete ordered option set
-- change mapping order
+The implemented operation:
 
-A complete replacement operation may be simpler and easier to validate than a large collection of individual mutation commands.
+- requires at least one mapped option
+- rejects duplicate option IDs
+- validates that every option belongs to the target preset
+- preserves the supplied order
+- treats order changes as real mutations
+- treats an identical ordered mapping as a no-op
+- allows inactive options to remain mapped
+- preserves independent option lifecycle state
+- preserves the ability to use one logical option in several groups
+- serialises against preset application through the parent lock
+- preserves existing event snapshots
 
-Whichever interface is selected must preserve:
+The administrator-facing command is:
 
-- the same logical option being usable in several groups
-- mapping order
-- independent option lifecycle state
-- group lifecycle state
+```text
+/role-preset group-options-set
+```
 
-The service should reject a final active group configuration that references no usable option where doing so would make the edit itself nonsensical.
+The chosen mutation model is complete ordered replacement rather than separate add/remove/reorder commands.
 
-Alternatively, if incomplete intermediate configuration is deliberately allowed for consistency with lifecycle editing, the command must warn clearly and preset application must remain the final validator.
+An active group whose mapped options are all inactive may remain stored temporarily.
 
-That choice should be recorded in `DECISIONS.md` when implemented.
+The command warns clearly, while preset application remains the final authoritative validator and rejects the unusable active graph.
+
+This decision is recorded in `DECISIONS.md`.
 
 ---
 
