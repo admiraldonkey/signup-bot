@@ -2251,6 +2251,22 @@ Use the `include-inactive` option when you need to inspect retired or temporaril
 
 The list includes useful summary information such as active option and group counts.
 
+The command output also points administrators to:
+
+```text
+/role-preset show preset-id:<id>
+```
+
+for discovering the option IDs and group IDs required by later administration commands.
+
+If the normal active-only list is empty, the bot points to:
+
+```text
+/role-preset list include-inactive:true
+```
+
+so inactive presets are not mistaken for deleted configuration.
+
 ---
 
 # `/role-preset show`
@@ -2281,6 +2297,24 @@ Use this command to inspect:
 - signup requirements
 - opening rules
 - closing rules
+
+Mapped inactive options are labelled as inactive.
+
+Request-group channel behaviour is displayed explicitly as either:
+
+```text
+Fixed
+```
+
+or:
+
+```text
+Apply-time guild default
+```
+
+An active request group with no active mapped role options is shown with a warning because preset application will reject that currently unusable graph.
+
+If only some mapped options are inactive, the view explains that those mappings remain stored but are omitted from new event snapshots while the options remain inactive.
 
 This is the main source for IDs required by later preset-administration commands.
 
@@ -3234,7 +3268,13 @@ Deactivating a preset:
 - preserves each child's own active or inactive state
 - leaves existing event snapshots unchanged
 
-Reactivating it restores application availability.
+Reactivating the preset makes it eligible for application again.
+
+It does not guarantee that the current child configuration is valid.
+
+Active role options and request groups must still form a usable reusable graph when the preset is applied.
+
+The command points administrators to `/role-preset show` after reactivation so the current definition can be reviewed.
 
 Requesting the state it already has returns a no-change result.
 
@@ -3261,7 +3301,11 @@ Deactivating an option:
 - does not alter existing event snapshots
 - does not automatically deactivate any group that uses it
 
-Reactivation restores the stored option.
+Reactivation restores the stored option to active lifecycle state.
+
+The option can then participate in future preset applications where it is mapped into an active request group.
+
+Its qualification rules and request-group mappings remain unchanged.
 
 ---
 
@@ -3279,9 +3323,9 @@ Until the configuration is repaired, preset application rejects the unusable act
 
 Possible repairs include:
 
-- reactivate the option
+- reactivate a mapped option with `/role-preset option-set-active`
 - use `/role-preset group-options-set` to replace the group's mapped options
-- deactivate the affected group
+- deactivate the affected group with `/role-preset group-set-active`
 
 ---
 
@@ -3309,13 +3353,17 @@ Deactivating a group:
 - leaves the option lifecycle states unchanged
 - leaves existing event snapshots unchanged
 
-Reactivation restores the stored reusable group.
+Reactivation restores the group's active lifecycle state and keeps its existing mappings and configuration.
+
+An active group is considered by future preset applications, but application still requires it to have at least one active mapped role option.
+
+The command points administrators to `/role-preset show` so the group's current mappings can be reviewed after reactivation.
 
 Repeatedly asking for the state it already has returns a no-change result.
 
 ---
 
-# Remaining Preset Administration Limitations
+# Preset Administration Status
 
 The current preset subsystem supports:
 
@@ -3336,13 +3384,29 @@ option-set-active
 group-set-active
 ```
 
-Preset parent metadata, core role-option definition editing, qualification-role replacement, request-group definition editing, and complete ordered group-option mapping replacement are implemented.
+The planned reusable preset definition-mutation surface and administrator-facing UX review are implemented.
 
-The planned reusable preset definition-mutation surface is therefore complete.
+Preset administration remains intentionally ID-based.
 
-The remaining near-term preset work is an administrator-facing command and UX review rather than another missing definition-edit operation.
+Use:
 
-For now, lifecycle controls are non-destructive and can be used to temporarily retire configuration without deleting it.
+```text
+/role-preset list
+```
+
+to discover preset IDs, then:
+
+```text
+/role-preset show
+```
+
+to discover option and group IDs and inspect the complete reusable graph.
+
+Autocomplete was deliberately not added during the UX review because the existing lookup flow is deterministic, guild-scoped, and does not require another query path.
+
+Lifecycle controls remain non-destructive and can be used to temporarily retire configuration without deleting it.
+
+Preset application remains the final authoritative validator of whether the currently active graph is usable.
 
 ---
 

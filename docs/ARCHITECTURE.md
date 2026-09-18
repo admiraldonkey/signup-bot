@@ -2943,11 +2943,62 @@ A true ordered no-op advances neither.
 
 ---
 
-# Remaining Preset Administration Review
+# Preset Administration UX
 
-The planned reusable preset definition-mutation operations are implemented.
+The final `/role-preset` administrator-facing UX review is implemented.
 
-The remaining near-term preset work is a final administrator-facing `/role-preset` UX review before event-template development.
+The command surface remains intentionally ID-based.
+
+Navigation follows:
+
+```text
+/role-preset list
+        |
+        v
+preset ID
+        |
+        v
+/role-preset show
+        |
+        v
+option IDs
+group IDs
+complete reusable definition
+```
+
+The review improved:
+
+- child-ID discoverability
+- inactive child presentation
+- inactive mapped-option presentation
+- warnings for active groups with no active mapped option
+- fixed-channel versus apply-time-default presentation
+- lifecycle activation wording
+- repair guidance after lifecycle changes
+- actionable preset-application validation errors
+- consistency of no-op and mutation responses
+
+Lifecycle activation messages deliberately distinguish:
+
+```text
+active
+```
+
+from:
+
+```text
+guaranteed valid for application
+```
+
+because activating a preset, option, or group does not by itself guarantee that the complete reusable graph is usable.
+
+Preset application remains the final authoritative graph validator.
+
+Autocomplete was not added.
+
+The existing `list -> show -> mutate` workflow provides cheap deterministic guild-scoped discovery, and the review did not identify enough benefit to justify another lookup path.
+
+This can be revisited if real administration experience demonstrates meaningful friction.
 
 ---
 
@@ -4242,11 +4293,11 @@ Event templates
 Recurring event generation
 ```
 
-The reusable preset foundation, application/scheduling, lifecycle management, and planned definition-editing operations are implemented.
+The reusable preset foundation, application/scheduling, lifecycle management, planned definition-editing operations, and final administrator-facing UX review are implemented.
 
-A final preset administration UX review remains before moving into event templates.
+The remaining known organiser deletion-behaviour reliability checks may be completed before or alongside the start of event-template development.
 
-Event templates and recurrence remain planned.
+Event templates and recurrence remain the next major feature areas.
 
 This sequence is deliberate because templates should depend on stable reusable configuration and reusable event-creation services rather than creating parallel implementations.
 

@@ -329,7 +329,7 @@ describe("/role-preset apply", () => {
         reason: "no_active_options",
       },
 
-      "Role-request preset #7 has no active role options.",
+      "Role-request preset #7 has no active role options. Use `/role-preset show preset-id:7` to inspect the preset, then reactivate a suitable option with `/role-preset option-set-active`.",
     ],
 
     [
@@ -339,7 +339,7 @@ describe("/role-preset apply", () => {
         reason: "no_active_groups",
       },
 
-      "Role-request preset #7 has no active request groups.",
+      "Role-request preset #7 has no active request groups. Use `/role-preset show preset-id:7` to inspect the preset, then reactivate a suitable group with `/role-preset group-set-active`.",
     ],
 
     [
@@ -401,7 +401,7 @@ describe("/role-preset apply", () => {
         presetGroupId: 21,
       },
 
-      "Preset group #21 has no active role options.",
+      "Preset group #21 has no active mapped role options. Use `/role-preset show preset-id:7` to inspect it, then reactivate a mapped option with `/role-preset option-set-active`, replace its mappings with `/role-preset group-options-set`, or deactivate the group with `/role-preset group-set-active`.",
     ],
 
     [

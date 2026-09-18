@@ -1192,7 +1192,7 @@ export const commandDefinitions = [
 
   new SlashCommandBuilder()
     .setName("role-preset")
-    .setDescription("Creates and inspects reusable event role-request presets.")
+    .setDescription("Creates and manages reusable event role-request presets.")
 
     .addSubcommand((subcommand) =>
       subcommand

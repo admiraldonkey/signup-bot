@@ -347,7 +347,8 @@ describe("/role-preset option-set-active", () => {
         "✅ Preset role option **Captain** (#11) is now active.",
 
         "",
-        "It is available for future event snapshots again.",
+
+        "It can now participate in future preset applications where it is mapped into an active request group.",
 
         "Existing qualification rules and request-group mappings are unchanged.",
       ].join("\n"),

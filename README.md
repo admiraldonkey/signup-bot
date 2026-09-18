@@ -718,6 +718,7 @@ The following substantial areas are implemented:
 - ordered multi-role notifications for role-request groups
 - reusable preset request-group definition editing
 - ordered preset request-group option-mapping replacement
+- administrator-facing role-preset UX review and lifecycle guidance
 - preset application with snapshot semantics
 - reversible preset, option, and group lifecycle controls
 - PostgreSQL-backed audit logging
@@ -726,23 +727,41 @@ The following substantial areas are implemented:
 
 ### Immediate development direction
 
-The planned reusable preset definition-editing operations are now implemented.
+The planned reusable role-request preset administration surface is now implemented.
 
-Current editing support covers:
+The final administrator-facing UX review improved:
 
-- preset name and description metadata
-- role-option definitions
-- qualification-role collections
-- request-group metadata and description
-- request-group destination behaviour
-- ordered notification-role collections
-- signup requirements
-- opening and closing timing
-- complete ordered request-group option mappings
+- preset, option, and group ID discoverability
+- inactive child and mapped-option presentation
+- warnings for temporarily unusable active configuration
+- fixed-channel versus apply-time-default presentation
+- lifecycle activation wording
+- repair guidance after lifecycle changes
+- actionable preset-application validation errors
+- consistency of mutation and no-op responses
 
-The immediate next step is a final administrator-facing `/role-preset` UX review before moving on to event templates.
+Preset administration remains intentionally ID-based.
 
-That review should focus on consistency, discoverability, inactive-state presentation, warnings, and whether any existing ID-based workflow would materially benefit from a carefully-bounded usability improvement.
+The existing workflow:
+
+```text
+/role-preset list
+        |
+        v
+preset ID
+        |
+        v
+/role-preset show
+        |
+        v
+option and group IDs
+```
+
+provides deterministic guild-scoped discovery without adding a separate autocomplete lookup path.
+
+Autocomplete can be reconsidered if real administration experience shows meaningful friction, but it is not required merely to avoid entering IDs.
+
+The next focused work is the remaining organiser deletion-behaviour reliability review described in the roadmap, followed by event-template development.
 
 ### Event templates
 
