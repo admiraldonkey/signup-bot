@@ -131,6 +131,10 @@ describe("/role-preset command", () => {
 
     expect(definition).toBeDefined();
 
+    expect(definition?.description).toBe(
+      "Creates and manages reusable event role-request presets.",
+    );
+
     expect(definition?.options?.map((option) => option.name)).toEqual([
       "create",
       "edit",
@@ -3274,6 +3278,10 @@ describe("/role-preset command", () => {
 
     expect(content).toContain("**Naval** (#7)");
 
+    expect(content).toContain(
+      "Use `/role-preset show preset-id:<id>` to see role-option and request-group IDs.",
+    );
+
     expect(content).toContain("5 active options");
 
     expect(content).toContain("2 active groups");
@@ -3349,6 +3357,26 @@ describe("/role-preset command", () => {
 
             qualificationRoles: [],
           },
+
+          {
+            id: 13,
+
+            key: "retired-role",
+
+            displayName: "Retired Role",
+
+            description: null,
+
+            requestRestriction: "open",
+
+            capacity: null,
+
+            sortOrder: 2,
+
+            active: false,
+
+            qualificationRoles: [],
+          },
         ],
 
         groups: [
@@ -3397,7 +3425,30 @@ describe("/role-preset command", () => {
 
             active: true,
 
-            presetOptionIds: [12, 11],
+            presetOptionIds: [12, 13, 11],
+          },
+          {
+            id: 22,
+
+            name: "Retired Roles",
+
+            description: null,
+
+            channelId: EXPLICIT_CHANNEL_ID,
+
+            notificationRoles: [],
+
+            requiresPositiveSignup: false,
+
+            openMinutesBeforeStart: 30,
+
+            closeMinutesBeforeStart: -10,
+
+            sortOrder: 1,
+
+            active: true,
+
+            presetOptionIds: [13],
           },
         ],
       },
@@ -3435,7 +3486,7 @@ describe("/role-preset command", () => {
 
     expect(content).toContain("T-60 → T+10");
 
-    expect(content).toContain("Guild default at application");
+    expect(content).toContain("Apply-time guild default");
 
     expect(content).toContain(`<@&${NAVAL_NOTIFY_ROLE_ID}>`);
 
@@ -3443,7 +3494,23 @@ describe("/role-preset command", () => {
 
     expect(content).toContain(`<@&${RESERVE_NOTIFY_ROLE_ID}>`);
 
-    expect(content).toContain("Carpenter (#12), Captain (#11)");
+    expect(content).toContain(
+      "Carpenter (#12), Retired Role (#13) — inactive, Captain (#11)",
+    );
+
+    expect(content).toContain(
+      "Inactive mapped options remain stored but are omitted from new event snapshots while inactive.",
+    );
+
+    expect(content).toContain("**Retired Roles** (#22)");
+
+    expect(content).toContain(`Channel: Fixed — <#${EXPLICIT_CHANNEL_ID}>`);
+
+    expect(content).toContain(
+      "Active group has no active mapped role options. Preset application will reject this group until it is repaired or deactivated.",
+    );
+
+    expect(content).toContain("**Retired Role** (#13) — inactive");
   });
 
   it("treats another guild's or missing preset as unavailable", async () => {

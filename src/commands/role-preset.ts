@@ -2958,6 +2958,8 @@ async function listPresets(
       ? "## Role-request presets"
       : "## Active role-request presets",
 
+    "Use `/role-preset show preset-id:<id>` to see role-option and request-group IDs.",
+
     "",
   ];
 
@@ -3218,8 +3220,8 @@ function formatPresetGroupValidationError(
 }
 
 function formatPresetDetails(preset: RoleRequestPresetDetails): string {
-  const optionNameById = new Map(
-    preset.options.map((option) => [option.id, option.displayName]),
+  const optionById = new Map(
+    preset.options.map((option) => [option.id, option]),
   );
 
   const lines: string[] = [
@@ -3288,8 +3290,8 @@ function formatPresetDetails(preset: RoleRequestPresetDetails): string {
       lines.push(
         `  Channel: ${
           group.channelId
-            ? `<#${group.channelId}>`
-            : "Guild default at application"
+            ? `Fixed — <#${group.channelId}>`
+            : "Apply-time guild default"
         }`,
       );
 
@@ -3315,11 +3317,15 @@ function formatPresetDetails(preset: RoleRequestPresetDetails): string {
       );
 
       const mappedOptions = group.presetOptionIds.map((optionId) => {
-        const optionName = optionNameById.get(optionId);
+        const option = optionById.get(optionId);
 
-        return optionName
-          ? `${optionName} (#${optionId})`
-          : `Unknown option (#${optionId})`;
+        if (!option) {
+          return `Unknown option (#${optionId})`;
+        }
+
+        return `${option.displayName} (#${optionId})${
+          option.active ? "" : " — inactive"
+        }`;
       });
 
       lines.push(
@@ -3327,6 +3333,28 @@ function formatPresetDetails(preset: RoleRequestPresetDetails): string {
           mappedOptions.length > 0 ? mappedOptions.join(", ") : "None"
         }`,
       );
+
+      const mappedOptionStates = group.presetOptionIds.map((optionId) =>
+        optionById.get(optionId),
+      );
+
+      const activeMappedOptionCount = mappedOptionStates.filter(
+        (option) => option?.active === true,
+      ).length;
+
+      const inactiveMappedOptionCount = mappedOptionStates.filter(
+        (option) => option?.active === false,
+      ).length;
+
+      if (group.active && activeMappedOptionCount === 0) {
+        lines.push(
+          "  ⚠ Active group has no active mapped role options. Preset application will reject this group until it is repaired or deactivated.",
+        );
+      } else if (inactiveMappedOptionCount > 0) {
+        lines.push(
+          "  ⚠ Inactive mapped options remain stored but are omitted from new event snapshots while inactive.",
+        );
+      }
 
       if (group.description) {
         lines.push(`  ${truncate(group.description, 300)}`);
