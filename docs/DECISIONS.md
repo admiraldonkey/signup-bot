@@ -3200,6 +3200,95 @@ Keeping group-option mappings outside the request-group definition edit gives th
 
 ---
 
+## D131 - Preset request-group option mappings use complete ordered replacement
+
+**Status: Current**
+
+Editing the option mappings of an existing reusable request group uses complete ordered replacement.
+
+Conceptually:
+
+```text
+current mapping
+    -> [A, B, C]
+
+replacement request
+    -> [C, A]
+
+final mapping
+    -> [C, A]
+```
+
+The operation does not model separate append, remove, or reorder commands.
+
+The supplied order becomes authoritative.
+
+At least one mapped option is required.
+
+Duplicate option IDs are rejected.
+
+Every mapped option must belong to the same preset as the target request group.
+
+## Lifecycle independence
+
+Mapping membership and preset option lifecycle are independent.
+
+Inactive preset options may remain mapped or be included in a replacement.
+
+The command warns when inactive options are present.
+
+If an active group has no active mapped options, the configuration may remain stored temporarily, but preset application rejects that unusable active graph.
+
+This matches existing lifecycle behaviour where deactivating an option preserves its structural mappings.
+
+## Shared options
+
+The same logical preset option may be mapped into more than one request group.
+
+Replacing one group's mapping does not change mappings belonging to another group.
+
+## Concurrency
+
+Mapping replacement participates in the preset graph locking contract:
+
+```text
+preset application
+    -> role_request_presets FOR SHARE
+
+mapping replacement
+    -> role_request_presets FOR UPDATE
+```
+
+The replacement is validated completely before existing mapping rows are deleted and recreated inside the transaction.
+
+Application therefore snapshots either the complete mapping before replacement or the complete mapping after replacement.
+
+Existing event-level snapshots remain independent.
+
+## No-op semantics
+
+Mapping equality is order-sensitive.
+
+```text
+[A, B] -> [A, B]
+    unchanged
+
+[A, B] -> [B, A]
+    updated
+```
+
+A true no-op does not advance group or parent preset timestamps and does not generate a false mutation audit.
+
+### Reason
+
+A request-group mapping is an ordered relationship rather than an unordered set.
+
+Complete replacement makes final-state validation, ordering, transactionality, and concurrency behaviour easier to reason about than a sequence of separate add/remove/reorder operations.
+
+Allowing inactive mapped options also keeps structural configuration separate from lifecycle state and avoids destructive side effects when options are temporarily disabled.
+
+---
+
 # Summary of Highest-Risk Invariants
 
 The following decisions are especially easy to break during an otherwise well-intentioned refactor.
@@ -3306,6 +3395,15 @@ request-group edit
     -> explicit clear is destructive intent
     -> notification roles replace complete ordered collection
     -> group-option mappings remain separate
+    -> existing event snapshot remains independent
+
+group-option mapping edit
+    -> complete ordered replacement
+    -> at least one mapping remains
+    -> inactive options may remain mapped
+    -> option lifecycle remains independent
+    -> same option may appear in several groups
+    -> application sees complete old or complete new mapping
     -> existing event snapshot remains independent
 ```
 

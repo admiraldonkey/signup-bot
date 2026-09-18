@@ -1,6 +1,6 @@
 # Administrator Guide
 
-**Last reconciled:** 17 September 2026
+**Last reconciled:** 18 September 2026
 
 ## Purpose
 
@@ -2840,6 +2840,154 @@ A true no-op returns a no-change result rather than pretending a mutation occurr
 
 ---
 
+# `/role-preset group-options-set`
+
+Replaces the complete ordered role-option mapping for an existing reusable preset request group.
+
+Use the preset option IDs and group ID shown by:
+
+```text
+/role-preset show
+```
+
+Example:
+
+```text
+/role-preset group-options-set
+preset-id: 7
+group-id: 21
+role-1: 12
+role-2: 11
+```
+
+The resulting reusable group mapping becomes exactly:
+
+```text
+1. option #12
+2. option #11
+```
+
+The supplied order is authoritative.
+
+This command does not append to or partially modify the existing mapping.
+
+It replaces the complete ordered mapping in one operation.
+
+## Required mappings
+
+At least one mapped preset role option is required.
+
+`role-1` is therefore mandatory.
+
+Additional mappings can be supplied through:
+
+```text
+role-2
+role-3
+role-4
+role-5
+role-6
+role-7
+role-8
+role-9
+role-10
+```
+
+There is deliberately no `clear-all` mode because a request group with no mapped role option is not a meaningful reusable group definition.
+
+Duplicate option IDs are rejected.
+
+Every supplied option must belong to the same preset as the target group.
+
+## Inactive options
+
+Inactive preset options may remain in, or be added to, a reusable group mapping.
+
+Mapping membership and option lifecycle are separate configuration concerns.
+
+For example:
+
+```text
+group mapping
+    Captain
+    Carpenter
+
+Carpenter
+    inactive
+```
+
+does not destroy the Carpenter mapping.
+
+If inactive options are included in a replacement, the command warns the administrator.
+
+If an active group ends up with only inactive mapped options, the reusable configuration is still stored, but preset application rejects that currently unusable active graph until it is repaired.
+
+Possible repairs include:
+
+```text
+reactivate a mapped option
+replace the group mapping
+deactivate the group
+```
+
+## Shared options
+
+The same logical preset option may be mapped into more than one reusable request group.
+
+Replacing one group's mappings does not remove that option from any other group.
+
+## No-op behaviour
+
+Supplying the same option IDs in the same order is a true no-op.
+
+For example:
+
+```text
+current:
+    11
+    12
+
+requested:
+    11
+    12
+```
+
+does not rewrite rows or advance mutation timestamps.
+
+Changing only the order is a real mutation:
+
+```text
+current:
+    11
+    12
+
+requested:
+    12
+    11
+```
+
+## Snapshot behaviour
+
+Mapping replacement changes reusable source configuration for future preset applications.
+
+It does not rewrite event-level request-group mappings which were already created from the preset.
+
+Preset application and mapping replacement participate in the normal preset parent locking contract:
+
+```text
+preset application
+    -> role_request_presets FOR SHARE
+
+group mapping replacement
+    -> role_request_presets FOR UPDATE
+```
+
+Application therefore observes either the complete mapping before replacement or the complete mapping after replacement.
+
+It cannot snapshot a partially-replaced ordered mapping.
+
+---
+
 # Preset Group Channel Behaviour
 
 A preset group can either use:
@@ -3059,7 +3207,7 @@ This applies to:
 - option deactivation
 - group deactivation
 - future preset editing
-- future mapping changes
+- later group-option mapping replacements
 
 To inspect the event's resulting operational state, use the event-level commands rather than assuming the source preset still describes it exactly.
 
@@ -3132,7 +3280,7 @@ Until the configuration is repaired, preset application rejects the unusable act
 Possible repairs include:
 
 - reactivate the option
-- add another suitable option to the group once editing support exists
+- use `/role-preset group-options-set` to replace the group's mapped options
 - deactivate the affected group
 
 ---
@@ -3181,17 +3329,18 @@ option-edit
 option-qualifications-set
 group-add
 group-edit
+group-options-set
 apply
 set-active
 option-set-active
 group-set-active
 ```
 
-Preset parent metadata, core role-option definition editing, qualification-role replacement, and request-group definition editing are implemented.
+Preset parent metadata, core role-option definition editing, qualification-role replacement, request-group definition editing, and complete ordered group-option mapping replacement are implemented.
 
-The remaining existing-definition editing work is group-option mapping administration.
+The planned reusable preset definition-mutation surface is therefore complete.
 
-That work must continue to use the existing preset mutation-lock and snapshot-independence rules.
+The remaining near-term preset work is an administrator-facing command and UX review rather than another missing definition-edit operation.
 
 For now, lifecycle controls are non-destructive and can be used to temporarily retire configuration without deleting it.
 
@@ -4147,7 +4296,7 @@ Shown by:
 /role-preset show
 ```
 
-Used when editing a reusable request-group definition or changing its lifecycle.
+Used when editing a reusable request-group definition, replacing its option mappings, or changing its lifecycle.
 
 When a command rejects a perfectly real ID, confirm that it is the correct **kind** of ID before assuming the bot has developed a philosophical objection to integers.
 

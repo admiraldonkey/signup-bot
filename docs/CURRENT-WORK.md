@@ -1,6 +1,6 @@
 # Current Development State
 
-**Last reconciled:** 17 September 2026
+**Last reconciled:** 18 September 2026
 
 This document is the short-form handoff for the current development checkpoint.
 
@@ -21,110 +21,123 @@ If this document becomes substantially longer because completed work keeps being
 
 ## Current Repository Checkpoint
 
-The current development branch completes P0.4 reusable preset request-group definition editing.
+The current development branch completes P0.5 reusable preset request-group option-mapping editing.
 
-Administrators can now edit an existing preset group's:
-
-```text
-name
-description
-destination channel behaviour
-ordered notification-role collection
-positive-signup requirement
-opening timing
-closing timing
-```
-
-The edit operation supports explicit clearing of:
+Administrators can now replace an existing group's complete ordered preset-option mapping through:
 
 ```text
-description
-fixed channel override
-notification-role collection
+/role-preset group-options-set
 ```
 
-Omitted fields remain unchanged.
+The chosen domain operation is:
 
-Notification roles use complete ordered replacement semantics rather than incremental add/remove behaviour.
+```text
+complete ordered replacement
+```
 
-Group-option mappings deliberately remain outside P0.4.
+rather than separate add/remove/reorder mutations.
 
-The service preserves the established preset concurrency contract:
+The supplied order becomes authoritative.
+
+The operation requires at least one mapping and rejects duplicate or foreign-preset option IDs.
+
+Inactive preset options may remain mapped.
+
+Mapping membership and option lifecycle are deliberately independent.
+
+The same logical preset option may also remain mapped into several different request groups.
+
+If an active request group ends up with no active mapped option, the command warns but preserves the reusable configuration.
+
+Preset application remains the final authoritative validator and rejects that currently unusable active graph.
+
+The service preserves the preset concurrency contract:
 
 ```text
 preset application
     -> role_request_presets FOR SHARE
 
-request-group edit
+mapping replacement
     -> role_request_presets FOR UPDATE
 ```
 
-Deterministic integration coverage verifies that an in-flight application snapshots either the complete pre-edit group or the complete post-edit group.
+Deterministic integration coverage verifies that application sees either the complete old ordered mapping or the complete new ordered mapping.
 
-It cannot observe a partially-mutated request-group definition.
+Existing event snapshots remain independent from later mapping changes.
 
-Existing event snapshots remain independent from later reusable group edits.
+The planned reusable preset definition-mutation operations are now implemented.
 
-The next preset-editing feature is:
+The next preset-focused activity is:
 
 ```text
-P0.5
-group-option mapping editing
+P0.8
+final administrator-facing preset UX review
 ```
 
 ---
 
 # Current Activity
 
-P0.4 preset request-group editing is implemented.
+P0.5 group-option mapping editing is implemented.
 
-The final service contract is:
-
-```text
-scalar field omitted
-    -> preserve existing value
-
-nullable scalar explicitly cleared
-    -> store null
-
-notificationRoles omitted
-    -> preserve complete ordered collection
-
-notificationRoles: []
-    -> explicitly clear collection
-
-notificationRoles: [A, B, ...]
-    -> replace complete ordered collection
-```
-
-Editable group definition state includes:
+The final mutation model is:
 
 ```text
-name
-description
-channel override
-notification roles
-requires-positive-signup
-open offset
-close offset
+requested option IDs
+        |
+        v
+validate complete mapping
+        |
+        v
+preset parent FOR UPDATE
+        |
+        v
+compare ordered current state
+        |
+        +---- identical order
+        |       -> unchanged
+        |
+        v
+delete old mapping rows
+        |
+        v
+insert complete ordered replacement
+        |
+        v
+commit
 ```
 
-Group-option mappings are intentionally not part of this operation.
+Important behavioural rules are:
 
-Request-group editing:
+```text
+at least one mapped option required
 
-- locks the preset parent `FOR UPDATE`
-- enforces guild ownership
-- enforces child ownership
-- permits inactive presets to be edited
-- validates the final opening/closing window
-- treats a genuine no-op as unchanged
-- preserves existing event snapshots
-- keeps group-option mappings untouched
+ordering is authoritative
 
-The Discord command exposes explicit clear controls so omitted optional command inputs cannot accidentally destroy reusable configuration.
+inactive options may remain mapped
 
-The next implementation slice is P0.5 group-option mapping editing.
+option lifecycle is independent
+
+same option may belong to several groups
+
+existing event snapshots remain independent
+
+preset application remains final graph validator
+```
+
+The Discord command is:
+
+```text
+/role-preset group-options-set
+```
+
+It exposes up to ten ordered preset role-option IDs.
+
+Inactive selections are allowed and surfaced with warnings rather than rejected.
+
+An active group containing only inactive mapped options may therefore exist temporarily, but cannot be applied until repaired or deactivated.
+
+The next work is a final `/role-preset` administrator UX review rather than another missing preset definition mutation.
 
 ---
 
@@ -1314,52 +1327,39 @@ This remains planned.
 
 # Immediate Next Objective
 
-P0.4 preset request-group editing is complete.
+The planned reusable preset definition-editing operations are implemented.
 
-The immediate next implementation area is:
-
-```text
-P0.5
-group-option mapping editing
-```
-
-An existing reusable request group currently has ordered mappings to preset role options.
-
-P0.5 needs to provide administrator-facing mutation of that ordered relationship.
-
-The design still needs an explicit decision on whether the preferred operation should be:
+The immediate next area is:
 
 ```text
-incremental add/remove
+P0.8
+Preset editing Discord UX review
 ```
 
-or:
+Review the `/role-preset` command surface as a whole rather than adding another domain mutation.
 
-```text
-complete ordered replacement
-```
+The review should consider:
 
-A complete replacement operation is likely attractive because ordering and final-graph validation can be reasoned about atomically, but that choice should be made deliberately before implementation.
+- consistency between create and edit commands
+- clarity of success and no-op responses
+- ID discoverability
+- inactive preset/option/group presentation
+- warnings for temporarily unusable reusable configuration
+- fixed-channel versus apply-time-default wording
+- whether carefully-scoped autocomplete would materially improve administration
+- whether command names and option names remain coherent as a complete surface
 
-Whatever interface is selected must preserve:
+Do not add autocomplete merely because ID entry is inelegant.
 
-- preset parent `FOR UPDATE`
-- application `FOR SHARE`
-- guild ownership
-- child ownership
-- inactive-preset editability
-- idempotent no-op behaviour
-- existing event snapshot independence
-- deterministic mapping order
-- reuse of the same logical preset option across multiple groups
+Any lookup feature should remain cheap, deterministic, guild-scoped, and maintainable.
 
-Preset application remains the final authoritative validator of the reusable graph.
+After this UX review and its final preset-administration smoke test, the intended major feature direction is event templates.
 
 ---
 
 # Expected Preset-Editing Development Order
 
-A sensible initial sequence is:
+Current status:
 
 ```text
 completed:
@@ -1368,16 +1368,17 @@ completed:
     role-option editing
     qualification-role editing
     request-group definition editing
-
-next:
     group-option mapping editing
 
-then:
+next:
     complete command UX review
     full preset administration manual smoke test
+
+then:
+    event templates
 ```
 
-The exact split into commits or PRs should remain reviewable rather than forcing the entire edit subsystem into one enormous change.
+The mutation surface should now be treated as established unless the UX review exposes a concrete missing operation.
 
 ---
 
@@ -1995,10 +1996,22 @@ request-group editing serialises against preset application through the parent l
 
 existing event request-group snapshots remain independent after reusable group edits
 
+preset group-option mapping replacement is implemented
+
+mapping replacement uses complete ordered semantics
+
+inactive preset options may remain mapped
+
+option lifecycle and mapping membership remain independent
+
+mapping replacement serialises against preset application
+
+existing event mapping snapshots remain independent
+
 automated unit/integration/coverage/typechecking is green
 
-next production feature:
-    P0.5 group-option mapping editing
+next production activity:
+    P0.8 final preset administration UX review
 ```
 
 Do not resume an older reliability or preset-foundation task simply because an older chat or stale document says it is still pending.

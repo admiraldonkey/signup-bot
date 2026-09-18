@@ -20,6 +20,7 @@ import {
   editPresetRequestGroup,
   editPresetRoleOption,
   editRoleRequestPreset,
+  replacePresetRequestGroupOptions,
   replacePresetRoleOptionQualificationRoles,
   setRoleRequestPresetActive,
   setRoleRequestPresetGroupActive,
@@ -109,6 +110,11 @@ export async function handleRolePresetCommand(
 
     case "group-edit":
       await editPresetGroup(interaction, configuration.guildId);
+
+      return;
+
+    case "group-options-set":
+      await setPresetGroupOptions(interaction, configuration.guildId);
 
       return;
 
@@ -2106,6 +2112,264 @@ async function editPresetGroup(
   }
 }
 
+async function setPresetGroupOptions(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const presetId = interaction.options.getInteger("preset-id", true);
+
+  const presetGroupId = interaction.options.getInteger("group-id", true);
+
+  const presetOptionIds = [
+    interaction.options.getInteger("role-1", true),
+
+    interaction.options.getInteger("role-2"),
+
+    interaction.options.getInteger("role-3"),
+
+    interaction.options.getInteger("role-4"),
+
+    interaction.options.getInteger("role-5"),
+
+    interaction.options.getInteger("role-6"),
+
+    interaction.options.getInteger("role-7"),
+
+    interaction.options.getInteger("role-8"),
+
+    interaction.options.getInteger("role-9"),
+
+    interaction.options.getInteger("role-10"),
+  ].filter((value): value is number => value !== null);
+
+  const duplicateOptionId = findDuplicateNumber(presetOptionIds);
+
+  if (duplicateOptionId !== null) {
+    await interaction.editReply({
+      content: `Role option #${duplicateOptionId} was selected more than once. Each option can appear only once in a preset request group.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  /*
+   * Read current administration state for friendly validation and display
+   * names.
+   *
+   * The replacement service repeats authoritative ownership and membership
+   * validation under the preset FOR UPDATE lock.
+   *
+   * Unlike group-add, inactive options are deliberately valid mappings here.
+   */
+  const presetResult = await getRoleRequestPresetDetails({
+    guildDatabaseId,
+
+    presetId,
+  });
+
+  if (presetResult.kind === "not_found") {
+    await interaction.editReply({
+      content: `Role-request preset #${presetId} was not found in this server.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const currentGroup = presetResult.preset.groups.find(
+    (group) => group.id === presetGroupId,
+  );
+
+  if (!currentGroup) {
+    await interaction.editReply({
+      content: `Request group #${presetGroupId} was not found in role-request preset #${presetId}.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  /*
+   * Mapping membership and lifecycle are independent.
+   *
+   * Validate against every option in the preset, including inactive options.
+   */
+  const presetOptionById = new Map(
+    presetResult.preset.options.map((option) => [option.id, option]),
+  );
+
+  const unavailableOptionId = presetOptionIds.find(
+    (presetOptionId) => !presetOptionById.has(presetOptionId),
+  );
+
+  if (unavailableOptionId !== undefined) {
+    await interaction.editReply({
+      content: `Role option #${unavailableOptionId} was not found in role-request preset #${presetId}. Use \`/role-preset show preset-id:${presetId}\` to check the available option IDs.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  /*
+   * These objects are for administrator-facing names only.
+   *
+   * The service result remains authoritative for actual stored ordering and
+   * lifecycle status.
+   */
+  const displayOptionById = presetOptionById;
+
+  const result = await replacePresetRequestGroupOptions({
+    guildDatabaseId,
+
+    presetId,
+
+    presetGroupId,
+
+    presetOptionIds,
+  });
+
+  switch (result.kind) {
+    case "updated": {
+      const inactiveOptionIdSet = new Set(result.inactivePresetOptionIds);
+
+      const mappedOptions = result.presetOptionIds.map((presetOptionId) => {
+        const option = displayOptionById.get(presetOptionId);
+
+        const label = option
+          ? `${option.displayName} (#${presetOptionId})`
+          : `Role option #${presetOptionId}`;
+
+        return inactiveOptionIdSet.has(presetOptionId)
+          ? `${label} — inactive`
+          : label;
+      });
+
+      const lines = [
+        `✅ Replaced role-option mappings for request group **${result.group.name}** (#${result.group.id}) in preset #${result.group.presetId}.`,
+
+        `**Mapped options:** ${mappedOptions.join(", ")}`,
+      ];
+
+      if (
+        result.group.active &&
+        result.inactivePresetOptionIds.length === result.presetOptionIds.length
+      ) {
+        lines.push(
+          "",
+          "⚠️ This active request group currently has no active mapped role options. Preset application will reject it until at least one mapped option is activated or the group is deactivated.",
+        );
+      } else if (result.inactivePresetOptionIds.length > 0) {
+        lines.push(
+          "",
+          "⚠️ Inactive options remain mapped in the reusable preset but are omitted from new event request-group mappings while inactive.",
+        );
+      }
+
+      await interaction.editReply({
+        content: lines.join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: guildDatabaseId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "role_preset.group.options.set",
+
+        outcome: "success",
+
+        summary: `Replaced role-option mappings for request group "${result.group.name}" (#${result.group.id}) in role-request preset #${result.group.presetId}.`,
+
+        targetType: "role_request_preset_group",
+
+        targetId: String(result.group.id),
+
+        details: {
+          presetId: result.group.presetId,
+
+          presetOptionIds: [...result.presetOptionIds],
+
+          inactivePresetOptionIds: [...result.inactivePresetOptionIds],
+
+          active: result.group.active,
+        },
+      });
+
+      return;
+    }
+
+    case "unchanged":
+      await interaction.editReply({
+        content: `Preset request group **${result.group.name}** (#${result.group.id}) already has the requested ordered role-option mapping. No changes were made.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "preset_not_found":
+      await interaction.editReply({
+        content: `Role-request preset #${presetId} was not found in this server.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "group_not_found":
+      await interaction.editReply({
+        content: `Request group #${presetGroupId} was not found in role-request preset #${presetId}.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "invalid_input":
+      await interaction.editReply({
+        content: formatPresetGroupOptionMappingValidationError(
+          result.reason,
+
+          presetId,
+
+          result.presetOptionId,
+        ),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
+}
+
 async function applyPreset(
   interaction: CachedCommandInteraction,
   guildDatabaseId: number,
@@ -2807,6 +3071,38 @@ function formatInvalidPresetApplicationError(
       return presetGroupId
         ? `Preset group #${presetGroupId} does not open before it closes.`
         : `Role-request preset #${presetId} contains an invalid request-group window.`;
+  }
+}
+
+function formatPresetGroupOptionMappingValidationError(
+  reason:
+    | "no_options"
+    | "invalid_option_id"
+    | "duplicate_option"
+    | "option_not_found",
+
+  presetId: number,
+
+  presetOptionId?: number,
+): string {
+  switch (reason) {
+    case "no_options":
+      return "A preset request group must contain at least one mapped role option.";
+
+    case "invalid_option_id":
+      return presetOptionId
+        ? `Role option #${presetOptionId} is not a valid preset option ID.`
+        : "One of the supplied preset role-option IDs is invalid.";
+
+    case "duplicate_option":
+      return presetOptionId
+        ? `Role option #${presetOptionId} was selected more than once. Each option can appear only once in a preset request group.`
+        : "A preset role option was selected more than once.";
+
+    case "option_not_found":
+      return presetOptionId
+        ? `Role option #${presetOptionId} was not found in role-request preset #${presetId}. Use \`/role-preset show preset-id:${presetId}\` to check the available option IDs.`
+        : `One or more supplied role options were not found in preset #${presetId}.`;
   }
 }
 

@@ -11,6 +11,7 @@ import {
   editPresetRequestGroup,
   editPresetRoleOption,
   replacePresetRoleOptionQualificationRoles,
+  replacePresetRequestGroupOptions,
   editRoleRequestPreset,
   setRoleRequestPresetActive,
   setRoleRequestPresetGroupActive,
@@ -4704,6 +4705,360 @@ describe("role-request preset administration service", () => {
       kind: "invalid_input",
 
       reason: "no_changes_requested",
+    });
+  });
+
+  it("atomically replaces the complete ordered preset request-group option mapping", async () => {
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const group = await createEditablePresetGroup(
+      pool,
+      fixture.guildId,
+      fixture.presetId,
+      options.captainId,
+      options.carpenterId,
+    );
+
+    const result = await replacePresetRequestGroupOptions({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: group.id,
+
+      presetOptionIds: [options.carpenterId, options.captainId],
+    });
+
+    expect(result).toEqual({
+      kind: "updated",
+
+      group: {
+        id: group.id,
+
+        presetId: fixture.presetId,
+
+        name: "Naval Roles",
+
+        active: true,
+      },
+
+      presetOptionIds: [options.carpenterId, options.captainId],
+
+      inactivePresetOptionIds: [],
+    });
+
+    const stored = await pool.query<{
+      preset_option_id: number;
+
+      sort_order: number;
+    }>(
+      `
+      SELECT
+        "preset_option_id",
+        "sort_order"
+      FROM
+        "role_request_preset_group_options"
+      WHERE
+        "group_id" = $1
+      ORDER BY
+        "sort_order"
+    `,
+      [group.id],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        preset_option_id: options.carpenterId,
+
+        sort_order: 0,
+      },
+
+      {
+        preset_option_id: options.captainId,
+
+        sort_order: 1,
+      },
+    ]);
+  });
+
+  it("treats an equivalent ordered preset request-group mapping as a no-op", async () => {
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const group = await createEditablePresetGroup(
+      pool,
+      fixture.guildId,
+      fixture.presetId,
+      options.captainId,
+      options.carpenterId,
+    );
+
+    const fixedGroupUpdatedAt = new Date("2026-01-01T00:00:00Z");
+
+    const fixedPresetUpdatedAt = new Date("2026-01-02T00:00:00Z");
+
+    await pool.query(
+      `
+      UPDATE
+        "role_request_preset_groups"
+      SET
+        "updated_at" = $2
+      WHERE
+        "id" = $1
+    `,
+      [group.id, fixedGroupUpdatedAt],
+    );
+
+    await pool.query(
+      `
+      UPDATE
+        "role_request_presets"
+      SET
+        "updated_at" = $2
+      WHERE
+        "id" = $1
+    `,
+      [fixture.presetId, fixedPresetUpdatedAt],
+    );
+
+    const result = await replacePresetRequestGroupOptions({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: group.id,
+
+      presetOptionIds: [options.captainId, options.carpenterId],
+    });
+
+    expect(result.kind).toBe("unchanged");
+
+    const timestamps = await pool.query<{
+      group_updated_at: Date;
+
+      preset_updated_at: Date;
+    }>(
+      `
+      SELECT
+        "group"."updated_at"
+          AS "group_updated_at",
+
+        "preset"."updated_at"
+          AS "preset_updated_at"
+      FROM
+        "role_request_preset_groups"
+          AS "group"
+      INNER JOIN
+        "role_request_presets"
+          AS "preset"
+      ON
+        "preset"."id" =
+          "group"."preset_id"
+      WHERE
+        "group"."id" = $1
+    `,
+      [group.id],
+    );
+
+    expect(timestamps.rows).toEqual([
+      {
+        group_updated_at: fixedGroupUpdatedAt,
+
+        preset_updated_at: fixedPresetUpdatedAt,
+      },
+    ]);
+  });
+
+  it("rejects an empty preset request-group option replacement", async () => {
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const group = await createEditablePresetGroup(
+      pool,
+      fixture.guildId,
+      fixture.presetId,
+      options.captainId,
+      options.carpenterId,
+    );
+
+    const result = await replacePresetRequestGroupOptions({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: group.id,
+
+      presetOptionIds: [],
+    });
+
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "no_options",
+    });
+  });
+
+  it("rejects duplicate options in a preset request-group mapping replacement", async () => {
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const group = await createEditablePresetGroup(
+      pool,
+      fixture.guildId,
+      fixture.presetId,
+      options.captainId,
+      options.carpenterId,
+    );
+
+    const result = await replacePresetRequestGroupOptions({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: group.id,
+
+      presetOptionIds: [options.captainId, options.captainId],
+    });
+
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "duplicate_option",
+
+      presetOptionId: options.captainId,
+    });
+  });
+
+  it("allows an inactive preset option to remain in a replacement group mapping", async () => {
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const group = await createEditablePresetGroup(
+      pool,
+      fixture.guildId,
+      fixture.presetId,
+      options.captainId,
+      options.carpenterId,
+    );
+
+    await pool.query(
+      `
+      UPDATE
+        "role_request_preset_options"
+      SET
+        "active" = false
+      WHERE
+        "id" = $1
+    `,
+      [options.carpenterId],
+    );
+
+    const result = await replacePresetRequestGroupOptions({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: group.id,
+
+      presetOptionIds: [options.carpenterId, options.captainId],
+    });
+
+    expect(result).toEqual({
+      kind: "updated",
+
+      group: {
+        id: group.id,
+
+        presetId: fixture.presetId,
+
+        name: "Naval Roles",
+
+        active: true,
+      },
+
+      presetOptionIds: [options.carpenterId, options.captainId],
+
+      inactivePresetOptionIds: [options.carpenterId],
+    });
+  });
+
+  it("does not allow one guild to replace another guild's preset group mappings", async () => {
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const group = await createEditablePresetGroup(
+      pool,
+      fixture.guildId,
+      fixture.presetId,
+      options.captainId,
+      options.carpenterId,
+    );
+
+    const otherGuildId = await createGuild(pool, OTHER_DISCORD_GUILD_ID);
+
+    const result = await replacePresetRequestGroupOptions({
+      guildDatabaseId: otherGuildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: group.id,
+
+      presetOptionIds: [options.captainId],
+    });
+
+    expect(result).toEqual({
+      kind: "preset_not_found",
+    });
+  });
+
+  it("rejects replacing mappings through a different preset", async () => {
+    const fixture = await createPresetFixture(pool);
+
+    const options = await createPresetOptions(pool, fixture.presetId);
+
+    const group = await createEditablePresetGroup(
+      pool,
+      fixture.guildId,
+      fixture.presetId,
+      options.captainId,
+      options.carpenterId,
+    );
+
+    const otherPreset = await createRoleRequestPreset({
+      guildDatabaseId: fixture.guildId,
+
+      name: "Linebattle",
+
+      description: null,
+
+      createdByUserId: ADMIN_USER_ID,
+    });
+
+    expect(otherPreset.kind).toBe("created");
+
+    if (otherPreset.kind !== "created") {
+      throw new Error("The secondary preset was not created.");
+    }
+
+    const result = await replacePresetRequestGroupOptions({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: otherPreset.preset.id,
+
+      presetGroupId: group.id,
+
+      presetOptionIds: [options.captainId],
+    });
+
+    expect(result).toEqual({
+      kind: "group_not_found",
     });
   });
 

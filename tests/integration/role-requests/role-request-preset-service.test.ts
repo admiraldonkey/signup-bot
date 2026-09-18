@@ -10,6 +10,7 @@ import {
   editPresetRequestGroup,
   editRoleRequestPreset,
   editPresetRoleOption,
+  replacePresetRequestGroupOptions,
   replacePresetRoleOptionQualificationRoles,
 } from "../../../src/role-requests/role-request-preset-admin-service.js";
 
@@ -1518,6 +1519,219 @@ describe("role-request preset application service", () => {
     }
   });
 
+  it("serialises preset request-group mapping replacement behind an in-flight preset application", async () => {
+    // Arrange
+    const fixture = await createFixture(pool);
+
+    const blockerClient = await pool.connect();
+
+    let blockerReleased = false;
+
+    let applicationPromise: ReturnType<
+      typeof applyRoleRequestPresetToEvent
+    > | null = null;
+
+    let replacementPromise: ReturnType<
+      typeof replacePresetRequestGroupOptions
+    > | null = null;
+
+    try {
+      await blockerClient.query("BEGIN");
+
+      /*
+       * Application takes FOR SHARE on the parent preset before checking the
+       * application table.
+       *
+       * Pausing it here keeps that shared parent lock alive while mapping
+       * replacement attempts to acquire FOR UPDATE on the same preset row.
+       */
+      await blockerClient.query(`
+      LOCK TABLE "event_role_request_preset_applications"
+      IN ACCESS EXCLUSIVE MODE
+    `);
+
+      applicationPromise = applyRoleRequestPresetToEvent({
+        guildDatabaseId: fixture.guildId,
+
+        eventId: fixture.eventId,
+
+        presetId: fixture.presetId,
+
+        appliedByUserId: ADMIN_USER_ID,
+      });
+
+      await waitForBlockedDatabaseQuery(
+        pool,
+        '%from "event_role_request_preset_applications"%',
+      );
+
+      let replacementResolved = false;
+
+      replacementPromise = replacePresetRequestGroupOptions({
+        guildDatabaseId: fixture.guildId,
+
+        presetId: fixture.presetId,
+
+        presetGroupId: fixture.generalPresetGroupId,
+
+        /*
+         * Replace the original [Captain, Carpenter] mapping with only
+         * Carpenter.
+         */
+        presetOptionIds: [fixture.carpenterPresetOptionId],
+      }).then((result) => {
+        replacementResolved = true;
+
+        return result;
+      });
+
+      /*
+       * Mapping replacement takes FOR UPDATE on the parent preset.
+       *
+       * It must therefore remain blocked until application finishes its
+       * complete snapshot and releases FOR SHARE.
+       */
+      await waitForBlockedDatabaseQuery(
+        pool,
+        '%from "role_request_presets"%for update%',
+      );
+
+      expect(replacementResolved).toBe(false);
+
+      await blockerClient.query("COMMIT");
+
+      blockerReleased = true;
+
+      const applicationResult = await applicationPromise;
+
+      const replacementResult = await replacementPromise;
+
+      // Assert
+      expect(applicationResult.kind).toBe("applied");
+
+      expect(replacementResult).toEqual({
+        kind: "updated",
+
+        group: {
+          id: fixture.generalPresetGroupId,
+
+          presetId: fixture.presetId,
+
+          name: "Naval Roles",
+
+          active: true,
+        },
+
+        presetOptionIds: [fixture.carpenterPresetOptionId],
+
+        inactivePresetOptionIds: [],
+      });
+
+      /*
+       * Application acquired FOR SHARE first, so the event snapshot must
+       * contain the complete original ordered mapping.
+       */
+      const eventMappings = await pool.query<{
+        preset_option_id: number | null;
+
+        sort_order: number;
+      }>(
+        `
+        SELECT
+          "event_option"."source_role_request_preset_option_id"
+            AS "preset_option_id",
+
+          "mapping"."sort_order"
+        FROM
+          "role_request_group_options" AS "mapping"
+        INNER JOIN
+          "role_request_groups" AS "group"
+        ON
+          "group"."id" = "mapping"."group_id"
+        INNER JOIN
+          "event_role_options" AS "event_option"
+        ON
+          "event_option"."id" =
+            "mapping"."event_role_option_id"
+        WHERE
+          "group"."event_id" = $1
+          AND
+          "group"."source_role_request_preset_group_id" = $2
+        ORDER BY
+          "mapping"."sort_order"
+      `,
+        [fixture.eventId, fixture.generalPresetGroupId],
+      );
+
+      expect(eventMappings.rows).toEqual([
+        {
+          preset_option_id: fixture.captainPresetOptionId,
+
+          sort_order: 0,
+        },
+
+        {
+          preset_option_id: fixture.carpenterPresetOptionId,
+
+          sort_order: 1,
+        },
+      ]);
+
+      /*
+       * Once application commits, the reusable source should contain the
+       * complete replacement mapping rather than a partial intermediate state.
+       */
+      const sourceMappings = await pool.query<{
+        preset_option_id: number;
+
+        sort_order: number;
+      }>(
+        `
+        SELECT
+          "preset_option_id",
+          "sort_order"
+        FROM
+          "role_request_preset_group_options"
+        WHERE
+          "group_id" = $1
+        ORDER BY
+          "sort_order"
+      `,
+        [fixture.generalPresetGroupId],
+      );
+
+      expect(sourceMappings.rows).toEqual([
+        {
+          preset_option_id: fixture.carpenterPresetOptionId,
+
+          sort_order: 0,
+        },
+      ]);
+    } finally {
+      if (!blockerReleased) {
+        await blockerClient.query("ROLLBACK").catch(() => undefined);
+      }
+
+      blockerClient.release();
+
+      /*
+       * If a lock assertion fails early, allow any started work to settle
+       * before the next beforeEach resets the shared integration database.
+       */
+      const pendingOperations: Promise<unknown>[] = [];
+
+      if (applicationPromise) {
+        pendingOperations.push(applicationPromise);
+      }
+
+      if (replacementPromise) {
+        pendingOperations.push(replacementPromise);
+      }
+
+      await Promise.allSettled(pendingOperations);
+    }
+  });
+
   it("keeps applied event state independent from later preset edits", async () => {
     // Arrange
     const fixture = await createFixture(pool);
@@ -1634,17 +1848,41 @@ describe("role-request preset application service", () => {
       closeMinutesBeforeStart: -30,
     });
 
-    await pool.query(
-      `
-        DELETE FROM
-          "role_request_preset_group_options"
-        WHERE
-          "group_id" = $1
-          AND
-          "preset_option_id" = $2
-      `,
-      [fixture.generalPresetGroupId, fixture.carpenterPresetOptionId],
-    );
+    const mappingReplacementResult = await replacePresetRequestGroupOptions({
+      guildDatabaseId: fixture.guildId,
+
+      presetId: fixture.presetId,
+
+      presetGroupId: fixture.generalPresetGroupId,
+
+      /*
+       * Original reusable mapping is:
+       *
+       * Captain -> sort 0
+       * Carpenter -> sort 1
+       *
+       * Replace it completely with Carpenter only.
+       */
+      presetOptionIds: [fixture.carpenterPresetOptionId],
+    });
+
+    expect(mappingReplacementResult).toEqual({
+      kind: "updated",
+
+      group: {
+        id: fixture.generalPresetGroupId,
+
+        presetId: fixture.presetId,
+
+        name: "Naval Roles",
+
+        active: true,
+      },
+
+      presetOptionIds: [fixture.carpenterPresetOptionId],
+
+      inactivePresetOptionIds: [],
+    });
 
     // Assert
     const captain = await pool.query<{
@@ -1812,29 +2050,75 @@ describe("role-request preset application service", () => {
     ]);
 
     const copiedGeneralMappings = await pool.query<{
-      count: number;
+      preset_option_id: number | null;
+
+      sort_order: number;
     }>(
       `
-        SELECT
-          COUNT(*)::int AS "count"
-        FROM
-          "role_request_group_options"
-        INNER JOIN
-          "role_request_groups"
-        ON
-          "role_request_groups"."id" =
-            "role_request_group_options"."group_id"
-        WHERE
-          "role_request_groups"."event_id" = $1
-          AND
-          "role_request_groups"."source_role_request_preset_group_id" = $2
-      `,
+    SELECT
+      "event_option"."source_role_request_preset_option_id"
+        AS "preset_option_id",
+
+      "mapping"."sort_order"
+    FROM
+      "role_request_group_options" AS "mapping"
+    INNER JOIN
+      "role_request_groups" AS "group"
+    ON
+      "group"."id" = "mapping"."group_id"
+    INNER JOIN
+      "event_role_options" AS "event_option"
+    ON
+      "event_option"."id" =
+        "mapping"."event_role_option_id"
+    WHERE
+      "group"."event_id" = $1
+      AND
+      "group"."source_role_request_preset_group_id" = $2
+    ORDER BY
+      "mapping"."sort_order"
+  `,
       [fixture.eventId, fixture.generalPresetGroupId],
     );
 
     expect(copiedGeneralMappings.rows).toEqual([
       {
-        count: 2,
+        preset_option_id: fixture.captainPresetOptionId,
+
+        sort_order: 0,
+      },
+
+      {
+        preset_option_id: fixture.carpenterPresetOptionId,
+
+        sort_order: 1,
+      },
+    ]);
+
+    const currentPresetMappings = await pool.query<{
+      preset_option_id: number;
+
+      sort_order: number;
+    }>(
+      `
+    SELECT
+      "preset_option_id",
+      "sort_order"
+    FROM
+      "role_request_preset_group_options"
+    WHERE
+      "group_id" = $1
+    ORDER BY
+      "sort_order"
+  `,
+      [fixture.generalPresetGroupId],
+    );
+
+    expect(currentPresetMappings.rows).toEqual([
+      {
+        preset_option_id: fixture.carpenterPresetOptionId,
+
+        sort_order: 0,
       },
     ]);
   });

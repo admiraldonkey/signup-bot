@@ -2012,18 +2012,30 @@ PostgreSQL remains authoritative.
 
 # Role-Request Notification Roles
 
-A request group can have an optional role to notify when it first opens.
+A request group may have zero to four ordered notification roles.
 
-The role ID and display-name snapshot are stored.
+Notification audience is independent from role qualification.
 
-At publication time:
+At publication time, each configured role is resolved independently.
 
-- a missing role does not destroy the group
-- an unmentionable role is not pinged unless permissions allow it
-- `@everyone` is not treated as a normal configurable role notification
-- the group may still publish without the notification ping
+A role may therefore produce:
 
-A presentation failure should not erase valid persistent configuration.
+```text
+pinged
+missing-role
+not-mentionable
+everyone-not-allowed
+```
+
+One unusable notification role does not suppress other usable roles.
+
+Only successfully-resolved roles are included in the opening message mentions.
+
+The request group itself may still publish when one or more optional notification pings cannot be delivered.
+
+Refresh and deleted-message recovery do not replay the original opening notification pings.
+
+Persistent request-group configuration remains authoritative even if Discord notification presentation degrades.
 
 ---
 
@@ -2805,11 +2817,137 @@ It is not a propagation mechanism for events which already received the preset.
 
 ---
 
-# Remaining Preset Editing
+# Preset Group-Option Mapping Editing
 
-The remaining child-graph editing work is group-option mapping administration.
+Reusable request-group option mappings support complete ordered replacement.
 
-That operation must continue to use the same parent `FOR UPDATE` locking contract and preserve existing event snapshots.
+The authoritative mapping table is:
+
+```text
+role_request_preset_group_options
+```
+
+Each mapping stores:
+
+```text
+preset request-group ID
+preset option ID
+sort order
+```
+
+A request group must retain at least one mapping.
+
+## Complete ordered replacement
+
+Mapping administration uses:
+
+```text
+[current complete mapping]
+        |
+        v
+validate requested complete mapping
+        |
+        v
+delete existing rows
+        |
+        v
+insert complete replacement
+        |
+        v
+commit
+```
+
+The supplied order becomes authoritative.
+
+For example:
+
+```text
+before:
+    Captain
+    Carpenter
+
+replacement:
+    Carpenter
+    Captain
+```
+
+is a real mutation because ordering changed even though membership did not.
+
+Supplying the same IDs in the same order is a true no-op.
+
+## Lifecycle independence
+
+Preset option lifecycle and mapping membership are separate concerns.
+
+An inactive option may remain mapped.
+
+This preserves reusable structure when an option is temporarily disabled.
+
+The same preset option may also be mapped into several different request groups.
+
+Replacing one group's mapping does not mutate any other group's mappings or the option's own lifecycle state.
+
+An active group whose mapped options are all inactive may therefore exist temporarily.
+
+That incomplete reusable state is allowed deliberately.
+
+Preset application remains the final authoritative validator and rejects an active group that has no usable active mapped option.
+
+## Ownership
+
+Every requested option must belong to the same preset as the target group.
+
+The mutation validates:
+
+```text
+guild owns preset
+group belongs to preset
+every option belongs to preset
+```
+
+before destructive replacement begins.
+
+## Locking and snapshot semantics
+
+Mapping replacement locks the preset parent:
+
+```text
+role_request_presets FOR UPDATE
+```
+
+Preset application uses:
+
+```text
+role_request_presets FOR SHARE
+```
+
+Application therefore sees either:
+
+```text
+complete old mapping
+```
+
+or:
+
+```text
+complete new mapping
+```
+
+and never a partially-replaced ordered relationship.
+
+Existing event-level request-group mappings remain unchanged after later reusable mapping replacement.
+
+A real replacement advances group and parent preset timestamps.
+
+A true ordered no-op advances neither.
+
+---
+
+# Remaining Preset Administration Review
+
+The planned reusable preset definition-mutation operations are implemented.
+
+The remaining near-term preset work is a final administrator-facing `/role-preset` UX review before event-template development.
 
 ---
 
@@ -4104,9 +4242,9 @@ Event templates
 Recurring event generation
 ```
 
-The first three stages are implemented.
+The reusable preset foundation, application/scheduling, lifecycle management, and planned definition-editing operations are implemented.
 
-Preset editing is the immediate next feature area.
+A final preset administration UX review remains before moving into event templates.
 
 Event templates and recurrence remain planned.
 
