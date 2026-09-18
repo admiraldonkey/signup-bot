@@ -356,29 +356,61 @@ A few known reliability questions remain worth addressing before or alongside te
 
 ## P0.10 - Event Administration channel deletion behaviour
 
-Review organiser notification and escalation behaviour when the configured Event Administration channel has been deleted.
+**Implemented and verified**
 
-Distinguish carefully between:
+Organiser notification and scheduler behaviour has been reviewed for a configured Event Administration channel that no longer exists.
+
+The existing production boundary correctly distinguishes:
 
 ```text
-Discord explicitly reports unknown/deleted channel
+Discord 10003 Unknown Channel
 ```
 
-and:
+from:
 
 ```text
 transient or unexpected Discord failure
 ```
 
-Do not silently treat every failed fetch/send as permanent channel deletion.
+A confirmed unknown/deleted channel is treated as a definitive unavailable destination.
 
-Desired behaviour should:
+The bot does not guess another channel.
 
-- preserve authoritative organiser state
-- avoid duplicate side effects
-- retain scheduler retry where a transient error may recover
-- provide useful audit/error visibility
-- not guess an unrelated replacement channel
+Unexpected failures propagate so retryable scheduled work keeps its normal retry/backoff behaviour.
+
+Regression coverage now verifies this distinction for:
+
+```text
+assignment DM fallback
+organiser pending warnings
+ordinary general-cover requests
+T-15 organiser safety cover
+T+0 missing-organiser alerts
+```
+
+Scheduler coverage verifies:
+
+```text
+definitive delivery failure
+    -> action completes
+    -> failure is auditable
+    -> no pointless retry
+```
+
+and:
+
+```text
+transient delivery failure
+    -> action returns to pending
+    -> retry/backoff remains active
+    -> last_error remains observable
+```
+
+For safety-cover workflows, authoritative PostgreSQL organiser transitions remain committed independently from later Discord delivery failure.
+
+No production correction was required.
+
+The review established the existing behaviour with explicit unit and PostgreSQL-backed integration regressions.
 
 ---
 
