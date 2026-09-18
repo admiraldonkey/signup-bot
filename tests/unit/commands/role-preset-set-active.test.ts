@@ -250,7 +250,10 @@ describe("/role-preset set-active", () => {
         "✅ Role-request preset **Naval** (#7) is now active.",
 
         "",
-        "It can now be applied to new events.",
+
+        "The preset is eligible for application again, provided its current active role options and request groups form a valid reusable configuration.",
+
+        "Use `/role-preset show preset-id:7` to review its current definition.",
 
         "Individual role options and request groups keep their existing active/inactive states.",
       ].join("\n"),

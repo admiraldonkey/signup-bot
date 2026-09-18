@@ -2611,7 +2611,9 @@ async function setPresetActive(
 
               "",
 
-              "It can now be applied to new events.",
+              "The preset is eligible for application again, provided its current active role options and request groups form a valid reusable configuration.",
+
+              `Use \`/role-preset show preset-id:${result.preset.id}\` to review its current definition.`,
 
               "Individual role options and request groups keep their existing active/inactive states.",
             ].join("\n")
@@ -2709,7 +2711,7 @@ async function setPresetOptionActive(
 
             "",
 
-            "It is available for future event snapshots again.",
+            "It can now participate in future preset applications where it is mapped into an active request group.",
 
             "Existing qualification rules and request-group mappings are unchanged.",
           ]
@@ -2734,7 +2736,7 @@ async function setPresetOptionActive(
           "",
           "These groups remain active, but now have no active role options.",
           "The preset cannot be applied successfully while an active group has no active role options.",
-          "Reactivate a mapped option, add another active option to the group, or deactivate the affected group.",
+          "Reactivate a mapped option with `/role-preset option-set-active`, replace the group's mappings with `/role-preset group-options-set`, or deactivate the affected group with `/role-preset group-set-active`.",
         );
       }
 
@@ -2843,7 +2845,11 @@ async function setPresetGroupActive(
 
               "",
 
-              "It is available for future event snapshots again.",
+              "It will be considered by future preset applications.",
+
+              "Preset application still requires the group to have at least one active mapped role option.",
+
+              `Use \`/role-preset show preset-id:${result.group.presetId}\` to review its current mappings.`,
 
               "Its existing role-option mappings and configuration are unchanged.",
             ].join("\n")
@@ -2943,7 +2949,7 @@ async function listPresets(
     await interaction.editReply({
       content: includeInactive
         ? "This server has no role-request presets."
-        : "This server has no active role-request presets.",
+        : "This server has no active role-request presets. Use `/role-preset list include-inactive:true` to inspect inactive presets.",
 
       allowedMentions: {
         parse: [],
@@ -3037,10 +3043,10 @@ function formatInvalidPresetApplicationError(
 ): string {
   switch (reason) {
     case "no_active_options":
-      return `Role-request preset #${presetId} has no active role options.`;
+      return `Role-request preset #${presetId} has no active role options. Use \`/role-preset show preset-id:${presetId}\` to inspect the preset, then reactivate a suitable option with \`/role-preset option-set-active\`.`;
 
     case "no_active_groups":
-      return `Role-request preset #${presetId} has no active request groups.`;
+      return `Role-request preset #${presetId} has no active request groups. Use \`/role-preset show preset-id:${presetId}\` to inspect the preset, then reactivate a suitable group with \`/role-preset group-set-active\`.`;
 
     case "invalid_request_restriction":
       return presetOptionId
@@ -3066,8 +3072,8 @@ function formatInvalidPresetApplicationError(
 
     case "active_group_without_active_options":
       return presetGroupId
-        ? `Preset group #${presetGroupId} has no active role options.`
-        : `Role-request preset #${presetId} contains an active request group with no active role options.`;
+        ? `Preset group #${presetGroupId} has no active mapped role options. Use \`/role-preset show preset-id:${presetId}\` to inspect it, then reactivate a mapped option with \`/role-preset option-set-active\`, replace its mappings with \`/role-preset group-options-set\`, or deactivate the group with \`/role-preset group-set-active\`.`
+        : `Role-request preset #${presetId} contains an active request group with no active mapped role options. Use \`/role-preset show preset-id:${presetId}\` to identify and repair or deactivate the affected group.`;
 
     case "invalid_group_window":
       return presetGroupId

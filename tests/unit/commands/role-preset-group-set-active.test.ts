@@ -270,7 +270,11 @@ describe("/role-preset group-set-active", () => {
 
         "",
 
-        "It is available for future event snapshots again.",
+        "It will be considered by future preset applications.",
+
+        "Preset application still requires the group to have at least one active mapped role option.",
+
+        "Use `/role-preset show preset-id:7` to review its current mappings.",
 
         "Its existing role-option mappings and configuration are unchanged.",
       ].join("\n"),
