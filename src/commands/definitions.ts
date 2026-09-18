@@ -1844,6 +1844,96 @@ export const commandDefinitions = [
     )
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("group-options-set")
+        .setDescription(
+          "Replaces the ordered role-option mappings for a preset request group.",
+        )
+        /*
+         * At least one mapped option is always required.
+         *
+         * The supplied order becomes authoritative.
+         */
+        .addIntegerOption((option) =>
+          option
+            .setName("preset-id")
+            .setDescription("Preset ID shown by /role-preset list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("group-id")
+            .setDescription("Request-group ID shown by /role-preset show.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("role-1")
+            .setDescription(
+              "First preset role-option ID in the replacement order.",
+            )
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("role-2")
+            .setDescription("Additional preset role-option ID.")
+            .setMinValue(1),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("role-3")
+            .setDescription("Additional preset role-option ID.")
+            .setMinValue(1),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("role-4")
+            .setDescription("Additional preset role-option ID.")
+            .setMinValue(1),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("role-5")
+            .setDescription("Additional preset role-option ID.")
+            .setMinValue(1),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("role-6")
+            .setDescription("Additional preset role-option ID.")
+            .setMinValue(1),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("role-7")
+            .setDescription("Additional preset role-option ID.")
+            .setMinValue(1),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("role-8")
+            .setDescription("Additional preset role-option ID.")
+            .setMinValue(1),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("role-9")
+            .setDescription("Additional preset role-option ID.")
+            .setMinValue(1),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("role-10")
+            .setDescription("Additional preset role-option ID.")
+            .setMinValue(1),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("apply")
         .setDescription(
           "Snapshots a reusable role-request preset onto an existing event.",
