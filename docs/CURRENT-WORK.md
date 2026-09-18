@@ -21,123 +21,122 @@ If this document becomes substantially longer because completed work keeps being
 
 ## Current Repository Checkpoint
 
-The current development branch completes P0.5 reusable preset request-group option-mapping editing.
+The current development branch completes P0.8, the final administrator-facing `/role-preset` UX review.
 
-Administrators can now replace an existing group's complete ordered preset-option mapping through:
-
-```text
-/role-preset group-options-set
-```
-
-The chosen domain operation is:
+The reusable preset administration surface now includes:
 
 ```text
-complete ordered replacement
+create
+edit
+list
+show
+
+option-add
+option-edit
+option-qualifications-set
+option-set-active
+
+group-add
+group-edit
+group-options-set
+group-set-active
+
+apply
+set-active
 ```
 
-rather than separate add/remove/reorder mutations.
+The final UX review did not add new domain mutations.
 
-The supplied order becomes authoritative.
+It improved navigation and presentation around the existing authoritative services.
 
-The operation requires at least one mapping and rejects duplicate or foreign-preset option IDs.
-
-Inactive preset options may remain mapped.
-
-Mapping membership and option lifecycle are deliberately independent.
-
-The same logical preset option may also remain mapped into several different request groups.
-
-If an active request group ends up with no active mapped option, the command warns but preserves the reusable configuration.
-
-Preset application remains the final authoritative validator and rejects that currently unusable active graph.
-
-The service preserves the preset concurrency contract:
+Notable changes include:
 
 ```text
-preset application
-    -> role_request_presets FOR SHARE
+/role-preset
+    "creates and manages"
+    rather than only "creates and inspects"
 
-mapping replacement
-    -> role_request_presets FOR UPDATE
+/role-preset list
+    points administrators to /role-preset show for child IDs
+    points to include-inactive:true when no active presets exist
+
+/role-preset show
+    labels inactive mapped options
+    distinguishes Fixed from Apply-time guild default channels
+    warns when an active group has no active mapped option
+
+lifecycle activation
+    describes eligibility rather than guaranteeing successful application
+
+preset application failures
+    provide concrete repair commands
 ```
 
-Deterministic integration coverage verifies that application sees either the complete old ordered mapping or the complete new ordered mapping.
+Preset administration remains intentionally ID-based.
 
-Existing event snapshots remain independent from later mapping changes.
-
-The planned reusable preset definition-mutation operations are now implemented.
-
-The next preset-focused activity is:
+The supported lookup flow is:
 
 ```text
-P0.8
-final administrator-facing preset UX review
+list
+    -> preset ID
+    -> show
+    -> option/group IDs
+    -> mutation command
 ```
+
+Autocomplete was reviewed but not added because this flow is deterministic, guild-scoped, and does not justify another lookup path at current administration scale.
+
+Preset application remains the final authoritative validator of the complete active graph.
+
+No schema, persistence, snapshot, or concurrency contracts changed during P0.8.
+
+The planned reusable preset administration work is now complete.
 
 ---
 
 # Current Activity
 
-P0.5 group-option mapping editing is implemented.
+P0.8 preset administration UX is implemented.
 
-The final mutation model is:
+The review focused on real administrator friction rather than adding another mutation or speculative abstraction.
 
-```text
-requested option IDs
-        |
-        v
-validate complete mapping
-        |
-        v
-preset parent FOR UPDATE
-        |
-        v
-compare ordered current state
-        |
-        +---- identical order
-        |       -> unchanged
-        |
-        v
-delete old mapping rows
-        |
-        v
-insert complete ordered replacement
-        |
-        v
-commit
-```
-
-Important behavioural rules are:
+The final UX rules are:
 
 ```text
-at least one mapped option required
+IDs remain explicit
 
-ordering is authoritative
+list discovers presets
 
-inactive options may remain mapped
+show discovers child IDs and complete reusable state
 
-option lifecycle is independent
+inactive reusable state is visible
 
-same option may belong to several groups
+temporarily unusable active state is warned about
 
-existing event snapshots remain independent
+activation does not imply guaranteed applicability
 
-preset application remains final graph validator
+application errors explain how to repair the graph
+
+no-op operations remain clearly distinguished from mutations
 ```
 
-The Discord command is:
+No autocomplete path was added.
+
+That remains a deliberate choice unless real usage demonstrates enough benefit to justify another deterministic guild-scoped lookup mechanism.
+
+The next known reliability work is:
 
 ```text
-/role-preset group-options-set
+P0.10
+Event Administration channel deletion behaviour
+
+P0.11
+deleted organiser notification role behaviour
 ```
 
-It exposes up to ten ordered preset role-option IDs.
+These are focused organiser resilience reviews rather than another repository-wide reliability pass.
 
-Inactive selections are allowed and surfaced with warnings rather than rejected.
-
-An active group containing only inactive mapped options may therefore exist temporarily, but cannot be applied until repaired or deactivated.
-
-The next work is a final `/role-preset` administrator UX review rather than another missing preset definition mutation.
+After those checks, the next major feature area is event templates.
 
 ---
 
@@ -1327,58 +1326,69 @@ This remains planned.
 
 # Immediate Next Objective
 
-The planned reusable preset definition-editing operations are implemented.
+The role-request preset administration milestone is complete.
 
-The immediate next area is:
+The next focused task is:
 
 ```text
-P0.8
-Preset editing Discord UX review
+P0.10
+Event Administration channel deletion behaviour
 ```
 
-Review the `/role-preset` command surface as a whole rather than adding another domain mutation.
+Review organiser notification and escalation behaviour when the configured private Event Administration channel no longer exists.
 
-The review should consider:
+The review must distinguish:
 
-- consistency between create and edit commands
-- clarity of success and no-op responses
-- ID discoverability
-- inactive preset/option/group presentation
-- warnings for temporarily unusable reusable configuration
-- fixed-channel versus apply-time-default wording
-- whether carefully-scoped autocomplete would materially improve administration
-- whether command names and option names remain coherent as a complete surface
+```text
+Discord explicitly reports unknown/deleted channel
+```
 
-Do not add autocomplete merely because ID entry is inelegant.
+from:
 
-Any lookup feature should remain cheap, deterministic, guild-scoped, and maintainable.
+```text
+transient or unexpected Discord failure
+```
 
-After this UX review and its final preset-administration smoke test, the intended major feature direction is event templates.
+Preserve these principles:
+
+- PostgreSQL organiser state remains authoritative
+- missing presentation must not corrupt assignment state
+- do not guess a replacement channel
+- transient failures should retain appropriate retry behaviour
+- unknown/deleted-channel handling must avoid duplicate side effects
+- unexpected failures must remain observable
+
+After P0.10, review P0.11 deleted organiser notification-role behaviour.
+
+Then proceed into P1 event templates unless those focused checks expose another concrete reliability defect.
 
 ---
 
-# Expected Preset-Editing Development Order
+# Preset Administration Milestone
 
 Current status:
 
 ```text
 completed:
-    edit command/service surface
-    preset metadata editing
+    preset foundation
+    preset application
+    lifecycle controls
+    metadata editing
     role-option editing
-    qualification-role editing
-    request-group definition editing
+    qualification editing
+    request-group editing
     group-option mapping editing
-
-next:
-    complete command UX review
-    full preset administration manual smoke test
-
-then:
-    event templates
+    administrator UX review
+    preset edit regression coverage
 ```
 
-The mutation surface should now be treated as established unless the UX review exposes a concrete missing operation.
+The preset mutation and administration surface should now be treated as established.
+
+Do not resume preset-foundation work unless:
+
+- real administrator usage exposes a concrete missing operation
+- a regression demonstrates incorrect behaviour
+- event-template work identifies a genuine reusable-boundary requirement
 
 ---
 
@@ -1441,57 +1451,43 @@ Preset application must still validate the complete graph itself.
 
 ---
 
-# Next Likely Preset-Editing Decisions
+# Resolved Preset-Editing Decisions
 
-A few questions should be answered deliberately when implementation reaches them.
+The major preset-editing design questions are resolved.
 
----
-
-## Group mapping update style
-
-Decide whether administrator UX should primarily support:
+Group-option mapping updates use:
 
 ```text
-add mapping
-remove mapping
+complete ordered replacement
 ```
 
-or:
+rather than incremental add/remove operations.
 
-```text
-replace complete ordered mapping set
-```
+Reusable edits may preserve temporarily unusable configuration where doing so keeps lifecycle and structural state independent.
 
-A complete replacement operation may provide simpler atomic validation.
+The Discord command surfaces warnings for such state.
 
----
+Preset application remains the final authoritative validator.
 
-## Temporarily invalid preset edits
-
-Lifecycle operations already permit a temporarily invalid graph and warn the administrator.
-
-For edit operations, decide which invalid intermediate states should also be allowed.
-
-Whatever choice is made should be:
-
-- explicit
-- service validated
-- documented in `DECISIONS.md`
-- regression tested
+These choices are recorded in `DECISIONS.md` and covered by regression tests.
 
 ---
 
 # Work After Preset Editing
 
-The intended main sequence remains:
+The intended main sequence is now:
 
 ```text
-Preset editing
-      |
-      v
+Preset administration complete
+        |
+        v
+Focused P0.10 / P0.11
+organiser deletion-behaviour checks
+        |
+        v
 Event templates
-      |
-      v
+        |
+        v
 Recurring event generation
 ```
 
@@ -2008,10 +2004,24 @@ mapping replacement serialises against preset application
 
 existing event mapping snapshots remain independent
 
+preset administration UX review is implemented
+
+list/show provide deterministic ID discovery
+
+inactive mapped options and unusable active groups are visible
+
+fixed and apply-time-default channels are distinguished
+
+lifecycle activation wording does not promise graph validity
+
+preset application failures provide actionable repair guidance
+
+autocomplete was reviewed and deliberately not added
+
 automated unit/integration/coverage/typechecking is green
 
 next production activity:
-    P0.8 final preset administration UX review
+    P0.10 Event Administration channel deletion behaviour
 ```
 
 Do not resume an older reliability or preset-foundation task simply because an older chat or stale document says it is still pending.

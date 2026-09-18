@@ -92,9 +92,9 @@ Major established areas now include:
 - unit and real-PostgreSQL integration testing
 - regression coverage for important race conditions
 
-The reusable preset definition-management surface is now substantially complete.
+The reusable role-request preset administration surface is implemented, including the final administrator-facing UX review.
 
-The immediate remaining preset task is a final administrator-facing UX review before using the stable reusable configuration model as a foundation for event templates and recurring event generation.
+The remaining known pre-template work is limited to focused organiser deletion-behaviour reliability checks rather than further preset feature development.
 
 ---
 
@@ -135,9 +135,9 @@ Recurrence should not be built before template-generated one-off events are reli
 
 Complete the administrator workflow for maintaining an existing reusable role-request preset without requiring it to be recreated.
 
-The current preset-management foundation, parent metadata editing, core role-option definition editing, qualification-role replacement, multi-role request-group notification foundation, request-group definition editing, and ordered group-option mapping replacement are implemented.
+The preset-management foundation, parent metadata editing, core role-option definition editing, qualification-role replacement, multi-role request-group notification foundation, request-group definition editing, ordered group-option mapping replacement, and final Discord administration UX review are implemented.
 
-The remaining P0 preset work is the final administrator-facing UX review.
+The planned reusable preset administration work is complete.
 
 ---
 
@@ -280,25 +280,42 @@ This is a core product invariant, not merely an implementation preference.
 
 ## P0.8 - Preset editing Discord UX
 
-Once service operations are stable, review the `/role-preset` command surface as a whole.
+**Implemented**
 
-Current administration is intentionally ID-based.
+The `/role-preset` administration surface was reviewed as a complete workflow after the mutation services stabilised.
 
-Potential usability improvements include:
+Implemented UX improvements include:
 
-- clearer edit success summaries
-- easier discovery of preset IDs
-- easier discovery of option/group IDs
-- autocomplete where Discord and current architecture make it worthwhile
-- clearer indication of inactive children
-- warnings when an edit leaves a preset temporarily unusable
-- concise display of fixed-channel versus apply-time-default behaviour
+- clearer preset-to-child ID discovery
+- `/role-preset list` guidance toward `/role-preset show`
+- guidance toward `include-inactive:true` when the active list is empty
+- explicit inactive mapped-option presentation
+- warnings when an active group has no active mapped option
+- explicit `Fixed` versus `Apply-time guild default` channel presentation
+- lifecycle activation wording that does not imply graph validity
+- actionable repair commands after lifecycle changes
+- actionable preset-application validation failures
+- consistent no-op behaviour without false audit mutations
 
-Do not introduce autocomplete simply to avoid typing IDs if it requires fragile or expensive lookup behaviour.
+Administration remains intentionally ID-based.
+
+Autocomplete was considered but not introduced because the existing:
+
+```text
+list
+  -> show
+      -> mutate
+```
+
+workflow already provides deterministic guild-scoped discovery without requiring another lookup path.
+
+Autocomplete may be revisited if real use demonstrates worthwhile friction reduction.
 
 ---
 
 ## P0.9 - Preset-edit testing expectations
+
+**Implemented as the testing standard used throughout preset editing**
 
 Each new mutation should receive direct integration coverage.
 
@@ -2007,8 +2024,6 @@ The roadmap should be reconciled again after major milestones.
 The next obvious review points are:
 
 ```text
-preset editing complete
-
 event templates complete
 
 recurring generation complete

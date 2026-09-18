@@ -3289,6 +3289,53 @@ Allowing inactive mapped options also keeps structural configuration separate fr
 
 ---
 
+## D132 - Preset administration remains ID-based after the UX review
+
+**Status: Current**
+
+The `/role-preset` administration surface remains intentionally ID-based after the final preset UX review.
+
+The supported discovery path is:
+
+```text
+/role-preset list
+        |
+        v
+preset ID
+        |
+        v
+/role-preset show
+        |
+        v
+option and group IDs
+```
+
+The UX review improved this workflow by making child-ID discovery explicit and by improving reusable-state presentation and repair guidance.
+
+Autocomplete was considered but not introduced.
+
+The current workflow is:
+
+- deterministic
+- guild-scoped
+- based on existing query operations
+- straightforward to test
+- sufficient for the present administration volume
+
+Adding autocomplete solely to avoid entering IDs would introduce another lookup path without a demonstrated operational need.
+
+Autocomplete is not forbidden permanently.
+
+It may be reconsidered if real administrator usage demonstrates meaningful friction and the implementation can remain cheap, deterministic, guild-scoped, and maintainable.
+
+### Reason
+
+Prefer a small coherent command surface over speculative UX machinery.
+
+The existing `list -> show -> mutate` flow exposes the required identifiers while keeping authoritative mutation validation in the existing service layer.
+
+---
+
 # Summary of Highest-Risk Invariants
 
 The following decisions are especially easy to break during an otherwise well-intentioned refactor.
