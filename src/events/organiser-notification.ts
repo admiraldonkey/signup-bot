@@ -6,6 +6,7 @@ import {
   PermissionFlagsBits,
   type Guild,
   type Message,
+  type Role,
 } from "discord.js";
 import { isDiscordErrorCode } from "../discord/discord-errors.js";
 import type {
@@ -356,17 +357,12 @@ async function sendOrganiserCoverMessage(
   }
 
   try {
-    const [channel, role] = await Promise.all([
-      input.guild.channels.fetch(input.eventAdminChannelId),
-
-      input.guild.roles.fetch(input.eventOrganiserRoleId),
-    ]);
+    const channel = await input.guild.channels.fetch(input.eventAdminChannelId);
 
     if (
       !channel ||
       channel.type !== ChannelType.GuildText ||
-      !channel.isSendable() ||
-      !role
+      !channel.isSendable()
     ) {
       return {
         kind: "failed",
@@ -375,19 +371,58 @@ async function sendOrganiserCoverMessage(
       };
     }
 
-    const botMember =
-      input.guild.members.me ?? (await input.guild.members.fetchMe());
+    /*
+     * The organiser notification role is presentation rather than authoritative
+     * organiser state.
+     *
+     * A configured role may have been deleted after setup. Discord may represent
+     * that either by returning null or by throwing Unknown Role (10011).
+     *
+     * In either case, the claimable administration message is still useful and
+     * should be posted without a role ping.
+     */
+    let role: Role | null = null;
 
-    const permissions = channel.permissionsFor(botMember);
+    try {
+      role = await input.guild.roles.fetch(input.eventOrganiserRoleId);
+    } catch (error: unknown) {
+      if (!isDiscordErrorCode(error, 10011)) {
+        throw error;
+      }
+    }
 
-    const canPingRole =
-      role.mentionable || permissions.has(PermissionFlagsBits.MentionEveryone);
+    /*
+     * Never allow the guild's @everyone role to become an organiser-notification
+     * fallback.
+     *
+     * This remains forbidden even if the bot itself has MentionEveryone.
+     */
+    const isEveryoneRole = role !== null && role.id === input.guild.id;
+
+    let canPingRole = false;
+
+    if (role && !isEveryoneRole) {
+      const botMember =
+        input.guild.members.me ?? (await input.guild.members.fetchMe());
+
+      const permissions = channel.permissionsFor(botMember);
+
+      canPingRole =
+        role.mentionable ||
+        permissions.has(PermissionFlagsBits.MentionEveryone);
+    }
+
+    const rolePresentation = role
+      ? canPingRole
+        ? `<@&${role.id}>`
+        : `**${role.name}**`
+      : null;
 
     const coverMessage = await channel.send({
       content: [
-        canPingRole ? `<@&${role.id}>` : `**${role.name}**`,
+        rolePresentation,
 
-        "",
+        rolePresentation ? "" : null,
 
         input.heading,
 
@@ -396,7 +431,9 @@ async function sendOrganiserCoverMessage(
         input.description,
 
         "An eligible Event Organiser can claim responsibility below.",
-      ].join("\n"),
+      ]
+        .filter((line): line is string => line !== null)
+        .join("\n"),
 
       components: [
         new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -412,7 +449,7 @@ async function sendOrganiserCoverMessage(
         ? {
             parse: [],
 
-            roles: [role.id],
+            roles: [role!.id],
           }
         : {
             parse: [],
