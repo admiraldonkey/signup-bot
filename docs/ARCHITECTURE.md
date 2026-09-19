@@ -29,32 +29,111 @@ It is not yet intended to be a universal event-management framework. However, su
 
 ---
 
+# How to Use This Document
+
+This file describes the current implemented architecture and the durable architectural direction for features that are explicitly marked as planned.
+
+It is intentionally more comprehensive than the public [`README.md`](../README.md).
+
+For other concerns, use:
+
+- [`DECISIONS.md`](DECISIONS.md) for why important design choices exist
+- [`CURRENT-WORK.md`](CURRENT-WORK.md) for the exact current development checkpoint
+- [`ROADMAP.md`](ROADMAP.md) for future development priorities
+- [`TESTING-GUIDE.md`](TESTING-GUIDE.md) for verification and regression strategy
+- [`ADMIN-GUIDE.md`](ADMIN-GUIDE.md) for administrator-facing behaviour
+
+Major areas in this document include:
+
+- core architectural principles
+- persistence and event lifecycle
+- publication and Discord message projection
+- attendance
+- organiser workflows
+- role requests
+- reusable role-request presets
+- reminders and announcements
+- durable scheduling
+- recovery and Discord error handling
+- audit and timezone handling
+- P1 event-template architecture
+- planned recurrence
+- portability and future integration
+- architectural invariants
+
+Where a section describes future behaviour, it must be clearly labelled as planned.
+
+---
+
 # Architectural Status
 
-This document describes the **current implemented architecture** unless a section is explicitly marked as planned or future work.
+This document describes the **current implemented architecture** unless a section is explicitly marked as planned.
 
-Important current areas include:
+## Implemented platform
 
-- reusable event creation services
-- database-authoritative event state
-- durable PostgreSQL-backed scheduling
-- event publication and recovery
-- attendance state and reporting
-- organiser lifecycle services
-- role-request services and publication
+The established platform currently includes:
+
+- persistent one-off events
+- database-authoritative event lifecycle
+- optional attendance sign-ups
+- actual attendance recording and comparison
+- immediate, manual, and scheduled publication
+- event editing and cancellation
+- durable PostgreSQL-backed scheduled work
+- reminders and announcements
+- organiser nomination and escalation
+- organiser confirmation, decline, timeout, and cover
+- organiser safety deadlines
+- deleted-channel and deleted-role degradation behaviour
+- event-level role requests
+- qualification and supervision rules
 - reusable role-request presets
-- direct integration testing against real PostgreSQL
+- complete preset administration and lifecycle controls
+- preset snapshot application
+- scheduled role-request group opening and closing
+- message recovery for key Discord projections
+- persistent audit logging
+- deterministic PostgreSQL-backed concurrency testing
 
-Important planned areas include:
+The P0 foundation and focused reliability work are complete.
 
-- editing existing role-request preset definitions
-- richer participation context for actual attendance
-- confirmed-organiser unavailability/replacement
+## Current development phase
+
+The current major development phase is:
+
+```text
+P1
+Event Templates
+```
+
+The first task is not to expose template commands.
+
+P1 begins by reconciling the repository's existing template schema scaffolding against the architecture that now exists for:
+
+```text
+event creation
+publication
+ping-role snapshots
+organisers
+reminders
+role-request presets
+scheduled actions
+audit
+```
+
+Existing template-related tables and columns are therefore **scaffolding**, not an immutable contract.
+
+## Planned areas
+
+Current planned areas include:
+
 - event templates
 - recurring event generation
+- richer participation context for actual attendance
+- confirmed-organiser unavailability/replacement
 - possible future web or external-bot integration
 
-Schema scaffolding for event templates exists, but the presence of a table or column should not be interpreted as evidence that the corresponding administrator-facing feature is complete.
+Schema presence must not be interpreted as proof that the corresponding administrator-facing feature is complete.
 
 ---
 
@@ -197,7 +276,7 @@ Where a race may occur during an external call, authoritative state is re-checke
 
 ## 6. Configuration is snapshotted when an event must remain stable
 
-Mutable guild or reusable configuration should not silently alter an existing event later.
+Mutable guild or reusable configuration should not unexpectedly alter an existing event later.
 
 Examples include:
 
@@ -806,7 +885,7 @@ If another attempt wins:
 
 If the channel itself has been deleted or is unavailable, the bot does not guess a replacement channel.
 
-Unexpected Discord errors are not silently treated as deletion.
+Unexpected Discord errors are not treated as deletion.
 
 ---
 
@@ -1194,7 +1273,7 @@ T+0 missing-organiser alert
 
 Unexpected role-resolution errors are different.
 
-They propagate rather than being silently interpreted as role deletion, preserving normal retry and observability behaviour.
+They propagate rather than being interpreted as role deletion, preserving normal retry and observability behaviour.
 
 ## `@everyone` is never an organiser-role fallback
 
@@ -2517,7 +2596,7 @@ Deactivating a preset role option:
 - excludes it from future applications
 - preserves qualification rules
 - preserves group mappings
-- does not silently deactivate related groups
+- does not automatically deactivate related groups
 
 This may leave an active group with no active mapped options.
 
@@ -2525,7 +2604,7 @@ That intermediate configuration is permitted to exist.
 
 The administrator is warned, and preset application rejects the invalid active graph until it is repaired.
 
-This is preferred over silently changing neighbouring configuration.
+This is preferred over automatically changing neighbouring configuration.
 
 ---
 
@@ -2645,7 +2724,7 @@ key = captain
 
 unchanged.
 
-This prevents a presentation edit from silently becoming a logical identity change.
+This prevents a presentation edit from becoming a logical identity change.
 
 Nullable field editing distinguishes:
 
@@ -3704,7 +3783,7 @@ local event context
 
 Daylight-saving ambiguity and invalid local times must be handled explicitly.
 
-The bot should not silently guess when a local time occurs twice or does not exist.
+The bot should not guess when a local time occurs twice or does not exist.
 
 ---
 
@@ -4048,17 +4127,19 @@ Event option logical keys remain unique per event.
 
 Therefore separate presets can conflict if they define the same logical role key.
 
-The application service treats this as a conflict rather than silently merging unrelated reusable definitions.
+The application service treats this as a conflict rather than automatically merging unrelated reusable definitions.
 
 Future UX may make this clearer before application, but the database/domain behaviour should remain explicit.
 
 ---
 
-# Planned Event Templates
+# P1 Event Template Architecture
 
-Event templates are not yet a complete feature.
+**Status: Planned architecture — active development phase**
 
-There is existing schema scaffolding including:
+Event templates are the current major feature area.
+
+The repository already contains template-related schema scaffolding, including concepts such as:
 
 ```text
 event_templates
@@ -4066,134 +4147,520 @@ template_role_options
 events.template_id
 ```
 
-The intended model is:
+Some of this predates:
+
+- reusable role-request presets
+- the current organiser architecture
+- reminder persistence
+- publication snapshot semantics
+- the current durable scheduler
+- the extracted `createStoredEvent()` service
+
+Those existing tables and fields must therefore be reviewed rather than preserved automatically.
+
+The current P1.1 task is to decide deliberately:
 
 ```text
-template
-   |
-   | generate/snapshot
-   v
-ordinary event
+retain
+replace
+extend
+or remove
 ```
 
-A generated event should behave like a normal one-off event after creation.
+for each existing template concept.
 
-Runtime behaviour should not depend on continuously reading the template.
+No old template migration should be edited after the fact.
+
+Any schema correction must use a new migration.
 
 ---
 
-# Intended Template Defaults
+# Template Core Model
 
-A future template may provide reusable defaults for:
+A template is reusable **source configuration** for creating an ordinary persistent event.
+
+Conceptually:
+
+```text
+template
+    |
+    | generate
+    v
+ordinary persistent event
+```
+
+After generation:
+
+```text
+template
+    -> source provenance
+
+event
+    -> authoritative runtime state
+```
+
+The generated event must use the same event services and runtime architecture as a manually-created event.
+
+The template must not become a second runtime event model.
+
+---
+
+# Generated Event Independence
+
+A generated event owns its state after generation.
+
+Later template changes should not rewrite an already-generated event by default.
+
+For example:
+
+```text
+generate occurrence
+        |
+        v
+event owns:
+    start time
+    publication state
+    organisers
+    reminders
+    role requests
+    ping-role snapshots
+        |
+        v
+edit template later
+        |
+        v
+existing event remains unchanged
+```
+
+Administrators must be able to change an individual generated occurrence without changing:
+
+- its source template
+- earlier generated occurrences
+- later already-generated occurrences
+- neighbouring recurrence slots
+
+A future explicit propagation workflow could be designed separately.
+
+It must not be assumed as part of ordinary template editing.
+
+---
+
+# Template Provenance
+
+Generated events should retain source-template provenance.
+
+The existing nullable:
+
+```text
+events.template_id
+```
+
+is one current scaffolding mechanism for this concept.
+
+P1.1 must determine whether that representation remains sufficient.
+
+Provenance is useful for:
+
+- administrator inspection
+- debugging
+- reporting
+- future recurrence identity
+- tracing how an event was generated
+
+Provenance must not become a live runtime dependency on the current template definition.
+
+---
+
+# Template Event Defaults
+
+A template may ultimately define reusable defaults for ordinary event creation.
+
+Candidate values include:
 
 - event type
-- audience/region
+- region or audience
 - timezone
-- name/description
+- event name
+- description
 - local start time
 - duration
-- signup behaviour
-- attendance-close timing
+- signup-enabled state
+- signup-close timing
+- detailed-response timing
 - publication timing
-- ping roles
-- organiser nominees/defaults
-- role-request configuration
-- reminders
+- publication destination behaviour
 
-The exact schema and administrator UX remain future work.
+These values must ultimately become normal event-owned state.
 
-Existing template-related columns may need revision as this feature is implemented.
+The current normal event-duration default is approximately:
+
+```text
+60 minutes
+```
+
+Template work must not reintroduce older two-hour assumptions.
+
+---
+
+# Template Ping Roles
+
+Template ping roles should become normal event-level ping-role snapshots.
+
+Conceptually:
+
+```text
+template ping roles
+        |
+        v
+event ping-role snapshots
+```
+
+Once generated, publication should use the event's snapshotted roles.
+
+Later template role edits must not change the audience of an event that has already been generated.
+
+The generated event should also retain readable role-name snapshots according to the existing event ping-role model.
 
 ---
 
 # Template Organiser Semantics
 
-Future templates should be able to define primary and backup organiser defaults.
-
-When an occurrence is generated:
+Templates may define default:
 
 ```text
-template organiser defaults
-       |
-       v
-dormant event organiser assignments
+primary organiser
+backup organiser
 ```
 
-Those assignments then follow the ordinary event organiser workflow.
+When an event is generated, those defaults should become ordinary dormant:
 
-The template should not itself become a live organiser assignment record.
+```text
+event_organiser_assignments
+```
+
+The generated assignments then use the existing organiser lifecycle:
+
+```text
+dormant nominee
+        |
+        v
+event publication
+        |
+        v
+activation
+        |
+        v
+confirm / decline / timeout
+        |
+        v
+backup / cover
+```
+
+The template itself must not become runtime organiser ownership.
+
+Later template organiser changes should affect future generation by default, not existing generated events.
 
 ---
 
 # Template Role-Request Semantics
 
-Reusable role-request presets should be leveraged rather than creating an incompatible second reusable role-request system.
+Templates must build on the existing reusable role-request preset architecture.
 
-The intended direction is that template occurrence creation can snapshot the required role-request configuration into the generated event.
+Do not create a second reusable role-request graph inside the template subsystem.
 
-After generation, that event remains independently editable.
+The preferred model remains:
+
+```text
+template
+    |
+    | references reusable role-request configuration
+    v
+generation
+    |
+    | snapshot
+    v
+ordinary event-level role-request state
+```
+
+The exact template-to-preset relationship is intentionally still open for P1.1 design.
+
+Possible questions include:
+
+- whether a template references zero, one, or several presets
+- whether ordering is required
+- whether applying the referenced configuration occurs inside the generation transaction
+- how conflicting logical role-option keys are reported
+- how inactive presets or invalid reusable graphs affect generation
+
+Whatever model is selected, the end state must use the established event-level tables and runtime behaviour.
+
+After generation:
+
+- the event owns its role options
+- the event owns its request groups
+- later preset edits do not change the event
+- later template edits do not change the event
+- ordinary role-request scheduler behaviour applies
+
+The existing preset snapshot and locking semantics are the reference model.
 
 ---
 
 # Template Reminder Semantics
 
-Templates should eventually support reminder defaults.
+Templates should support reusable reminder definitions.
 
-Example:
+For example:
 
 ```text
 10 minutes before signup close
-    -> remind members to sign up
+    -> reminder to respond
 
 10 minutes before event start
-    -> ask members to join the event voice channel
+    -> reminder to join voice
 ```
 
-For each generated occurrence:
+A template reminder definition should become an ordinary:
+
+```text
+event_reminders
+```
+
+row for each generated event.
+
+That event reminder should then receive the ordinary durable scheduled action.
+
+Conceptually:
 
 ```text
 template reminder definition
         |
         v
-ordinary event_reminders row
+event_reminders row
         |
         v
-ordinary durable scheduled action
+scheduled action
 ```
 
-The reminder should then belong to that event.
+The reminder then belongs to that event.
 
-Later template changes must not rewrite already-generated reminders automatically.
+Later template changes must not automatically rewrite already-generated reminder instances.
+
+## Important P1 reminder review
+
+Template-generated events may exist for a substantial period as:
+
+```text
+status = scheduled
+publishedAt = null
+```
+
+That is valid.
+
+Before templates rely on the current reminder-rescheduling logic, P1 must verify that a legitimate future reminder is not marked obsolete merely because the event has not yet been publicly published or opened for signups.
+
+In particular, signup-close-relative reminders need regression coverage for long-lived unpublished generated events.
 
 ---
 
-# Template Edit Semantics
+# Template Publication Semantics
 
-The intended default is:
+Template publication defaults should create ordinary event publication state.
+
+A generated event may therefore be:
+
+```text
+persistent
+scheduled
+unpublished
+```
+
+while administrators prepare it.
+
+Template generation should use the established publication model rather than inventing template-specific delayed-publication state.
+
+Future publication work should continue to use:
+
+```text
+publicationChannelId
+publishMinutesBeforeStart
+publish_event scheduled action
+publishStoredEvent(...)
+```
+
+or their deliberately evolved equivalents.
+
+Generated events should remain manually inspectable and editable before publication.
+
+---
+
+# Template Generation Transaction Boundary
+
+P1 should establish a reusable generation service before building Discord command adapters around it.
+
+The desired conceptual transaction is:
+
+```text
+validate template and guild ownership
+        |
+        v
+resolve reusable source configuration
+        |
+        v
+create ordinary event
+        |
+        +---- event defaults
+        +---- publication state
+        +---- ping-role snapshots
+        +---- organiser assignments
+        +---- reminder rows
+        +---- role-request snapshots
+        +---- scheduled actions
+        |
+        v
+commit one coherent generated event
+```
+
+Partial generated state must not be left behind when authoritative database creation fails.
+
+Discord publication is external and must retain the existing database-first/revalidation principles.
+
+The exact service decomposition is a P1 design task.
+
+`createStoredEvent()` should be reused or deliberately evolved rather than bypassed.
+
+---
+
+# Template Lifecycle
+
+Templates need their own reusable lifecycle.
+
+The exact schema and command surface remain to be designed.
+
+The likely minimum concept is an active/inactive state.
+
+An inactive template should stop new generation while preserving:
+
+- the template definition
+- historical provenance
+- already-generated events
+
+Deactivating a template must not cancel or rewrite existing events.
+
+---
+
+# Template Editing Semantics
+
+The default template-edit contract is:
 
 ```text
 edit template
-    -> affects newly-generated occurrences
-    -> does not silently rewrite existing generated events
+    -> affects future generation
+    -> does not rewrite generated events
 ```
 
-A future explicit propagation feature could be designed separately.
+This matches the snapshot model already established by role-request presets.
 
-It must not be assumed.
+Template editing should prefer explicit mutation semantics.
 
-This is important because already-generated events may have been individually customised.
+For nullable or collection-style fields, P1 should distinguish where necessary between:
+
+```text
+omitted
+    -> preserve
+
+explicit clear
+    -> remove
+
+replacement collection
+    -> replace complete intended set
+```
+
+The exact commands and mutation services remain future implementation work.
+
+---
+
+# P1.1 Schema Reconciliation
+
+Before template feature implementation begins, P1.1 must inspect:
+
+```text
+src/db/schema.ts
+
+template-related migrations
+
+event_templates
+
+template_role_options
+
+events.template_id
+```
+
+against the current event architecture.
+
+The review must answer:
+
+```text
+Which existing fields remain useful?
+
+Which assumptions predate the current architecture?
+
+Which relationships should be removed or superseded?
+
+Which additional tables are required?
+
+Where is template source state stored?
+
+Where does event-owned snapshot state begin?
+
+How is source-template provenance represented?
+
+How do reminder definitions relate to event_reminders?
+
+How do templates reference role-request presets?
+
+What lifecycle state belongs to templates?
+
+What future recurrence identity must be supported?
+```
+
+Existing schema scaffolding is evidence of earlier intent, not a requirement to preserve the old shape.
 
 ---
 
 # Planned Recurrence
 
-Recurring generation is planned after template support.
+Recurring event generation comes after one-off template generation is stable.
 
-The likely representation is based on RFC 5545 recurrence rules.
+The intended high-level architecture is:
 
-A recurrence definition should describe the schedule.
+```text
+template
+    |
+    +---- recurrence definition
+              |
+              v
+       bounded generator
+              |
+              v
+       ordinary event occurrences
+```
 
-It should not replace ordinary event rows.
+Recurrence must generate ordinary events.
+
+It must not create a parallel runtime event type.
+
+---
+
+# Recurrence Representation
+
+The current intended direction is an RFC 5545-compatible recurrence-rule representation.
+
+A mature recurrence library should be evaluated rather than implementing calendar recurrence rules manually.
+
+The recurrence rule describes future schedule intent.
+
+Generated events remain normal persistent events.
 
 ---
 
@@ -4201,54 +4668,88 @@ It should not replace ordinary event rows.
 
 Recurring events should be generated using a rolling future horizon rather than materialising an unlimited series.
 
-A working design target has been around several weeks, such as approximately 21 days, but the final value should remain configurable or revisitable.
+A design target of roughly:
 
-Benefits include:
+```text
+21 days
+```
 
-- fewer unnecessary rows
-- simpler edits
-- easier cancellation handling
-- no need to generate years of hypothetical events
-- template changes naturally affecting only not-yet-generated occurrences
+has been discussed.
+
+That is a candidate rather than a fixed invariant.
+
+The final value may remain configurable or otherwise revisitable.
+
+A rolling horizon helps:
+
+- avoid excessive speculative event rows
+- reduce unnecessary scheduled actions
+- make template edits easier to reason about
+- keep future cancellation manageable
+- separate generated occurrences from not-yet-generated occurrences
 
 ---
 
 # Immutable Recurrence Occurrence Identity
 
-A recurring occurrence needs an immutable identity separate from its mutable `startsAt`.
+A recurring occurrence needs immutable series identity separate from its mutable event start time.
 
-This matters because an administrator may move one occurrence.
-
-If identity were derived only from the event's current start timestamp:
+Do not use:
 
 ```text
-generate Monday event
-move it to Tuesday
-generator runs again
-sees Monday missing
-creates duplicate
+events.startsAt
 ```
 
-Future recurrence work should therefore use a stable occurrence key derived from the recurrence schedule's original occurrence identity, not from the event's mutable current start time.
+as the sole occurrence key.
+
+Otherwise:
+
+```text
+generate Monday occurrence
+        |
+        v
+administrator moves event to Tuesday
+        |
+        v
+generator checks Monday slot
+        |
+        v
+Monday appears missing
+        |
+        v
+duplicate occurrence created
+```
+
+The occurrence therefore needs identity derived from its original recurrence slot or another immutable series key.
+
+Moving the generated event must not change that identity.
+
+Generation must also be idempotent and concurrency-safe.
 
 ---
 
-# Independent Generated Events
+# Independent Recurring Occurrences
 
-Once generated, an occurrence should be an ordinary independent event.
+Once generated, a recurring occurrence should behave exactly like another generated template event.
 
 Administrators should be able to:
 
-- edit its time
-- edit its description
+- change its time
+- change its description
 - change organisers
-- change role requests
 - change reminders
-- cancel that occurrence
+- change role-request configuration
+- publish it manually where allowed
+- cancel it independently
 
-without rewriting the template or neighbouring occurrences.
+without rewriting:
 
-This is the same snapshot philosophy already proven by role-request presets.
+- the template
+- recurrence definition
+- earlier occurrences
+- later generated occurrences
+
+This extends the same snapshot philosophy already proven by reusable role-request presets.
 
 ---
 
@@ -4382,6 +4883,11 @@ The following invariants are particularly important.
 - Cover may remain claimable after start when the event is still unresolved.
 - Normal organiser operations participate in the guild feature-lock contract.
 - Assignment history is preserved instead of overwriting rows destructively.
+- A deleted Event Administration channel is a destination failure and must not cause a guessed fallback channel.
+- A deleted Event Organiser role is an audience degradation when the administration channel still exists.
+- Missing organiser-role notification can succeed as `posted_without_ping`.
+- `@everyone` is never an organiser-notification fallback.
+- Unexpected Discord failures remain distinct from confirmed deleted Discord entities.
 
 ## Role requests
 
@@ -4407,8 +4913,20 @@ The following invariants are particularly important.
 - Preset application and preset mutation serialise through the parent-row lock.
 - Parent, option, and group active states are independent.
 - Lifecycle changes do not mutate existing event snapshots.
-- Option deactivation does not silently deactivate groups.
+- Option deactivation does not automatically deactivate groups.
 - Group deactivation preserves mappings.
+
+## Templates and recurrence
+
+- Templates are reusable source configuration.
+- Generated events become ordinary event-owned runtime state.
+- Existing generated events do not track later template edits by default.
+- Template organiser defaults become ordinary dormant organiser assignments.
+- Template reminders become ordinary event reminders.
+- Template role requests must reuse the established role-request preset/snapshot architecture.
+- Existing template schema is scaffolding until P1.1 deliberately confirms or replaces it.
+- Recurring occurrences need immutable series identity separate from mutable event start time.
+- Recurrence generation must be idempotent and bounded.
 
 ## Scheduler
 
@@ -4432,34 +4950,53 @@ The following invariants are particularly important.
 
 # Development Direction
 
+The foundational platform and reusable role-request preset milestone are complete.
+
 The current architectural sequence is:
 
 ```text
-Reusable role-request preset foundation
+P0 foundation and reliability
+        |
+        | complete
+        v
+P1 event-template schema reconciliation
         |
         v
-Preset application and durable group scheduling
+one-off template generation
         |
         v
-Preset lifecycle management
+template administration
         |
         v
-Preset editing
+recurring event generation
         |
         v
-Event templates
-        |
-        v
-Recurring event generation
+later P2 / P3 product work
 ```
 
-The reusable preset foundation, application/scheduling, lifecycle management, planned definition-editing operations, and final administrator-facing UX review are implemented.
+The immediate architecture task is P1.1:
 
-The remaining known organiser deletion-behaviour reliability checks may be completed before or alongside the start of event-template development.
+```text
+reconcile existing template schema scaffolding
+against the current event architecture
+```
 
-Event templates and recurrence remain the next major feature areas.
+Template development should therefore begin from the established boundaries for:
 
-This sequence is deliberate because templates should depend on stable reusable configuration and reusable event-creation services rather than creating parallel implementations.
+- event creation
+- snapshot ownership
+- organisers
+- reminders
+- role-request presets
+- publication
+- durable scheduled actions
+- audit
+- guild ownership
+- concurrency
+
+rather than preserving incomplete older template assumptions.
+
+Reliability remains a continuing development standard throughout P1 rather than a separate broad rewrite phase.
 
 ---
 

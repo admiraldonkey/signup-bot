@@ -14,9 +14,11 @@ It is intended for:
 - collaborators testing the bot
 - developers verifying user-facing workflows
 
-This document describes **implemented functionality**.
+This document describes **implemented administrator-facing functionality**.
 
-Planned features such as full event templates, recurring event generation, and complete editing of existing role-request preset definitions are called out separately and should not be mistaken for current commands.
+Reusable role-request preset creation, editing, lifecycle management, mapping administration, and application are implemented.
+
+Planned features such as event templates, recurring event generation, confirmed-organiser self-unavailability, and richer attendance participation context are called out separately and should not be mistaken for current commands.
 
 For implementation details, see:
 
@@ -25,6 +27,29 @@ For implementation details, see:
 - [`TESTING-GUIDE.md`](TESTING-GUIDE.md)
 - [`ROADMAP.md`](ROADMAP.md)
 - [`CURRENT-WORK.md`](CURRENT-WORK.md)
+
+---
+
+# Guide Map
+
+This guide is intentionally comprehensive.
+
+Use these major areas to navigate quickly:
+
+| Area                        | Contents                                                                       |
+| --------------------------- | ------------------------------------------------------------------------------ |
+| Server setup                | `/setup initialise`, configuration, regions, logging, feature switches         |
+| Events                      | creation, publication, editing, attendance lifecycle, cancellation             |
+| Organisers                  | nomination, confirmation, escalation, cover, safety handling                   |
+| Role requests               | event role options, qualification, groups, opening/closing, volunteer requests |
+| Role-request presets        | reusable preset creation, editing, lifecycle, mappings, application            |
+| Reminders and announcements | persistent reminders and immediate announcements                               |
+| Attendance records          | actual attendance, comparison, history, issues                                 |
+| Audit                       | persistent audit history and Discord mirroring                                 |
+| Troubleshooting             | common configuration and lifecycle problems                                    |
+| Feature boundaries          | implemented and planned administrator features                                 |
+
+For the current development phase rather than administrator operation, see [`CURRENT-WORK.md`](CURRENT-WORK.md).
 
 ---
 
@@ -709,7 +734,7 @@ Publication is rejected where the event is no longer eligible, such as when it i
 
 Publication uses the destination stored for the event.
 
-A later change to the guild's default attendance channel does not silently move the prepared event.
+A later change to the guild's default attendance channel does not automatically move the prepared event.
 
 ---
 
@@ -935,7 +960,7 @@ Reopening:
 
 Reopening signups is an explicit administrator operation.
 
-An unrelated event edit should not silently reopen a deliberately closed signup window.
+An unrelated event edit should not reopen a deliberately closed signup window.
 
 ---
 
@@ -2155,7 +2180,7 @@ Recovery preserves:
 
 It does not replay the group's original notification-role ping.
 
-If the destination channel itself is gone, the bot does not silently move the request group elsewhere.
+If the destination channel itself is gone, the bot does not move the request group elsewhere.
 
 ---
 
@@ -2629,7 +2654,7 @@ clear-all: Yes
 
 Do not combine `clear-all: Yes` with replacement roles.
 
-Supplying no roles without `clear-all: Yes` does not silently delete the existing configuration.
+Supplying no roles without `clear-all: Yes` does not delete the existing configuration.
 
 An option with restriction:
 
@@ -3132,7 +3157,7 @@ When the preset is later applied to an event, the bot resolves the guild's then-
 
 This does **not** mean the event follows the guild default forever.
 
-After application, later guild configuration changes do not silently move the event's request group.
+After application, later guild configuration changes do not automatically move the event's request group.
 
 ---
 
@@ -3291,7 +3316,7 @@ The architecture can permit different presets to be considered for the same even
 
 However, event role-option logical keys remain unique.
 
-Two presets that define conflicting logical role identities may therefore be rejected rather than silently merged.
+Two presets that define conflicting logical role identities may therefore be rejected rather than automatically merged.
 
 Do not assume separate presets are automatically composable.
 
@@ -3318,7 +3343,7 @@ This applies to:
 - preset deactivation
 - option deactivation
 - group deactivation
-- future preset editing
+- later preset edits
 - later group-option mapping replacements
 
 To inspect the event's resulting operational state, use the event-level commands rather than assuming the source preset still describes it exactly.
@@ -3395,7 +3420,7 @@ The group itself remains active.
 
 This is deliberate.
 
-The bot does not silently decide that the group should also be deactivated.
+The bot does not automatically decide that the group should also be deactivated.
 
 Until the configuration is repaired, preset application rejects the unusable active graph.
 
@@ -4323,7 +4348,7 @@ Later server default changes do not rewrite the event automatically.
 
 Stored for the event.
 
-Changing the guild attendance channel later does not silently move an already-prepared event.
+Changing the guild attendance channel later does not automatically move an already-prepared event.
 
 ---
 
@@ -4721,41 +4746,119 @@ Use `/event reopen` when reopening is deliberately required.
 
 # Current Feature Boundaries
 
-The following are **implemented now**:
+The following administrator-facing areas are implemented.
+
+## Server configuration
+
+- guild initialisation
+- event channels and administration role configuration
+- Event Administration channel configuration
+- Event Organiser role configuration
+- organiser timing configuration
+- organiser feature switch
+- organiser DM delivery switch
+- event regions
+- Discord audit-log mirroring
+- configuration inspection
+
+## Event lifecycle
 
 - persistent event creation
+- optional signups
 - immediate publication
 - manual publication
 - scheduled publication
-- optional signups
-- attendance responses
-- close and reopen
-- cancellation
 - event editing
-- message refresh and core deleted-message recovery
-- organiser primary and backup nomination
-- organiser confirmation and decline
-- organiser escalation
+- attendance closing and reopening
+- cancellation
+- automatic completion
+- event ping-role replacement
+- public event-message refresh
+- core deleted-message recovery
+
+## Organisers
+
+- primary and backup nomination
+- dormant pre-publication assignments
+- confirmation and decline
+- warning and timeout workflow
+- backup escalation
 - general cover
-- organiser safety deadlines
-- post-start cover where still needed
-- organiser DM control
-- event-level role options
-- qualification rules
+- cover claiming
+- organiser safety deadline
+- post-start missing-organiser handling
+- organiser DM-first delivery
+- Event Administration fallback delivery
+- deleted Event Administration channel handling
+- deleted Event Organiser role degradation to unpinged claimable messages
+- tracked organiser cover messages
+- warning reconciliation
+- organiser feature-disable reconciliation
+
+## Event-level role requests
+
+- event role options
+- open and qualified-only restrictions
+- full qualification
 - supervision-required qualification
-- manual request groups
-- scheduled preset-derived request groups
-- role-request closing
+- signup-gated and non-signup-gated request groups
+- manual immediate request groups
+- scheduled request groups
+- before-start and after-start timing
+- role notification audiences
 - multi-select volunteer requests
 - explicit withdrawal
-- reusable role-request presets
-- preset application
+- request availability changes after attendance changes
+- scheduled opening and closing
+- publication-intent handling
+- event-time rescheduling
+- message refresh and deleted-message recovery
+
+## Reusable role-request presets
+
+- preset creation
+- preset listing and inspection
+- preset metadata editing
 - preset lifecycle controls
-- reminders
+- role-option creation
+- role-option editing
+- qualification-role replacement
+- role-option lifecycle controls
+- request-group creation
+- request-group editing
+- notification-role replacement
+- request-group lifecycle controls
+- ordered group-option mapping replacement
+- preset application
+- event-level snapshot independence
+- inactive-state warnings and repair guidance
+
+## Reminders and announcements
+
+- persistent event reminders
+- event-start-relative reminders
+- signup-close-relative reminders
+- reminder editing
+- reminder removal
+- reminder rescheduling after event edits
+- missed/obsolete reminder handling
 - immediate announcements
-- actual attendance recording
-- signup-versus-attendance reports
-- persistent audit logging
+
+## Attendance reporting
+
+- actual attendance replacement
+- attendee addition and removal
+- attendance listing
+- signup-versus-attendance comparison
+- member attendance history
+- notable attendance issues
+
+## Audit
+
+- persistent PostgreSQL audit records
+- system/automatic action attribution
+- optional Discord audit mirroring
+- recent audit inspection and filtering
 
 ---
 
@@ -4763,29 +4866,21 @@ The following are **implemented now**:
 
 The following should **not** be treated as implemented administrator features yet.
 
-## Full preset editing
-
-Current presets cannot yet be comprehensively edited in place through a complete supported command workflow.
-
-This is the immediate next development area.
-
----
-
 ## Event templates
 
-The repository contains some template-related schema groundwork.
+The repository contains template-related schema groundwork, but there is not yet a complete administrator-facing event-template workflow.
 
-There is not yet a complete administrator-facing event-template workflow.
+There is currently no finished production `/template` command surface.
 
-There is no current production command that should be documented as a finished `/template` feature.
+P1 development begins by reconciling the existing template schema against the current event architecture before commands are added.
 
 ---
 
 ## Recurring event generation
 
-Automatic recurring-series generation is planned after templates.
+Automatic recurring-series generation is planned after one-off template generation is stable.
 
-It is not currently available as a complete user feature.
+It is not currently available as a complete administrator feature.
 
 ---
 
@@ -4793,19 +4888,35 @@ It is not currently available as a complete user feature.
 
 A fully integrated workflow for a confirmed organiser to later declare themselves unavailable is planned but not complete.
 
----
-
-## Rich attendance participation roles
-
-Actual attendance does not yet provide a complete event-specific classification system for participant versus organiser, supervisor, server administrator, and similar contexts.
+Existing organiser replacement and cover workflows should not be mistaken for that future self-unavailability feature.
 
 ---
 
-## Automatic role allocation
+## Rich attendance participation context
 
-Role requests are volunteer interest.
+Actual attendance currently records presence rather than a complete event-specific participation classification.
 
-The bot does not currently replace organiser judgement with automatic final role assignments.
+A future model may distinguish contexts such as:
+
+```text
+participant
+organiser
+supervisor
+server administrator
+other
+```
+
+Administrators should continue to interpret attendance discrepancies with context.
+
+---
+
+## Automatic final role allocation
+
+Role requests represent volunteered interest.
+
+The bot does not currently replace organiser judgement with automatic final role assignment.
+
+Capacity, balance, supervision, and event-specific needs remain organiser decisions.
 
 ---
 
