@@ -94,7 +94,9 @@ Major established areas now include:
 
 The reusable role-request preset administration surface is implemented, including the final administrator-facing UX review.
 
-The remaining known pre-template work is limited to focused organiser deletion-behaviour reliability checks rather than further preset feature development.
+The focused organiser deletion-behaviour reliability checks are complete.
+
+Further reliability work continues regression-first alongside feature development rather than as another broad pre-template rewrite.
 
 ---
 
@@ -416,19 +418,67 @@ The review established the existing behaviour with explicit unit and PostgreSQL-
 
 ## P0.11 - Deleted organiser notification role
 
-Review behaviour when the configured organiser/event-admin notification role is removed from Discord.
+**Implemented and verified**
 
-Expected principles:
+Organiser cover delivery now degrades safely when the configured Event Organiser role no longer exists in Discord.
 
-- organiser state remains authoritative
-- absence of a ping role must not corrupt assignment state
-- notification may degrade to a message without the role ping where appropriate
-- unexpected errors should remain observable
-- `@everyone` must not become an accidental fallback
+The notification boundary distinguishes:
+
+```text
+deleted / missing role
+    -> null
+    -> or Discord 10011 Unknown Role
+```
+
+from:
+
+```text
+unexpected role-resolution failure
+```
+
+When the Event Administration channel is still usable but the organiser role is missing:
+
+```text
+post claimable organiser message
+        |
+        v
+omit role ping
+        |
+        v
+delivery = posted_without_ping
+```
+
+The message remains durably trackable.
+
+Scheduler coverage verifies successful unpinged delivery for:
+
+```text
+ordinary organiser cover
+T-15 organiser safety cover
+T+0 missing-organiser alert
+```
+
+These actions complete successfully and audit:
+
+```text
+delivery = posted_without_ping
+```
+
+rather than entering failed-delivery or retry state merely because the notification role disappeared.
+
+Unexpected role-resolution errors continue to propagate.
+
+The delivery boundary also explicitly prevents the guild's `@everyone` role from becoming an organiser-notification fallback, even when the bot has mass-mention permission.
+
+Authoritative PostgreSQL organiser state remains independent from the presence of the Discord notification role.
+
+A production correction was required because the previous implementation treated a missing role as complete delivery failure and did not classify Discord `10011 Unknown Role`.
 
 ---
 
 ## P0.12 - Continue regression-led reliability work
+
+**Ongoing engineering principle**
 
 Do not perform another repository-wide reliability rewrite merely because reliability remains important.
 

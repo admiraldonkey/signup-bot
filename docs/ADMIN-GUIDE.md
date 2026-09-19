@@ -1,6 +1,6 @@
 # Administrator Guide
 
-**Last reconciled:** 18 September 2026
+**Last reconciled:** 19 September 2026
 
 ## Purpose
 
@@ -1216,6 +1216,16 @@ Eligible organisers can claim the event.
 
 Where an Event Organiser role is configured, that role is used as part of cover eligibility.
 
+The role is also normally used to notify the organiser audience when general cover is requested.
+
+If that configured Discord role has since been deleted but the Event Administration channel still exists, the bot degrades the notification rather than discarding the claimable message.
+
+The cover request is posted without a role ping and remains tracked normally.
+
+Administrators should treat this as degraded configuration and restore the intended Event Organiser role through setup.
+
+The bot never substitutes `@everyone` as the missing organiser audience.
+
 Concurrent claims are resolved through PostgreSQL so only one organiser can become authoritative.
 
 General-cover and urgent event-start claim messages are tracked by the bot.
@@ -1370,6 +1380,48 @@ After discovering that the configured Event Administration channel has been dele
 5. confirm the new Event Administration channel is shown
 
 Changing the configured destination does not retroactively recreate organiser notifications that were definitively missed while the old channel was unavailable.
+
+## If the Event Organiser role is deleted
+
+A missing Event Organiser role is different from a missing Event Administration channel.
+
+If the administration channel still exists, general organiser-cover presentation can degrade to an unpinged message.
+
+The bot may therefore still post:
+
+```text
+organiser cover required
+Claim Event
+```
+
+without including a role mention.
+
+Such a message remains a successfully-posted and tracked Discord message.
+
+Audit output records:
+
+```text
+posted_without_ping
+```
+
+rather than a total notification failure.
+
+The bot does not fall back to `@everyone`.
+
+A Discord `Unknown Role` result is treated as definitive role absence.
+
+An unexpected role-fetch or Discord transport error is not treated as proof that the role was deleted.
+
+After discovering that the configured Event Organiser role is gone:
+
+1. create or choose the intended replacement organiser role
+2. assign it to the appropriate organisers
+3. rerun `/setup configure`
+4. supply the current setup values and the replacement `event-organiser-role`
+5. run `/setup status`
+6. confirm the intended Event Organiser role is shown
+
+Existing authoritative organiser state does not need to be recreated merely because the notification role disappeared.
 
 ---
 
@@ -4469,6 +4521,30 @@ Do not manually alter organiser database state merely because an administrative 
 A confirmed Discord `Unknown Channel` result is treated as a permanent destination failure.
 
 A transient or unexpected Discord error is not treated as proof that the channel was deleted.
+
+---
+
+## Event Organiser role was deleted
+
+If the configured Event Organiser role no longer exists:
+
+- authoritative organiser assignments remain stored
+- existing organiser state is not rolled back
+- organiser-cover messages may be posted without a role ping
+- the bot does not ping `@everyone`
+- `/audit recent` may show successful `posted_without_ping` organiser delivery
+
+Check:
+
+- `/setup status`
+- whether the configured role still exists
+- whether a replacement organiser role has been created
+- whether intended organisers hold the replacement role
+- audit and scheduler output for unexpected Discord failures
+
+Restore the intended role through `/setup configure`.
+
+Do not manually rewrite organiser assignment state merely because the Discord notification role was deleted.
 
 ---
 

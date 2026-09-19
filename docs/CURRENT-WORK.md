@@ -96,92 +96,101 @@ The planned reusable preset administration work is now complete.
 
 # Current Activity
 
-P0.10 Event Administration channel deletion behaviour is implemented and verified.
+P0.11 deleted Event Organiser role behaviour is implemented and verified.
 
-No production correction was required.
+Unlike P0.10, this review exposed a production gap.
 
-The existing organiser notification boundary already distinguishes:
+Previously, organiser-cover delivery could treat a missing configured Event Organiser role as complete notification failure.
+
+Discord `10011 Unknown Role` was also not classified as definitive role absence.
+
+The notification boundary now distinguishes:
 
 ```text
-Discord 10003 Unknown Channel
-        -> definitive unavailable destination
+deleted / absent organiser role
+        |
+        v
+notification audience unavailable
 ```
 
 from:
 
 ```text
-unexpected or transient Discord failure
-        -> propagate
-        -> normal retry/error behaviour
+deleted Event Administration channel
+        |
+        v
+delivery destination unavailable
 ```
 
-Direct notification regressions now cover:
+When the administrative channel remains usable:
 
 ```text
-assignment fallback
-pending organiser warning
-general cover
-missing-organiser-at-start alert
+missing organiser role
+        |
+        v
+post claimable message
+        |
+        v
+omit role ping
+        |
+        v
+posted_without_ping
 ```
 
-Scheduler regressions now cover the definitive-versus-transient matrix for:
+The shared cover-delivery path explicitly handles:
 
 ```text
-organiser warning
+role fetch returns null
 
-ordinary general cover
+Discord 10011 Unknown Role
+
+configured role resolves to @everyone
+```
+
+without producing a role ping.
+
+Unexpected role-resolution failures still propagate.
+
+`@everyone` is never accepted as an organiser-notification fallback, even if the bot has `MentionEveryone`.
+
+Scheduler integration coverage verifies `posted_without_ping` as successful delivery for:
+
+```text
+ordinary organiser cover
 
 T-15 organiser safety cover
 
 T+0 missing-organiser alert
 ```
 
-The scheduler contract is:
+For all three paths:
 
 ```text
-definitive unavailable destination
-        |
-        v
-complete scheduled action
-        |
-        v
-record failure audit
-        |
-        v
-do not retry forever
-```
+scheduled action
+    -> completes successfully
 
-versus:
+Discord message
+    -> persisted and tracked
 
-```text
-transient or unexpected failure
-        |
-        v
-return action to pending
-        |
-        v
-retain retry/backoff
-        |
-        v
-store last_error
+audit
+    -> outcome success
+    -> delivery posted_without_ping
 ```
 
 PostgreSQL organiser state remains authoritative.
 
-For the T-15 safety path, unresolved nominated organisers may already have been retired before Discord delivery is attempted.
+P0.10 and P0.11 are now complete.
 
-A transient notification retry does not undo or recreate those assignments.
+P0.12 remains an ongoing regression-led reliability principle rather than a separate repository-wide rewrite.
 
-No replacement administrative channel is guessed when the configured destination has been deleted.
-
-The next focused reliability review is:
+The next major feature area is:
 
 ```text
-P0.11
-Deleted organiser notification role
+P1
+Event Templates
 ```
 
-After P0.11, event templates remain the next major feature area unless that review exposes another concrete reliability defect.
+The first template task is P1.1: reconcile the repository's existing template schema scaffolding against the current event architecture before implementing new template behaviour.
 
 ---
 
@@ -1371,36 +1380,56 @@ This remains planned.
 
 # Immediate Next Objective
 
-P0.10 Event Administration channel deletion behaviour is complete.
+The focused pre-template organiser deletion-behaviour reviews are complete.
 
-The next focused task is:
-
-```text
-P0.11
-Deleted organiser notification role
-```
-
-Review organiser notification and escalation behaviour when the configured Event Organiser notification role no longer exists in Discord.
-
-Preserve these principles:
+The next task is:
 
 ```text
-PostgreSQL organiser state remains authoritative
-
-missing ping presentation must not corrupt assignment state
-
-where appropriate, notification may degrade to an unpinged message
-
-@everyone must never become an accidental fallback
-
-unexpected Discord failures remain observable
+P1.1
+Reconcile existing event-template schema scaffolding
 ```
 
-The review should first inspect existing role-resolution behaviour and add regressions before changing production code.
+Before implementing template commands or generation behaviour, inspect the repository's existing template-related schema and migrations against the architecture now established by:
 
-Do not perform another broad organiser or scheduler rewrite unless a concrete failing regression demonstrates one is required.
+```text
+createStoredEvent()
 
-After P0.11, proceed into P1 event templates unless the focused review exposes another specific reliability defect.
+event lifecycle
+
+publication scheduling
+
+organiser assignments
+
+reminders
+
+event ping-role snapshots
+
+reusable role-request presets
+
+preset snapshot semantics
+```
+
+Do not preserve old template scaffolding merely because it already exists.
+
+Determine deliberately:
+
+```text
+which existing template fields remain useful
+
+which concepts are obsolete
+
+which new tables or relationships are needed
+
+how generated events retain source-template provenance
+
+where snapshot boundaries belong
+```
+
+Any schema change must use an explicit new migration.
+
+Do not mutate old applied migrations.
+
+P0.12 regression-led reliability principles continue to apply while template work proceeds.
 
 ---
 
@@ -1524,6 +1553,7 @@ Preset administration complete
 Focused P0.10 / P0.11
 organiser deletion-behaviour checks
         |
+        | complete
         v
 Event templates
         |
@@ -2058,20 +2088,30 @@ preset application failures provide actionable repair guidance
 
 autocomplete was reviewed and deliberately not added
 
-automated unit/integration/coverage/typechecking is green
-
 P0.10 Event Administration channel deletion behaviour is verified
 
 Discord 10003 is treated as definitive destination loss
 
 unexpected Discord failures retain retry/error behaviour
 
-organiser state remains authoritative when notification presentation fails
+P0.11 deleted Event Organiser role behaviour is implemented
 
-T-15 safety transitions remain committed across notification retries
+missing organiser roles degrade to tracked unpinged cover messages
+
+Discord 10011 is treated as definitive role absence
+
+unexpected role-resolution failures remain observable
+
+@everyone is never used as an organiser notification fallback
+
+ordinary cover, T-15 and T+0 track posted_without_ping as successful delivery
+
+PostgreSQL organiser state remains authoritative when notification presentation degrades
+
+automated unit/integration/coverage/typechecking is green
 
 next production activity:
-    P0.11 Deleted organiser notification role
+    P1.1 reconcile existing event-template schema scaffolding
 ```
 
 Do not resume an older reliability or preset-foundation task simply because an older chat or stale document says it is still pending.
