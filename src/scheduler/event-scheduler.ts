@@ -1303,7 +1303,7 @@ async function executeOrganiserCoverDeadline(
 
       outcome: "failure",
 
-      summary: `Could not request organiser cover for "${transition.event.name}" (#${transition.event.id}) at its safety deadline because the configured Event Administration channel or Event Organiser role is unavailable.`,
+      summary: `Could not request organiser cover for "${transition.event.name}" (#${transition.event.id}) at its safety deadline because the required organiser notification destination or configuration is unavailable.`,
 
       targetType: "event",
 
@@ -1317,7 +1317,7 @@ async function executeOrganiserCoverDeadline(
     });
 
     console.warn(
-      `Organiser cover request for event ${transition.event.id} could not be delivered at its safety deadline because the configured Event Administration channel or Event Organiser role is unavailable.`,
+      `Organiser cover request for event ${transition.event.id} could not be delivered at its safety deadline because the required organiser notification destination or configuration is unavailable.`,
     );
 
     return;
@@ -1512,7 +1512,7 @@ async function executeOrganiserMissingAtStart(
 
       outcome: "failure",
 
-      summary: `Could not alert administrators that "${transition.event.name}" (#${transition.event.id}) started without an organiser because the configured Event Administration channel or Event Organiser role is unavailable.`,
+      summary: `Could not alert administrators that "${transition.event.name}" (#${transition.event.id}) started without an organiser because the required organiser notification destination or configuration is unavailable.`,
 
       targetType: "event",
 
@@ -1528,7 +1528,7 @@ async function executeOrganiserMissingAtStart(
     });
 
     console.warn(
-      `Missing-organiser start alert for event ${transition.event.id} could not be delivered because the configured Event Administration channel or Event Organiser role is unavailable.`,
+      `Missing-organiser start alert for event ${transition.event.id} could not be delivered because the required organiser notification destination or configuration is unavailable.`,
     );
 
     return;
@@ -1763,13 +1763,17 @@ async function executeOrganiserCoverRequest(
 
   if (delivery === "failed") {
     /*
-     * The notification boundary uses "failed" only for a definitively
-     * unavailable configured destination, such as a deleted Event
-     * Administration channel or Event Organiser role.
+     * The notification boundary uses "failed" only when the claimable
+     * administration message itself cannot be delivered because required
+     * destination/configuration is unavailable.
      *
-     * Retrying the same unchanged configuration through scheduler backoff
-     * cannot make that delivery succeed, so record the failure and allow the
-     * durable action to complete normally.
+     * A missing or deleted organiser notification role is different: when the
+     * administration channel remains usable, delivery degrades successfully to
+     * "posted_without_ping".
+     *
+     * Retrying a definitive delivery failure against unchanged configuration
+     * cannot make it succeed, so record the failure and allow the durable action
+     * to complete normally.
      */
     await writeAuditLog({
       guildId: event.guildDatabaseId,
@@ -1782,7 +1786,7 @@ async function executeOrganiserCoverRequest(
 
       outcome: "failure",
 
-      summary: `Could not request organiser cover for "${event.name}" (#${event.id}) because the configured Event Administration channel or Event Organiser role is unavailable.`,
+      summary: `Could not request organiser cover for "${event.name}" (#${event.id}) because the required organiser notification destination or configuration is unavailable.`,
 
       targetType: "event",
 
@@ -1796,7 +1800,7 @@ async function executeOrganiserCoverRequest(
     });
 
     console.warn(
-      `Organiser cover request for event ${event.id} could not be delivered because the configured Event Administration channel or Event Organiser role is unavailable.`,
+      `Organiser cover request for event ${event.id} could not be delivered because the required organiser notification destination or configuration is unavailable.`,
     );
 
     return;
