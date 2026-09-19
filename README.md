@@ -720,6 +720,7 @@ The following substantial areas are implemented:
 - ordered preset request-group option-mapping replacement
 - administrator-facing role-preset UX review and lifecycle guidance
 - deleted Event Administration channel reliability coverage for organiser delivery and scheduler retries
+- deleted Event Organiser role degradation to tracked unpinged organiser-cover messages
 - preset application with snapshot semantics
 - reversible preset, option, and group lifecycle controls
 - PostgreSQL-backed audit logging
@@ -762,9 +763,11 @@ provides deterministic guild-scoped discovery without adding a separate autocomp
 
 Autocomplete can be reconsidered if real administration experience shows meaningful friction, but it is not required merely to avoid entering IDs.
 
-P0.10 Event Administration channel deletion behaviour is now verified.
+P0.10 Event Administration channel deletion behaviour and P0.11 deleted organiser notification-role behaviour are now verified.
 
-The next focused reliability review is P0.11 deleted organiser notification-role behaviour. After that, event-template development becomes the next major feature area.
+The remaining P0.12 reliability work is an ongoing regression-led development standard rather than a separate broad rewrite.
+
+The next major feature area is event templates, beginning with reconciliation of the repository's existing template schema scaffolding against the architecture established by the event, organiser, reminder, publication, and role-request systems.
 
 ### Event templates
 

@@ -2714,6 +2714,174 @@ describe("event scheduler", () => {
     expect(deleteMessage).not.toHaveBeenCalled();
   });
 
+  it("treats safety cover posted without a role ping as successful delivery", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserCoverDeadline(pool);
+
+    const deleteMessage = vi.fn().mockResolvedValue(undefined);
+
+    organiserNotificationMocks.sendOrganiserCoverRequest.mockResolvedValueOnce({
+      kind: "sent",
+
+      delivery: "posted_without_ping",
+
+      channelId: "300000000000000005",
+
+      messageId: "300000000000000043",
+
+      message: {
+        delete: deleteMessage,
+      },
+    });
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const actionResult = await pool.query<{
+      status: string;
+
+      attempt_count: number;
+
+      completed_at: Date | null;
+
+      last_error: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "completed_at",
+        "last_error"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+
+      attempt_count: 1,
+
+      last_error: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    /*
+     * The safety transition remains authoritative regardless of whether the
+     * wider organiser audience could be pinged.
+     */
+    const assignments = await pool.query<{
+      id: number;
+
+      status: string;
+
+      is_current: boolean;
+    }>(
+      `
+      SELECT
+        "id",
+        "status",
+        "is_current"
+      FROM "event_organiser_assignments"
+      WHERE "event_id" = $1
+      ORDER BY "id"
+    `,
+      [fixture.eventId],
+    );
+
+    expect(assignments.rows).toEqual([
+      {
+        id: fixture.primaryAssignmentId,
+
+        status: "removed",
+
+        is_current: false,
+      },
+
+      {
+        id: fixture.backupAssignmentId,
+
+        status: "removed",
+
+        is_current: false,
+      },
+    ]);
+
+    const messageResult = await pool.query<{
+      channel_id: string;
+
+      message_id: string;
+
+      kind: string;
+    }>(
+      `
+      SELECT
+        "channel_id",
+        "message_id",
+        "kind"::text AS "kind"
+      FROM "event_messages"
+      WHERE
+        "event_id" = $1
+        AND "kind"::text = 'organiser_cover'
+    `,
+      [fixture.eventId],
+    );
+
+    expect(messageResult.rows).toEqual([
+      {
+        channel_id: "300000000000000005",
+
+        message_id: "300000000000000043",
+
+        kind: "organiser_cover",
+      },
+    ]);
+
+    const auditResult = await pool.query<{
+      action: string;
+
+      outcome: string;
+
+      delivery: string | null;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome",
+        "details" ->> 'delivery' AS "delivery"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'event'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.organiser_cover_deadline'
+    `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "scheduler.organiser_cover_deadline",
+
+        outcome: "success",
+
+        delivery: "posted_without_ping",
+      },
+    ]);
+
+    expect(deleteMessage).not.toHaveBeenCalled();
+  });
+
   it("does not send stale general cover when an organiser becomes confirmed during the cover-deadline guild fetch", async () => {
     // Arrange
     const fixture = await createOpenEventWithDueOrganiserCoverDeadline(pool);
@@ -3290,6 +3458,173 @@ describe("event scheduler", () => {
         resolved_at: null,
 
         deleted_at: null,
+      },
+    ]);
+
+    expect(deleteMessage).not.toHaveBeenCalled();
+  });
+
+  it("treats a missing-organiser alert without a role ping as successful delivery", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserMissingAtStart(pool);
+
+    const deleteMessage = vi.fn().mockResolvedValue(undefined);
+
+    organiserNotificationMocks.sendOrganiserMissingAtStartAlert.mockResolvedValueOnce(
+      {
+        kind: "sent",
+
+        delivery: "posted_without_ping",
+
+        channelId: "300000000000000005",
+
+        messageId: "300000000000000044",
+
+        message: {
+          delete: deleteMessage,
+        },
+      },
+    );
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const actionResult = await pool.query<{
+      status: string;
+
+      attempt_count: number;
+
+      completed_at: Date | null;
+
+      last_error: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "completed_at",
+        "last_error"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+
+      attempt_count: 1,
+
+      last_error: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    const messageResult = await pool.query<{
+      channel_id: string;
+
+      message_id: string;
+
+      kind: string;
+
+      resolved_at: Date | null;
+    }>(
+      `
+      SELECT
+        "channel_id",
+        "message_id",
+        "kind"::text AS "kind",
+        "resolved_at"
+      FROM "event_messages"
+      WHERE
+        "event_id" = $1
+        AND
+        "kind"::text = 'organiser_missing_at_start'
+    `,
+      [fixture.eventId],
+    );
+
+    expect(messageResult.rows).toEqual([
+      {
+        channel_id: "300000000000000005",
+
+        message_id: "300000000000000044",
+
+        kind: "organiser_missing_at_start",
+
+        resolved_at: null,
+      },
+    ]);
+
+    /*
+     * An unpinged T+0 message is still the new active claim surface, so earlier
+     * ordinary-cover presentation should still be reconciled.
+     */
+    expect(
+      organiserCoverReconciliationMocks.reconcileOrganiserCoverMessages,
+    ).toHaveBeenCalledTimes(1);
+
+    expect(
+      organiserCoverReconciliationMocks.reconcileOrganiserCoverMessages,
+    ).toHaveBeenCalledWith({
+      guild: expect.objectContaining({
+        id: DISCORD_GUILD_ID,
+      }),
+
+      eventId: fixture.eventId,
+
+      resolution: {
+        kind: "superseded_at_start",
+      },
+
+      scope: "cover_only",
+    });
+
+    const auditResult = await pool.query<{
+      action: string;
+
+      outcome: string;
+
+      delivery: string | null;
+
+      prior_cover_state: string | null;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome",
+        "details" ->> 'delivery'
+          AS "delivery",
+        "details" ->> 'priorCoverState'
+          AS "prior_cover_state"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'event'
+        AND "target_id" = $1
+        AND "action" =
+          'scheduler.organiser_missing_at_start'
+    `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "scheduler.organiser_missing_at_start",
+
+        outcome: "success",
+
+        delivery: "posted_without_ping",
+
+        prior_cover_state: "cover_already_requested",
       },
     ]);
 
@@ -5050,6 +5385,147 @@ describe("event scheduler", () => {
         resolved_at: null,
 
         deleted_at: null,
+      },
+    ]);
+
+    expect(deleteMessage).not.toHaveBeenCalled();
+  });
+
+  it("treats an organiser cover post without a role ping as successful normal escalation", async () => {
+    // Arrange
+    const fixture = await createOpenEventWithDueOrganiserCoverRequest(pool);
+
+    const deleteMessage = vi.fn().mockResolvedValue(undefined);
+
+    organiserNotificationMocks.sendOrganiserCoverRequest.mockResolvedValueOnce({
+      kind: "sent",
+
+      delivery: "posted_without_ping",
+
+      channelId: "300000000000000005",
+
+      messageId: "300000000000000042",
+
+      message: {
+        delete: deleteMessage,
+      },
+    });
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    await waitForScheduledActionStatus(pool, fixture.actionId, "completed");
+
+    stopEventScheduler();
+
+    // Assert
+    const actionResult = await pool.query<{
+      status: string;
+
+      attempt_count: number;
+
+      completed_at: Date | null;
+
+      last_error: string | null;
+    }>(
+      `
+      SELECT
+        "status",
+        "attempt_count",
+        "completed_at",
+        "last_error"
+      FROM "scheduled_actions"
+      WHERE "id" = $1
+    `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toHaveLength(1);
+
+    expect(actionResult.rows[0]).toMatchObject({
+      status: "completed",
+
+      attempt_count: 1,
+
+      last_error: null,
+    });
+
+    expect(actionResult.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    /*
+     * Losing only the notification ping must not make the Discord message
+     * untrackable.
+     */
+    const messageResult = await pool.query<{
+      channel_id: string;
+
+      message_id: string;
+
+      kind: string;
+
+      resolved_at: Date | null;
+
+      deleted_at: Date | null;
+    }>(
+      `
+      SELECT
+        "channel_id",
+        "message_id",
+        "kind"::text AS "kind",
+        "resolved_at",
+        "deleted_at"
+      FROM "event_messages"
+      WHERE
+        "event_id" = $1
+        AND "kind"::text = 'organiser_cover'
+    `,
+      [fixture.eventId],
+    );
+
+    expect(messageResult.rows).toEqual([
+      {
+        channel_id: "300000000000000005",
+
+        message_id: "300000000000000042",
+
+        kind: "organiser_cover",
+
+        resolved_at: null,
+
+        deleted_at: null,
+      },
+    ]);
+
+    const auditResult = await pool.query<{
+      action: string;
+
+      outcome: string;
+
+      delivery: string | null;
+    }>(
+      `
+      SELECT
+        "action",
+        "outcome",
+        "details" ->> 'delivery' AS "delivery"
+      FROM "audit_logs"
+      WHERE
+        "target_type" = 'event'
+        AND "target_id" = $1
+        AND "action" = 'scheduler.organiser_cover_request'
+    `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        action: "scheduler.organiser_cover_request",
+
+        outcome: "success",
+
+        delivery: "posted_without_ping",
       },
     ]);
 

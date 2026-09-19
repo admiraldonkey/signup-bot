@@ -19,6 +19,19 @@ const EVENT_ORGANISER_ROLE_ID = "990000000000000002";
 
 const ORGANISER_USER_ID = "990000000000000004";
 
+const DISCORD_GUILD_ID = "990000000000000005";
+
+function createUnknownRoleError(): {
+  code: number;
+  message: string;
+} {
+  return {
+    code: 10011,
+
+    message: "Unknown Role",
+  };
+}
+
 function createUnknownChannelError(): {
   code: number;
   message: string;
@@ -117,6 +130,294 @@ describe("organiser notification", () => {
     );
 
     expect(payload?.content).toContain(`<@&${EVENT_ORGANISER_ROLE_ID}>`);
+  });
+
+  it("posts organiser cover without a ping when the configured organiser role was deleted", async () => {
+    const sentMessage = {
+      id: "990000000000000006",
+
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const send = vi.fn().mockResolvedValue(sentMessage);
+
+    const channel = {
+      id: EVENT_ADMIN_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: () => true,
+
+      send,
+    };
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: vi.fn().mockResolvedValue(channel),
+      },
+
+      roles: {
+        fetch: vi.fn().mockRejectedValue(createUnknownRoleError()),
+      },
+
+      members: {
+        me: {},
+      },
+    } as unknown as Guild;
+
+    const result = await sendOrganiserCoverRequest({
+      guild,
+
+      eventId: EVENT_ID,
+
+      eventName: "Naval Event",
+
+      eventAdminChannelId: EVENT_ADMIN_CHANNEL_ID,
+
+      eventOrganiserRoleId: EVENT_ORGANISER_ROLE_ID,
+    });
+
+    expect(result).toEqual({
+      kind: "sent",
+
+      delivery: "posted_without_ping",
+
+      channelId: EVENT_ADMIN_CHANNEL_ID,
+
+      messageId: "990000000000000006",
+
+      message: sentMessage,
+    });
+
+    expect(send).toHaveBeenCalledTimes(1);
+
+    const payload = send.mock.calls[0]?.[0] as
+      | {
+          content?: string;
+
+          allowedMentions?: {
+            parse?: string[];
+
+            roles?: string[];
+          };
+        }
+      | undefined;
+
+    expect(payload?.content).toContain("🚨 **Event organiser cover required**");
+
+    expect(payload?.content).not.toContain(`<@&${EVENT_ORGANISER_ROLE_ID}>`);
+
+    expect(payload?.allowedMentions).toEqual({
+      parse: [],
+    });
+  });
+
+  it("posts organiser cover without a ping when the configured organiser role no longer resolves", async () => {
+    const sentMessage = {
+      id: "990000000000000007",
+
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const send = vi.fn().mockResolvedValue(sentMessage);
+
+    const channel = {
+      id: EVENT_ADMIN_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: () => true,
+
+      send,
+    };
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: vi.fn().mockResolvedValue(channel),
+      },
+
+      roles: {
+        fetch: vi.fn().mockResolvedValue(null),
+      },
+
+      members: {
+        me: {},
+      },
+    } as unknown as Guild;
+
+    const result = await sendOrganiserCoverRequest({
+      guild,
+
+      eventId: EVENT_ID,
+
+      eventName: "Naval Event",
+
+      eventAdminChannelId: EVENT_ADMIN_CHANNEL_ID,
+
+      eventOrganiserRoleId: EVENT_ORGANISER_ROLE_ID,
+    });
+
+    expect(result).toEqual({
+      kind: "sent",
+
+      delivery: "posted_without_ping",
+
+      channelId: EVENT_ADMIN_CHANNEL_ID,
+
+      messageId: "990000000000000007",
+
+      message: sentMessage,
+    });
+
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates an unexpected organiser-role resolution failure", async () => {
+    const transientError = new Error(
+      "Temporary Discord role-resolution failure.",
+    );
+
+    const channel = {
+      id: EVENT_ADMIN_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: () => true,
+
+      send: vi.fn(),
+    };
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: vi.fn().mockResolvedValue(channel),
+      },
+
+      roles: {
+        fetch: vi.fn().mockRejectedValue(transientError),
+      },
+
+      members: {
+        me: {},
+      },
+    } as unknown as Guild;
+
+    await expect(
+      sendOrganiserCoverRequest({
+        guild,
+
+        eventId: EVENT_ID,
+
+        eventName: "Naval Event",
+
+        eventAdminChannelId: EVENT_ADMIN_CHANNEL_ID,
+
+        eventOrganiserRoleId: EVENT_ORGANISER_ROLE_ID,
+      }),
+    ).rejects.toBe(transientError);
+
+    expect(channel.send).not.toHaveBeenCalled();
+  });
+
+  it("never pings everyone when the configured organiser role resolves to the guild everyone role", async () => {
+    const sentMessage = {
+      id: "990000000000000008",
+
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const send = vi.fn().mockResolvedValue(sentMessage);
+
+    const channel = {
+      id: EVENT_ADMIN_CHANNEL_ID,
+
+      type: ChannelType.GuildText,
+
+      isSendable: () => true,
+
+      permissionsFor: () => ({
+        /*
+         * Deliberately grant MentionEveryone.
+         *
+         * The delivery boundary must still refuse to turn the guild everyone
+         * role into the organiser-notification ping.
+         */
+        has: () => true,
+      }),
+
+      send,
+    };
+
+    const everyoneRole = {
+      id: DISCORD_GUILD_ID,
+
+      name: "@everyone",
+
+      mentionable: false,
+    };
+
+    const guild = {
+      id: DISCORD_GUILD_ID,
+
+      channels: {
+        fetch: vi.fn().mockResolvedValue(channel),
+      },
+
+      roles: {
+        fetch: vi.fn().mockResolvedValue(everyoneRole),
+      },
+
+      members: {
+        me: {},
+      },
+    } as unknown as Guild;
+
+    const result = await sendOrganiserCoverRequest({
+      guild,
+
+      eventId: EVENT_ID,
+
+      eventName: "Naval Event",
+
+      eventAdminChannelId: EVENT_ADMIN_CHANNEL_ID,
+
+      eventOrganiserRoleId: DISCORD_GUILD_ID,
+    });
+
+    expect(result).toEqual({
+      kind: "sent",
+
+      delivery: "posted_without_ping",
+
+      channelId: EVENT_ADMIN_CHANNEL_ID,
+
+      messageId: "990000000000000008",
+
+      message: sentMessage,
+    });
+
+    const payload = send.mock.calls[0]?.[0] as
+      | {
+          content?: string;
+
+          allowedMentions?: {
+            parse?: string[];
+
+            roles?: string[];
+          };
+        }
+      | undefined;
+
+    expect(payload?.content).not.toContain(`<@&${DISCORD_GUILD_ID}>`);
+
+    expect(payload?.allowedMentions).toEqual({
+      parse: [],
+    });
   });
 
   it("treats a deleted Event Administration channel as a definitive failed assignment fallback", async () => {

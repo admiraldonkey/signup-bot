@@ -1137,6 +1137,104 @@ For the T+0 path, failed or transient notification delivery does not invent a re
 
 ---
 
+## Deleted Event Organiser role behaviour
+
+The Event Organiser role is not itself the Discord delivery destination.
+
+If the configured Event Administration channel remains usable but the configured Event Organiser role has been deleted, a claimable organiser-cover message can still be useful.
+
+Discord may represent a deleted role as either:
+
+```text
+role fetch
+    -> null
+```
+
+or:
+
+```text
+Discord 10011 Unknown Role
+```
+
+Both are treated as definitive absence of the optional notification audience rather than failure of the administrative message destination.
+
+The delivery therefore degrades as:
+
+```text
+usable Event Administration channel
+        |
+        v
+configured organiser role missing
+        |
+        v
+post claimable organiser message
+        |
+        v
+do not include role mention
+        |
+        v
+delivery = posted_without_ping
+```
+
+The resulting Discord message remains tracked like any other successful organiser-cover message.
+
+Scheduler actions complete successfully and audit the actual delivery mode:
+
+```text
+posted_without_ping
+```
+
+This behaviour applies to the shared organiser-cover presentation used by:
+
+```text
+ordinary general cover
+T-15 organiser safety cover
+T+0 missing-organiser alert
+```
+
+Unexpected role-resolution errors are different.
+
+They propagate rather than being silently interpreted as role deletion, preserving normal retry and observability behaviour.
+
+## `@everyone` is never an organiser-role fallback
+
+The organiser-notification boundary must never turn the guild's `@everyone` role into an organiser notification audience.
+
+This remains true even if:
+
+```text
+the configured role ID is stale or incorrect
+the bot has MentionEveryone permission
+```
+
+A resolved `@everyone` role therefore degrades to:
+
+```text
+posted_without_ping
+```
+
+rather than producing a mass mention.
+
+## Authoritative organiser state
+
+Missing notification presentation does not rewrite organiser-domain state.
+
+PostgreSQL remains authoritative for:
+
+```text
+assignments
+ownership
+cover state
+scheduler state
+message linkage
+```
+
+Losing the configured organiser role changes only the available Discord audience.
+
+It does not roll back organiser transitions or cause the scheduler to interpret a successfully-posted unpinged claim message as failed delivery.
+
+---
+
 ## Organiser DM feature switch
 
 A server-level flag controls DM-first delivery.
