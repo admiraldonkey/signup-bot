@@ -1,508 +1,73 @@
-# Holdfast Event Bot Roadmap
+# Development Roadmap
 
-## Purpose
+This document tracks **future development** for the Holdfast Event Bot.
 
-This document records the intended future development direction for the Holdfast Event Bot.
+It is intentionally not a changelog and should not grow by retaining detailed descriptions of completed work.
 
-It is broader than an issue tracker.
+For current implemented behaviour, use:
 
-It exists to preserve:
+- [`../README.md`](../README.md)
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md)
+- [`ADMIN-GUIDE.md`](./ADMIN-GUIDE.md)
+- [`TESTING-GUIDE.md`](./TESTING-GUIDE.md)
 
-- agreed feature direction
-- sequencing between major subsystems
-- architectural prerequisites
-- known reliability work
-- portability and integration intentions
-- deliberately deferred ideas
+For durable architectural rationale and non-obvious invariants, use:
 
-It should not be used as a list of functionality that already exists.
+- [`DECISIONS.md`](./DECISIONS.md)
 
-Implemented behaviour belongs primarily in:
+For the exact current development checkpoint and next implementation task, use:
 
-- `README.md`
-- `ARCHITECTURE.md`
-- `DECISIONS.md`
-- `ADMIN-GUIDE.md`
-
-The exact current development checkpoint belongs in:
-
-- `CURRENT-WORK.md`
-
-Priorities may change as:
-
-- community testing continues
-- implementation exposes new edge cases
-- requirements become clearer
-- Discord platform constraints change
-- collaboration with other community tooling develops
+- [`CURRENT-WORK.md`](./CURRENT-WORK.md)
 
 ---
 
-# Roadmap Status Vocabulary
+## Priority levels
 
-This document uses four broad priority levels.
+| Priority | Meaning                                                           |
+| -------- | ----------------------------------------------------------------- |
+| **P1**   | Current or near-term major development                            |
+| **P2**   | Useful medium-term product, administration, or architectural work |
+| **P3**   | Later, optional, integration, analytics, or quality-of-life work  |
 
-| Priority | Meaning                                                                                           |
-| -------- | ------------------------------------------------------------------------------------------------- |
-| **P0**   | Immediate work or reliability issue that should be addressed before substantial feature expansion |
-| **P1**   | Near-term functionality that forms the next planned development phase                             |
-| **P2**   | Useful medium-term product or architectural development                                           |
-| **P3**   | Later, optional, integration, analytics, or quality-of-life work                                  |
+Priority is not a promise of exact implementation order.
 
-A roadmap priority is not a promise of a release date.
-
----
-
-# Current Project Checkpoint
-
-The project has moved well beyond the original reaction-signup prototype.
-
-Major established areas now include:
-
-- persistent event lifecycle
-- optional attendance sign-ups
-- no-signup events
-- actual attendance recording
-- signup-versus-attendance reporting
-- immediate and scheduled event publication
-- event editing and cancellation
-- persistent reminders
-- immediate announcements
-- PostgreSQL-backed audit logging
-- durable scheduled actions
-- organiser nomination and confirmation
-- primary-to-backup organiser escalation
-- general organiser cover
-- organiser safety deadlines
-- missing-organiser-at-start handling
-- organiser DM-first delivery with administrative fallback
-- server-level organiser controls
-- event-level role options
-- qualification and supervision-required rules
-- independent multi-role requests
-- shared volunteer pools across request groups
-- scheduled role-request group opening
-- scheduled role-request group closing
-- attendance-aware role-request availability
-- deleted event-message recovery
-- deleted role-request-message recovery
-- reusable role-request presets
-- preset snapshot application
-- reversible preset, option, and group lifecycle management
-- unit and real-PostgreSQL integration testing
-- regression coverage for important race conditions
-
-The reusable role-request preset administration surface is implemented, including the final administrator-facing UX review.
-
-The focused organiser deletion-behaviour reliability checks are complete.
-
-Further reliability work continues regression-first alongside feature development rather than as another broad pre-template rewrite.
+Real operational problems, regressions, or newly discovered architectural dependencies may justify changing the sequence.
 
 ---
 
-# Current Development Sequence
+# Current direction
 
-The intended major sequence is:
+The foundational event-management platform is established.
+
+Implemented areas include persistent event lifecycle, publication, attendance, organiser workflows, reminders, event-level role requests, reusable role-request presets, durable scheduling, recovery behaviour, audit logging, and PostgreSQL-backed reliability testing.
+
+The next major development phase is:
 
 ```text
-Reusable role-request presets
-        |
-        | implemented foundation,
-        | application and lifecycle
-        v
-Preset editing
-        |
-        v
-Event templates
-        |
-        v
-Recurring event generation
-        |
-        v
-Broader administration,
-integration and reporting work
+P1
+Event Templates
 ```
 
-This sequence is deliberate.
+followed by:
 
-Templates should not be built around reusable configuration that administrators cannot yet edit properly.
+```text
+P1
+Recurring Event Generation
+```
 
-Recurrence should not be built before template-generated one-off events are reliable and independently editable.
+Reliability remains an ongoing engineering requirement rather than a separate broad rewrite phase.
+
+New work should preserve existing concurrency, snapshot, scheduler, recovery, and authoritative-state guarantees as it is introduced.
 
 ---
 
-# P0 - Complete Role-Request Preset Editing
+# P1 — Event Templates
 
 ## Objective
 
-Complete the administrator workflow for maintaining an existing reusable role-request preset without requiring it to be recreated.
+Add reusable event templates that define defaults for creating ordinary persistent events.
 
-The preset-management foundation, parent metadata editing, core role-option definition editing, qualification-role replacement, multi-role request-group notification foundation, request-group definition editing, ordered group-option mapping replacement, and final Discord administration UX review are implemented.
-
-The planned reusable preset administration work is complete.
-
----
-
-## P0.4 - Preset request-group editing
-
-**Implemented**
-
-Existing reusable request groups can now edit:
-
-- name
-- description
-- destination channel override
-- notification-role collection
-- signup requirement
-- opening offset
-- closing offset
-
-Omitted fields preserve current state.
-
-Description, destination, and notification configuration support explicit destructive clearing.
-
-Notification roles use complete ordered replacement semantics.
-
-Group-option mappings deliberately remain outside this mutation and are handled by P0.5.
-
-Request-group editing participates in the established preset lock:
-
-```text
-application
-    -> parent FOR SHARE
-
-group edit
-    -> parent FOR UPDATE
-```
-
-Existing event snapshots remain independent.
-
----
-
-## P0.5 - Group-option mapping editing
-
-**Implemented**
-
-Administrators can replace the complete ordered role-option mapping for an existing reusable request group.
-
-The implemented operation:
-
-- requires at least one mapped option
-- rejects duplicate option IDs
-- validates that every option belongs to the target preset
-- preserves the supplied order
-- treats order changes as real mutations
-- treats an identical ordered mapping as a no-op
-- allows inactive options to remain mapped
-- preserves independent option lifecycle state
-- preserves the ability to use one logical option in several groups
-- serialises against preset application through the parent lock
-- preserves existing event snapshots
-
-The administrator-facing command is:
-
-```text
-/role-preset group-options-set
-```
-
-The chosen mutation model is complete ordered replacement rather than separate add/remove/reorder commands.
-
-An active group whose mapped options are all inactive may remain stored temporarily.
-
-The command warns clearly, while preset application remains the final authoritative validator and rejects the unusable active graph.
-
-This decision is recorded in `DECISIONS.md`.
-
----
-
-## P0.6 - Preset edit concurrency contract
-
-All preset editing must preserve the existing locking rule:
-
-```text
-preset application
-    -> role_request_presets FOR SHARE
-
-preset mutation
-    -> role_request_presets FOR UPDATE
-```
-
-An application must observe either:
-
-```text
-complete configuration before edit
-```
-
-or:
-
-```text
-complete configuration after edit
-```
-
-It must never snapshot a half-edited preset graph.
-
-This applies to:
-
-- metadata editing
-- role-option editing
-- qualification changes
-- request-group editing
-- mapping changes
-- future delete/retire operations
-
----
-
-## P0.7 - Preserve snapshot independence
-
-No preset edit operation may silently alter event-level configuration that was already created through preset application.
-
-For example:
-
-```text
-Naval preset
-    Captain closes at T+10
-
-apply to Sunday event
-
-later edit preset
-    Captain closes at T+20
-```
-
-The existing Sunday event must retain:
-
-```text
-T+10
-```
-
-unless an administrator explicitly edits the event itself.
-
-This is a core product invariant, not merely an implementation preference.
-
----
-
-## P0.8 - Preset editing Discord UX
-
-**Implemented**
-
-The `/role-preset` administration surface was reviewed as a complete workflow after the mutation services stabilised.
-
-Implemented UX improvements include:
-
-- clearer preset-to-child ID discovery
-- `/role-preset list` guidance toward `/role-preset show`
-- guidance toward `include-inactive:true` when the active list is empty
-- explicit inactive mapped-option presentation
-- warnings when an active group has no active mapped option
-- explicit `Fixed` versus `Apply-time guild default` channel presentation
-- lifecycle activation wording that does not imply graph validity
-- actionable repair commands after lifecycle changes
-- actionable preset-application validation failures
-- consistent no-op behaviour without false audit mutations
-
-Administration remains intentionally ID-based.
-
-Autocomplete was considered but not introduced because the existing:
-
-```text
-list
-  -> show
-      -> mutate
-```
-
-workflow already provides deterministic guild-scoped discovery without requiring another lookup path.
-
-Autocomplete may be revisited if real use demonstrates worthwhile friction reduction.
-
----
-
-## P0.9 - Preset-edit testing expectations
-
-**Implemented as the testing standard used throughout preset editing**
-
-Each new mutation should receive direct integration coverage.
-
-Important cases include:
-
-- correct edit
-- idempotent/no-op edit
-- foreign guild
-- child belongs to different preset
-- inactive parent remains editable
-- invalid option restriction
-- invalid qualification configuration
-- duplicate qualification role
-- invalid group window
-- invalid channel/notification input where applicable
-- logical key remains unchanged when a role-option display name is edited
-- concurrent application versus editing
-- rollback of a multi-row edit after validation failure
-
-Discord adapter tests should separately cover:
-
-- option parsing
-- Discord role resolution
-- Discord channel resolution
-- permission-related UX where relevant
-- service-result formatting
-- audit behaviour
-
----
-
-# P0 - Remaining Reliability Checks Before Template Expansion
-
-The broad organiser, scheduler, publication, role-request, and recovery reliability passes are complete enough to support continued feature work.
-
-A few known reliability questions remain worth addressing before or alongside template development.
-
----
-
-## P0.10 - Event Administration channel deletion behaviour
-
-**Implemented and verified**
-
-Organiser notification and scheduler behaviour has been reviewed for a configured Event Administration channel that no longer exists.
-
-The existing production boundary correctly distinguishes:
-
-```text
-Discord 10003 Unknown Channel
-```
-
-from:
-
-```text
-transient or unexpected Discord failure
-```
-
-A confirmed unknown/deleted channel is treated as a definitive unavailable destination.
-
-The bot does not guess another channel.
-
-Unexpected failures propagate so retryable scheduled work keeps its normal retry/backoff behaviour.
-
-Regression coverage now verifies this distinction for:
-
-```text
-assignment DM fallback
-organiser pending warnings
-ordinary general-cover requests
-T-15 organiser safety cover
-T+0 missing-organiser alerts
-```
-
-Scheduler coverage verifies:
-
-```text
-definitive delivery failure
-    -> action completes
-    -> failure is auditable
-    -> no pointless retry
-```
-
-and:
-
-```text
-transient delivery failure
-    -> action returns to pending
-    -> retry/backoff remains active
-    -> last_error remains observable
-```
-
-For safety-cover workflows, authoritative PostgreSQL organiser transitions remain committed independently from later Discord delivery failure.
-
-No production correction was required.
-
-The review established the existing behaviour with explicit unit and PostgreSQL-backed integration regressions.
-
----
-
-## P0.11 - Deleted organiser notification role
-
-**Implemented and verified**
-
-Organiser cover delivery now degrades safely when the configured Event Organiser role no longer exists in Discord.
-
-The notification boundary distinguishes:
-
-```text
-deleted / missing role
-    -> null
-    -> or Discord 10011 Unknown Role
-```
-
-from:
-
-```text
-unexpected role-resolution failure
-```
-
-When the Event Administration channel is still usable but the organiser role is missing:
-
-```text
-post claimable organiser message
-        |
-        v
-omit role ping
-        |
-        v
-delivery = posted_without_ping
-```
-
-The message remains durably trackable.
-
-Scheduler coverage verifies successful unpinged delivery for:
-
-```text
-ordinary organiser cover
-T-15 organiser safety cover
-T+0 missing-organiser alert
-```
-
-These actions complete successfully and audit:
-
-```text
-delivery = posted_without_ping
-```
-
-rather than entering failed-delivery or retry state merely because the notification role disappeared.
-
-Unexpected role-resolution errors continue to propagate.
-
-The delivery boundary also explicitly prevents the guild's `@everyone` role from becoming an organiser-notification fallback, even when the bot has mass-mention permission.
-
-Authoritative PostgreSQL organiser state remains independent from the presence of the Discord notification role.
-
-A production correction was required because the previous implementation treated a missing role as complete delivery failure and did not classify Discord `10011 Unknown Role`.
-
----
-
-## P0.12 - Continue regression-led reliability work
-
-**Ongoing engineering principle**
-
-Do not perform another repository-wide reliability rewrite merely because reliability remains important.
-
-Instead:
-
-- add regressions when concrete failures are discovered
-- preserve existing concurrency contracts
-- extract services where a real reusable boundary emerges
-- keep the full test gate green
-- review new template/recurrence work for races as it is introduced
-
----
-
-# P1 - Event Templates
-
-## Objective
-
-Add reusable event templates after preset editing is complete.
-
-A template should describe reusable **defaults** for creating an event.
-
-It should not become a live runtime configuration object that existing events continuously consult.
-
-Conceptually:
+The core model is:
 
 ```text
 template
@@ -512,42 +77,72 @@ template
 ordinary event
 ```
 
-After generation, the event should behave like any manually-created event.
+A generated event must become normal event-level state.
+
+The source template provides reusable configuration at generation time. It must not become a live configuration object that existing events continuously consult.
+
+After generation:
+
+- the event owns its runtime state
+- normal event commands operate on the event
+- later template edits do not rewrite the event
+- the event can be edited independently
+- historical behaviour does not depend on the current template definition
 
 ---
 
-## P1.1 - Reconcile existing template schema scaffolding
+## P1.1 — Reconcile existing template schema scaffolding
 
-The repository already contains early template-related schema concepts.
+This is the immediate next task.
 
-Before building the feature, review existing fields and tables against the architecture now established by:
+The repository already contains early template-related schema concepts created before several newer subsystems reached their current architecture.
+
+Before implementing template commands or generation behaviour:
+
+1. inspect the current template-related schema and migrations
+2. identify which existing fields remain useful
+3. identify obsolete assumptions
+4. compare the scaffolding with current event creation and snapshot boundaries
+5. design the minimum coherent schema for the first template implementation
+6. generate explicit new migrations for intentional changes
+
+Do not preserve old scaffolding merely because it already exists.
+
+Do not edit previously-applied migration files.
+
+The review must consider the architecture now established by:
 
 - `createStoredEvent()`
-- reusable role-request presets
-- event-level organiser assignments
-- reminders
+- event lifecycle
 - publication scheduling
-- snapshot semantics
+- event ping-role snapshots
+- organiser assignments
+- reminders
+- reusable role-request presets
+- preset application
+- event-level role-request snapshots
+- durable scheduled actions
+- audit behaviour
 
-Do not preserve obsolete scaffolding merely because it predates the newer architecture.
-
-Generate explicit new migrations for intentional schema changes.
+The reconciliation should establish where template source state ends and event-owned snapshot state begins.
 
 ---
 
-## P1.2 - Template identity and lifecycle
+## P1.2 — Template identity and lifecycle
 
-A template will likely need persistent fields such as:
+Templates will need persistent identity and ownership.
+
+Likely core fields include:
 
 - guild owner
-- name
-- description
-- active state
+- template name
+- optional description
+- active/inactive state
 - creator
 - created timestamp
 - updated timestamp
 
-Possible lifecycle operations include:
+Expected administration will likely include:
 
 ```text
 create
@@ -557,116 +152,131 @@ edit
 set-active
 ```
 
-Destructive deletion should be considered carefully if generated event provenance depends on the template.
+Prefer reversible lifecycle state over destructive deletion where generated-event provenance may refer back to the template.
 
-A reversible inactive/archive model is likely preferable.
+If deletion is ever introduced, define what happens to historical provenance first.
 
 ---
 
-## P1.3 - Reusable event defaults
+## P1.3 — Reusable event defaults
 
-Templates should be able to define practical defaults such as:
+Templates should provide practical defaults for event creation.
+
+Candidate configuration includes:
 
 - event type
-- region/audience
+- region or audience context
 - timezone
 - name
 - description
-- local start time
+- normal local start time
 - duration
 - signup enabled/disabled
-- signup-close offset
-- detailed-response timing where relevant
-- publication offset
+- signup-close timing
+- detailed-response timing where applicable
+- publication timing
 - publication destination/default behaviour
 - ping roles
 - organiser defaults
 - role-request configuration
 - reminder definitions
 
-Not every field needs to ship in the first template implementation.
+The first implementation does not need every conceivable field.
 
-The first version should favour a coherent usable workflow over attempting every conceivable option at once.
+Prefer a coherent usable template workflow over a giant configuration surface delivered all at once.
 
 ---
 
-## P1.4 - Default event duration
+## P1.4 — Event duration
 
-The current default duration for newly-created events is approximately:
+The current normal default duration for manually-created events is approximately:
 
 ```text
 60 minutes
 ```
 
-Template behaviour should respect explicit configured duration rather than reverting to older assumptions that regiment events normally last two hours.
+Template behaviour should preserve explicitly configured duration.
+
+Do not reintroduce older assumptions that a normal regiment event lasts two hours.
 
 ---
 
-## P1.5 - Template organiser defaults
+## P1.5 — Template organiser defaults
 
-Templates should be able to define:
+Templates should support reusable primary and backup organiser defaults.
 
-- primary organiser default
-- backup organiser default
-
-When an event is generated:
+Generation should create:
 
 ```text
-template defaults
-       |
-       v
+template organiser defaults
+        |
+        v
 ordinary dormant event organiser assignments
 ```
 
-They must then follow the normal event organiser workflow.
+The generated event then owns those assignments.
 
-The generated event, not the template, owns the runtime assignment.
+They must participate in the normal organiser lifecycle:
+
+- activation
+- confirmation
+- decline
+- warning
+- timeout
+- backup escalation
+- general cover
+- safety deadline
+- missing-organiser-at-start handling
+- cover claiming
+- cancellation/completion reconciliation
+
+Do not create a separate template-specific runtime organiser workflow.
 
 ---
 
-## P1.6 - Template role-request defaults
+## P1.6 — Template role-request defaults
 
-Do not create a second incompatible reusable role-request system inside templates.
+Templates must build on the existing reusable role-request preset subsystem rather than introducing a second reusable role graph.
 
-Prefer building on the existing role-request preset model.
-
-Potential approaches include:
+A likely model is:
 
 ```text
-template references role-request preset(s)
+template
+    |
+    | references reusable role-request configuration
+    v
+generation
+    |
+    v
+event-level role-request snapshot
 ```
 
-followed by:
+The exact template-to-preset relationship must be decided deliberately during schema design.
 
-```text
-occurrence generation
-    -> snapshot preset configuration
-    -> event-level role options/groups
-```
+Required outcomes:
 
-The exact relationship should be designed before schema implementation.
-
-Important requirements:
-
-- generated event receives ordinary event-level configuration
-- runtime does not depend on the preset
-- event remains independently editable
+- generated events receive ordinary event-level role options/groups
+- runtime behaviour does not depend on the source preset
+- generated events remain independently editable
 - later preset changes do not rewrite generated events
+- the normal preset validation and snapshot guarantees remain authoritative
+
+The relationship between template lifecycle and referenced preset lifecycle must also be defined.
 
 ---
 
-## P1.7 - Template reminder defaults
+## P1.7 — Template reminder defaults
 
 Templates should support reusable reminder definitions.
 
-Example recurring event:
+Example:
 
 ```text
 10 minutes before signup close
     -> remind members to sign up
 
 10 minutes before event start
-    -> ask members to begin joining the event voice channel
+    -> ask members to begin joining
 ```
 
 Generation should produce:
@@ -678,54 +288,60 @@ template reminder definition
 event_reminders
         |
         v
-ordinary durable scheduler action
+ordinary durable scheduled action
 ```
 
-The reminder then belongs to the generated event.
+Each generated event owns its reminder rows and scheduled actions.
+
+Later template edits should not rewrite reminders already snapshotted into existing events.
 
 ---
 
-## P1.8 - Review reminder lifecycle before generating unpublished events far in advance
+## P1.8 — Review reminder validity for long-lived unpublished events
 
-Current reminder behaviour was developed primarily around manually-created events.
-
-Template-generated events may remain:
+Template-generated events may exist as:
 
 ```text
 scheduled
 unpublished
 ```
 
-for days or weeks.
+for days or weeks before public publication.
 
-Before using the existing reminder rescheduling helper during template generation, review signup-close reminder validity logic carefully.
+Before template generation uses the existing reminder rescheduling/validity helpers, review signup-close reminder behaviour carefully.
 
-A valid future signup-close reminder must not be cancelled merely because the event is still unpublished or has not yet entered its public signup phase.
+A future reminder must not be treated as obsolete merely because:
 
-This is a known implementation consideration, not a hypothetical nice-to-have.
+- the event is still unpublished
+- public signups have not opened yet
+- the event was generated substantially in advance
+
+This is a required implementation review for templates, not an optional later polish item.
 
 ---
 
-## P1.9 - Template ping-role snapshots
+## P1.9 — Ping-role snapshots
 
-Template defaults may reference guild roles.
+Templates may reference Discord roles used to notify the event audience.
 
 When generating an event:
 
 - resolve the configured role
-- snapshot the role ID
-- snapshot readable role name where appropriate
-- create ordinary event ping-role rows
+- snapshot its Discord role ID
+- snapshot a readable role name where appropriate
+- create ordinary event-level ping-role rows
 
-Changing the template later must not rewrite an already-generated event's ping audience.
+Changing template audience configuration later must not alter already-generated events.
+
+Deleted or changed Discord roles must follow the normal event snapshot and degraded-presentation principles rather than turning templates into live role lookups.
 
 ---
 
-## P1.10 - Template-generated events must be independently editable
+## P1.10 — Generated events remain independently editable
 
-Once generated, an event should be ordinary event state.
+Once generated, an event must behave like a normal event.
 
-Administrators should be able to change that occurrence's:
+Administrators should be able to change an occurrence's:
 
 - date/time
 - duration
@@ -740,26 +356,31 @@ Administrators should be able to change that occurrence's:
 without changing:
 
 - the source template
-- earlier occurrences
-- other already-generated occurrences
+- earlier generated events
+- other already-generated events
+- the recurring series definition
+
+This is a central template invariant.
 
 ---
 
-## P1.11 - Template edits affect future generated events by default
+## P1.11 — Template edits affect future generation by default
 
-Normal template editing should use:
+Normal template editing should mean:
 
 ```text
 edit template
-    -> affects not-yet-generated occurrences
+    |
+    v
+future generated events use new configuration
 ```
 
-It should not silently propagate into existing event rows.
+It should not automatically propagate into events that already exist.
 
 If bulk propagation is ever useful, design it as a separate explicit operation with:
 
-- preview
 - clear scope
+- preview
 - conflict handling
 - protection for individually-customised occurrences
 
@@ -767,111 +388,138 @@ Do not make propagation implicit.
 
 ---
 
-## P1.12 - Template preview
+## P1.12 — Template preview
 
-Consider an administrator preview before generation or activation.
+Consider an administrator preview before activation or generation.
 
-Useful preview information might include:
+Useful preview information may include:
 
 - event type
 - region
 - normal start time
+- timezone
 - duration
 - signup settings
 - publication timing
 - organiser defaults
-- role-request preset
+- role-request configuration
 - reminder schedule
+- ping audience
 
-This could catch configuration mistakes before recurrence generates several events from them.
+A preview can catch configuration mistakes before recurrence creates multiple events from the same source.
+
+This is useful but should not block the minimum viable template domain unless implementation naturally supports it.
 
 ---
 
-## P1.13 - Template provenance
+## P1.13 — Template provenance
 
 Generated events should retain source-template provenance.
 
-That provenance is useful for:
+Provenance is useful for:
 
 - administration
-- recurrence identity
 - debugging
-- future reporting
+- recurrence identity
+- reporting
+- future template/series management
 
-It must not create a live dependency on current template configuration.
+Provenance must not create a live dependency.
+
+Conceptually:
+
+```text
+generated event
+    |
+    +---- source_template_id
+    |
+    +---- event-owned snapshot state
+```
+
+An existing event must continue functioning if its source template is later edited or deactivated.
 
 ---
 
-# P1 - Recurring Event Generation
+# P1 — Recurring Event Generation
 
 ## Objective
 
 Generate future ordinary event occurrences from reusable templates.
 
-Do not represent a recurring series as one magical event row whose date keeps changing.
+Do not model a recurring series as one event row whose date repeatedly changes.
+
+The intended shape is:
+
+```text
+template / series
+        |
+        v
+recurrence calculation
+        |
+        v
+ordinary persistent event occurrences
+```
+
+One-off template generation should be stable before recurrence becomes authoritative.
 
 ---
 
-## P1.14 - Standards-based recurrence representation
+## P1.14 — Standards-based recurrence representation
 
-Prefer a recognised recurrence model such as:
+Prefer a recognised recurrence model such as RFC 5545 RRULE where practical.
 
-```text
-RFC 5545 RRULE
-```
-
-where practical.
-
-Example concept:
+Example:
 
 ```text
 FREQ=WEEKLY
 BYDAY=MO
 ```
 
-A recurrence library should be evaluated rather than implementing calendar recurrence rules manually.
+Evaluate a mature recurrence library rather than implementing calendar recurrence arithmetic manually.
 
-Requirements include correct handling of:
+Required concerns include:
 
 - weekly schedules
-- timezone context
+- named timezone context
 - daylight-saving changes
 - exclusions
-- series start/end
+- start/end bounds
 - occurrence counting
 
 ---
 
-## P1.15 - Rolling generation horizon
+## P1.15 — Rolling generation horizon
 
 Do not materialise an unlimited future series.
 
-Generate occurrences for a rolling future horizon.
+Generate occurrences within a bounded rolling horizon.
 
-A working design target discussed so far is roughly:
+A working design candidate discussed so far is approximately:
 
 ```text
 21 days
 ```
 
-The final value may be configurable or adjusted after real use.
+This is not yet a fixed product requirement.
 
-Benefits include:
+The final horizon may be configurable or changed after operational experience.
+
+Benefits of bounded generation include:
 
 - manageable database size
-- manageable scheduled-action volume
+- bounded scheduled-action volume
 - easier template edits
-- easier series cancellation
+- easier series changes
 - fewer unnecessary hypothetical events
 - natural future-only application of template changes
 
 ---
 
-## P1.16 - Generate before public announcement
+## P1.16 — Generate before public announcement
 
-A recurring occurrence should normally exist before it is publicly announced.
+A recurring occurrence should normally exist before publication time.
 
-Desired sequence:
+Preferred sequence:
 
 ```text
 occurrence enters generation horizon
@@ -879,7 +527,7 @@ occurrence enters generation horizon
         v
 persistent event created
         |
-        +---- dormant organisers created
+        +---- organisers snapshotted
         |
         +---- role-request configuration snapshotted
         |
@@ -893,112 +541,123 @@ persistent event created
 normal publication time arrives
 ```
 
-Do not wait until publication time to create the occurrence for the first time.
+Do not wait until publication time to create the event for the first time.
+
+This gives administrators time to inspect or customise a particular occurrence before Discord presentation becomes public.
 
 ---
 
-## P1.17 - Immutable occurrence identity
+## P1.17 — Immutable occurrence identity
 
-A generated recurring occurrence needs an immutable identity separate from:
+A recurring occurrence needs an immutable schedule identity separate from mutable event timing.
+
+Do not use:
 
 ```text
 event.startsAt
 ```
 
-Example failure without one:
+as the sole occurrence identity.
+
+Example failure:
 
 ```text
 Monday occurrence generated
-
+        |
+        v
 administrator moves it to Tuesday
-
+        |
+        v
 generator runs again
-
+        |
+        v
 original Monday slot appears absent
-
-duplicate event generated
+        |
+        v
+duplicate generated
 ```
 
-Use a stable occurrence key derived from the series schedule's original occurrence identity.
-
-Changing the event time must not change that key.
+A moved event must remain recognisable as the occurrence originally generated for that schedule slot.
 
 ---
 
-## P1.18 - Idempotent generation
+## P1.18 — Idempotent occurrence generation
 
-Running the recurrence generator several times for the same horizon must not create duplicate occurrences.
+Running generation repeatedly for the same horizon must not create duplicates.
 
-Generation should have a durable uniqueness rule based on something like:
+Use a durable uniqueness rule based on the series/template identity and immutable occurrence identity.
+
+Conceptually:
 
 ```text
-template/series
+series
 +
 occurrence key
+=
+one generated occurrence
 ```
 
-Exact schema should be decided during implementation.
-
-Concurrency must also be covered so two generation workers cannot create the same occurrence.
+Cover concurrent generators with deterministic PostgreSQL-backed tests.
 
 ---
 
-## P1.19 - Individual occurrence edits remain local
+## P1.19 — Individual occurrence edits remain local
 
-Editing one generated event should not rewrite:
+Editing one generated event must not rewrite:
 
-- the recurrence rule
 - the template
+- recurrence rule
 - neighbouring occurrences
+- already-generated future occurrences unless an explicit bulk action exists
 
-A moved occurrence remains part of the same logical series through its immutable occurrence identity.
+A moved occurrence remains associated with its original series slot through immutable occurrence identity.
 
 ---
 
-## P1.20 - Individual occurrence cancellation
+## P1.20 — Individual occurrence cancellation
 
-Administrators must be able to cancel one occurrence without cancelling the whole recurring series.
+Administrators must be able to cancel one generated event without cancelling the recurring series.
 
-Its immutable occurrence identity must prevent the generator from interpreting that cancellation as:
+A cancelled event remains the occurrence record for that slot.
+
+The generator must not interpret cancellation as:
 
 ```text
-occurrence missing, regenerate it
+occurrence missing
+    -> regenerate it
 ```
-
-A cancelled generated event remains the occurrence record for that slot.
 
 ---
 
-## P1.21 - Series/template disable behaviour
+## P1.21 — Series/template disable behaviour
 
-Define clearly what happens when recurring generation is disabled.
-
-Likely default behaviour:
+Disabling recurrence should normally mean:
 
 ```text
-disable future generation
-    -> stop creating new occurrences
-    -> leave already-generated events intact
+stop future generation
+    |
+    v
+already-generated events remain intact
 ```
 
-Do not automatically cancel already-generated events unless the administrator explicitly requests that separate action.
+Do not automatically cancel existing generated events unless an administrator explicitly requests that separate action.
 
 ---
 
-## P1.22 - Recurrence schedule changes
+## P1.22 — Recurrence schedule changes
 
-When the recurrence definition changes:
+When recurrence configuration changes:
 
 - already-generated events should normally remain unchanged
 - not-yet-generated occurrence calculation should use the new rule
 
-More complex operations such as regenerating a future horizon should be explicit and carefully scoped.
+If future regeneration or reconciliation becomes useful, make it an explicit scoped operation.
 
 ---
 
-## P1.23 - Daylight-saving behaviour
+## P1.23 — Daylight-saving behaviour
 
-Recurring local event times must retain the intended local meaning.
+Recurring local event times must preserve intended local wall-clock meaning.
 
 Example:
 
@@ -1008,41 +667,41 @@ Every Monday at 20:00 Europe/London
 
 should remain a 20:00 London event across daylight-saving transitions.
 
-Do not implement recurrence by repeatedly adding fixed UTC durations if that changes the intended local wall-clock time.
+Do not implement recurrence by repeatedly adding fixed UTC durations where that changes the intended local time.
 
 ---
 
-## P1.24 - Recurrence scheduler architecture
+## P1.24 — Recurrence scheduler architecture
 
-Decide how rolling occurrence generation itself is triggered.
+Decide how rolling occurrence generation is triggered.
 
 Possible approaches include:
 
 - periodic durable scheduler work
 - startup plus periodic sweep
-- a dedicated recurring-generation action
+- dedicated recurrence-generation scheduled actions
 
-Whichever approach is selected must be:
+The selected design must be:
 
 - restart-safe
 - idempotent
 - bounded
 - concurrency-safe
-- testable without relying on wall-clock sleeps
+- observable
+- deterministic in tests
+- independent from arbitrary wall-clock sleeps
 
 ---
 
-# P1 - Confirmed Organiser Unavailability
+# P1 — Confirmed Organiser Unavailability
 
 ## Objective
 
-Allow an organiser who has already confirmed to state that they can no longer operate the event.
+Allow an organiser who has already confirmed responsibility to report that they can no longer run the event.
 
-This remains one of the most important unfinished organiser workflows.
+This remains an important unfinished organiser workflow.
 
----
-
-## Desired primary flow
+Primary flow:
 
 ```text
 Confirmed Primary
@@ -1061,11 +720,7 @@ Unavailable
             General Cover
 ```
 
----
-
-## Confirmed backup or cover becomes unavailable
-
-Conceptually:
+Confirmed backup or cover flow:
 
 ```text
 Confirmed Backup/Cover
@@ -1077,99 +732,76 @@ Unavailable
 General Cover
 ```
 
-Reuse:
-
-- organiser assignment history
-- current-owner semantics
-- escalation services
-- general-cover services
-- safety deadlines
-
-Do not introduce a parallel emergency-organiser model.
-
----
-
-## Requirements
-
-The workflow should:
+Requirements:
 
 - preserve assignment history
 - remove current ownership safely
-- activate a viable next path
+- activate the next viable path
 - cancel obsolete scheduled actions
 - respect event cancellation/completion
 - respect organiser feature disable
-- reconcile warning/administrative messages
+- reconcile warning/cover presentation
 - audit the transition
-- handle concurrency with timeout/cover operations
+- handle races with timeout and cover operations
+
+Reuse the existing organiser assignment, escalation, cover, and safety model.
+
+Do not introduce a parallel emergency-organiser subsystem.
 
 ---
 
-# P1 - Remaining Server-Level Feature Controls
+# P1 — Remaining Server-Level Feature Controls
 
-The organiser subsystem currently has server-level controls for:
-
-- organisers as a whole
-- organiser DM-first delivery
-
-Additional administrator-only feature controls remain useful.
-
----
-
-## P1.25 - Role-request parent feature switch
+## P1.25 — Role-request parent feature switch
 
 Consider a guild-level switch for the role-request subsystem.
 
-Current role-request availability is influenced by event-type configuration.
-
-A guild-level parent switch could provide:
+A parent switch could express:
 
 ```text
 role requests disabled for this server
 ```
 
-without removing event-type configuration.
+without destroying existing event-type or preset configuration.
 
-If implemented, determine:
+Before implementation define:
 
 - whether existing open groups remain usable
-- what happens to scheduled open/close actions
-- whether application of presets is blocked
-- whether manual event-level role configuration is blocked
-- the required shared/exclusive locking contract
-- what happens when the feature is re-enabled
+- what happens to pending opening/closing actions
+- whether preset application is blocked
+- whether manual event-level configuration is blocked
+- what happens after re-enable
+- the locking relationship with in-flight role-request operations
 
-Do not implement it as an unlocked boolean check if disabling must serialise against in-flight role-request operations.
+Do not implement this as an unlocked boolean check if disable must serialise against active operations.
 
 ---
 
-## P1.26 - Other feature switches
+## P1.26 — Other feature switches
 
-Potential future controls include:
+Possible future controls include:
 
 - actual attendance reporting
 - reminders
 - announcements
 - reusable role-request presets
-- automatic organiser escalation if a real use case requires separating it from organiser assignment
+- automatic organiser escalation if a real operational need emerges
 
-Only add switches that solve a real server-level configuration need.
+Only add a feature switch when it solves a real server-level configuration requirement.
 
-Avoid producing a settings matrix larger than the features it controls.
-
----
-
-# P2 - Event-Level Role-Request Administration
-
-Reusable preset administration is the immediate priority.
-
-Event-level role configuration could later receive richer edit operations as well.
+Avoid creating a settings matrix larger than the features it controls.
 
 ---
 
-## P2.1 - Event role-option editing
+# P2 — Event-Level Role-Request Administration
 
-Potential operations include:
+Reusable preset administration is established.
+
+Event-level role configuration may later gain richer mutation support.
+
+## P2.1 — Event role-option editing
+
+Potential operations:
 
 - edit display name
 - edit description
@@ -1178,28 +810,28 @@ Potential operations include:
 - change capacity
 - deactivate/reactivate an option
 
-Historical requests may already reference an option.
+Historical requests may already reference the option.
 
-Prefer non-destructive lifecycle changes over deleting records that have operational or historical meaning.
+Prefer non-destructive lifecycle changes over deleting operational or historical state.
 
 ---
 
-## P2.2 - Existing event request-group editing
+## P2.2 — Existing event request-group editing
 
-Potential operations include:
+Potential operations:
 
 - edit group name
 - edit description
 - change displayed options
 - change signup requirement
-- move future opening
+- move a future opening
 - change closing rule
-- replace or edit notification-role collection
-- move destination before publication
-- retire/deactivate a planned group
+- replace notification roles
+- change destination before publication
+- deactivate a planned group
 - reopen where domain rules permit it
 
-Editing a group after it has already posted requires care because:
+Editing an already-published group is materially different from editing a reusable preset because it may already have:
 
 ```text
 stored schedule
@@ -1208,41 +840,32 @@ Discord presentation
 existing requests
 ```
 
-may all already exist.
-
-Do not treat this as the same problem as editing a reusable preset source.
+Treat the problem accordingly.
 
 ---
 
-## P2.3 - Explicit message move/repost administration
+## P2.3 — Explicit message move/repost administration
 
-Automatic recovery currently handles important cases where an authoritative Discord message has been deleted but its destination is still known.
+Automatic recovery already handles important deleted-message cases where the authoritative destination remains known.
 
-Administrators may still benefit from explicit tooling for cases such as:
+Administrators may later benefit from explicit operations to:
 
-- intentionally move an event message
-- intentionally move a role-request group
-- recreate in a new channel after the old channel was deleted
-- force a presentation rebuild after repairing permissions
+- move an event presentation intentionally
+- move a role-request group intentionally
+- rebuild after a destination channel was replaced
+- force presentation recreation after repairing permissions
 
-Such tools must not:
-
-- duplicate role pings unexpectedly
-- duplicate event state
-- duplicate role-request records
-- treat a new destination as automatic recovery
-
-Moving presentation is an explicit administrative operation.
+Such operations must preserve authoritative database linkage and concurrency guarantees.
 
 ---
 
-# P2 - Actual Attendance Participation Context
+# P2 — Actual Attendance Participation Context
 
 ## Objective
 
-Extend actual attendance beyond the current present/not-present model.
+Extend actual attendance beyond simple present/not-present state.
 
-Initial event-specific context could include:
+Potential event-specific context includes:
 
 ```text
 participant
@@ -1252,28 +875,11 @@ server_admin
 other
 ```
 
----
+Reporting could then distinguish actual presence from the capacity in which somebody attended.
 
-## Reporting goals
+This should improve signup comparison semantics.
 
-Potential reports could distinguish:
-
-```text
-Total present
-Participants
-Supervisors
-Organisers
-Server administrators
-Other support attendance
-```
-
----
-
-## Signup comparison semantics
-
-Participation context should improve discrepancy reporting.
-
-Examples:
+For example:
 
 ```text
 participant + no signup
@@ -1286,48 +892,34 @@ supervisor + no signup
 organiser + no signup
     -> present
     -> not automatically a signup problem
-
-server_admin + no signup
-    -> present
-    -> not automatically a signup problem
 ```
 
-Bulk attendance recording should normally default to:
+Bulk attendance recording should normally default to `participant` unless another context is supplied.
 
-```text
-participant
-```
-
-unless another context is supplied.
-
-Discord roles may suggest a context.
-
-They must not silently become immutable historical evidence.
+Discord roles may help suggest context at recording time, but runtime role membership should not become permanent historical truth by inference alone.
 
 ---
 
-# P2 - Cancellation Notifications
+# P2 — Cancellation Notifications
 
-Extend event cancellation with optional notification of affected members.
+Extend event cancellation with optional notification of affected people.
 
 Potential audiences include:
 
 - Attending members
 - Tentative members
 - current organiser
-- other specifically relevant operational roles
+- other operationally-relevant users
 
-Avoid notifying people unnecessarily when they are already the actor performing the cancellation or otherwise clearly aware.
+Notification delivery must remain separate from the authoritative cancellation transition.
 
-The event message should remain visibly cancelled.
-
-Cancellation notification should be separate from the final database transition so a Discord delivery problem cannot undo event cancellation.
+A Discord delivery failure must not undo cancellation.
 
 ---
 
-# P2 - Event Duplication
+# P2 — Event Duplication
 
-A convenient one-off event duplication workflow may still be useful even after templates exist.
+A convenient one-off duplication workflow may still be useful after templates exist.
 
 Potential command:
 
@@ -1335,14 +927,14 @@ Potential command:
 /event duplicate
 ```
 
-Reasonable data to offer for copying:
+Reasonable configuration to copy may include:
 
 - event configuration
 - ping roles
-- organiser nominees as fresh dormant assignments
+- fresh dormant organiser nominees
 - role options
 - qualification rules
-- request-group definitions
+- request groups
 - reminder definitions
 
 Do not copy historical/live state such as:
@@ -1351,67 +943,52 @@ Do not copy historical/live state such as:
 - actual attendance
 - role requests
 - organiser response history
-- sent reminder state
+- reminder delivery history
 - audit history
 - Discord message IDs
 - completed scheduled-action state
 
-Template support may reduce the urgency of this feature.
-
-Reassess after templates are in real use.
+Reassess urgency after templates are in practical use.
 
 ---
 
-# P2 - Supervisor Availability Warnings
+# P2 — Supervisor Availability Warnings
 
-Where volunteers require supervision, organisers could receive useful warnings.
-
-Example:
+Where volunteers require supervision, organisers could receive warnings such as:
 
 ```text
 Captain volunteers requiring supervision: 3
 Qualified Supervisor volunteers available: 0
 ```
 
-Possible presentation:
-
-```text
-⚠️ Three Captain volunteers currently require supervision,
-but no qualified Supervisor volunteer is available.
-```
-
-Do not automatically allocate supervisors at this stage.
-
-The system should inform a human organiser.
+The system should inform the human organiser rather than automatically allocate supervisors.
 
 ---
 
-# P2 - Reminder Improvements
+# P2 — Reminder Improvements
 
-The current persistent reminder system is functional.
-
-Potential extensions include:
+Potential reminder extensions include:
 
 - publication-relative reminders
 - role-request-opening-relative reminders
 - role-request-closing-relative reminders
 - easier duplication
-- richer destination options
+- richer destinations
 - template-defined reminder sets
 - recurrence-aware defaults
 - additional timing references where a real use case exists
 
-Missed reminders should continue to remain auditable rather than disappearing silently.
+Missed reminders should remain auditable rather than simply disappearing.
 
 ---
 
-# P2 - `/event` Command Structure Review
+# P2 — `/event` Command Structure Review
 
-The `/event` command has accumulated a broad administrator surface.
+The `/event` command contains a broad administrator surface.
 
-Before Discord's command limits or usability become active blockers, review whether some functionality should move to dedicated top-level command families.
+If Discord limits or real administrator usability make the current structure awkward, review whether some operations should move into dedicated command families.
 
-Possible future direction:
+Possible direction:
 
 ```text
 /event
@@ -1423,57 +1000,46 @@ Possible future direction:
     refresh
 
 /organiser
-    set
-    clear
-    status
     ...
 
 /roles
-    option-add
-    group-post
-    requests
     ...
 
 /reminder
-    add
-    edit
-    list
-    remove
+    ...
 ```
 
-The exact names should be driven by administrator usability.
-
-A command-layout redesign should:
+Any redesign should:
 
 - preserve underlying services
 - preserve authorisation
 - preserve audit semantics
-- avoid breaking existing workflows without good reason
-- avoid mixing the redesign with unrelated domain changes
+- avoid unrelated domain changes
+- avoid breaking established workflows without a real benefit
 
-Do not move code merely to obtain prettier slash-command names.
+Do not move code solely to obtain prettier slash-command names.
 
 ---
 
-# P2 - Health and Diagnostics
+# P2 — Health and Diagnostics
 
-As scheduled and recoverable workflows continue growing, administrator diagnostics would become increasingly useful.
+As recoverable and scheduled workflows grow, administrator diagnostics may become useful.
 
 Potential diagnostics include:
 
 - scheduler health
 - pending action counts
-- failed scheduled actions
+- failed actions
 - overdue actions
 - stale processing actions
-- failed event publication
+- failed publication
 - failed role-group publication
 - missing Discord messages
 - missing channels
 - missing roles
-- invalid reusable presets
+- invalid reusable configuration
 - reminder failures
-- organiser workflow anomalies
+- organiser anomalies
 - database connectivity
 
 Possible surfaces include:
@@ -1486,13 +1052,13 @@ or a future administrative portal.
 
 Diagnostics should report state.
 
-They should not silently mutate or "repair" records unless an explicit repair operation exists.
+Automatic repair should only occur through explicit operations with understood semantics.
 
 ---
 
-# P2 - Privacy and Data Management
+# P2 — Privacy and Data Management
 
-Before substantially wider deployment, formalise policies and administrator tooling around stored data.
+Before substantially wider deployment, formalise policies and administrator tooling for stored data.
 
 Relevant areas include:
 
@@ -1506,40 +1072,40 @@ Relevant areas include:
 - portal access
 - administrator permissions
 
-The project should avoid collecting information merely because Discord makes it technically available.
+Avoid collecting data merely because Discord exposes it.
 
-Retention and deletion decisions should preserve legitimate administrative requirements without creating unnecessary permanent member profiling.
+Retention decisions should balance legitimate operational requirements against unnecessary permanent member profiling.
 
 ---
 
-# P2 - Targeted Architecture Improvements
+# P2 — Targeted Architecture Improvements
 
-The earlier broad reliability and modularity phase has already produced substantial service extraction.
+Further refactoring should be driven by concrete development pressure.
 
-Further architecture work should now be driven by concrete pressure rather than a standing instruction to refactor everything.
+Potentially useful work includes:
 
-Likely useful areas include:
-
-- reducing oversized command adapters when new changes touch them
-- splitting scheduler action executors if action breadth becomes difficult to maintain
-- extracting common event loading only where it removes real duplication
-- preserving shared authorisation helpers
-- strengthening direct service tests
+- reducing oversized command adapters when changes touch them
+- splitting scheduler executors if breadth becomes difficult to maintain
+- extracting shared loading logic where genuine duplication exists
+- preserving common authorisation helpers
+- strengthening service-level integration tests
 - documenting lock order near race-sensitive transactions
 
-Avoid:
+Avoid architecture projects whose only justification is aesthetic abstraction.
 
-- generic repository layers without a need
-- large framework rewrites
+In particular, avoid introducing:
+
+- generic repository layers without a real need
+- broad framework rewrites
 - speculative dependency injection
 - microservices
 - abstraction motivated only by line count
 
 ---
 
-# P3 - Portal Integration
+# P3 — Portal Integration
 
-A future web portal could expose information such as:
+A future web portal could expose:
 
 - upcoming events
 - event details
@@ -1549,102 +1115,82 @@ A future web portal could expose information such as:
 - signup-versus-attendance comparison
 - role requests
 - organiser administration
-- member attendance history
+- member history
 - event statistics
 - diagnostics
 
-If collaboration with the existing community bot proceeds, prefer extending a suitable existing portal over creating a redundant competing one.
+If collaboration with an existing community bot or portal is practical, prefer integration over creating redundant systems.
 
-A portal should consume reusable domain/application boundaries.
+A portal should consume reusable application/domain boundaries.
 
-It should not reproduce Discord slash-command parsing.
+It should not reproduce Discord slash-command parsing as business logic.
 
 ---
 
-# P3 - Integration With Existing Attendance Tooling
+# P3 — Integration With Existing Attendance Tooling
 
-Another community bot may already record actual attendance automatically.
-
-If that remains the authoritative source, future integration should prefer:
+If another community system remains authoritative for actual attendance, future integration should prefer:
 
 1. reusing or importing authoritative attendance data
-2. introducing an adapter/service boundary
-3. mapping stable event identifiers
-4. mapping guild and user identity explicitly
+2. a dedicated adapter/service boundary
+3. explicit stable event identity mapping
+4. explicit guild/user identity mapping
 5. avoiding duplicate attendance capture
 
-Direct shared-database access should only be used if both systems deliberately adopt that architecture.
-
-Do not couple two independently-evolving schemas accidentally.
+Do not couple independently-evolving database schemas accidentally.
 
 ---
 
-# P3 - Migration and Transplant Support
+# P3 — Migration and Transplant Support
 
-If major subsystems are later moved into another bot:
+If major subsystems are later moved into another bot or platform:
 
 1. identify the portable service boundary
-2. document the required domain concepts
-3. map source and destination event identity
+2. document required domain concepts
+3. map event identity
 4. map guild identity
 5. map user identity
-6. map authorisation
-7. adapt scheduling hooks
-8. adapt Discord rendering
-9. write destination-specific migrations
-10. preserve audit requirements
+6. map permissions and destinations
+7. create destination-specific migrations deliberately
 
-Candidate portable areas include:
-
-- event creation
-- event publication
-- organisers
-- role requests
-- role-request presets
-- reminders
-- scheduler patterns
-- attendance reporting
-
-A shared package or monorepo should be introduced only if actual code-sharing requirements justify the added maintenance cost.
+Portability does not mean copying this repository's schema wholesale into another application.
 
 ---
 
-# P3 - Cross-Server Event Support
+# P3 — Cross-Server Event Support
 
-The community operates more than one Discord server.
+The community operates across more than one Discord server.
 
-A possible long-term model is:
+A future model might support:
 
 ```text
-One canonical event
+one canonical event
         |
-        +---- message in primary server
+        +---- presentation in server A
         |
-        +---- optional presentation in another server
+        +---- presentation in server B
         |
-        +---- shared event-level participation state
+        +---- shared participation state
 ```
 
-This is not equivalent to simply sending the same embed twice.
-
-A proper model must consider:
+This requires deliberate modelling of:
 
 - canonical event identity
 - guild ownership
 - multiple Discord presentation records
 - administrator permissions
-- cross-server users
-- audiences
+- cross-server members
+- notification audiences
 - channel configuration
-- notification targeting
-- role qualification across guilds
-- signup and role-request authority
+- qualification roles
+- signup authority
+- role-request authority
 
-Do not implement naïve mirrored messages before the domain model can represent multiple Discord surfaces deliberately.
+Do not implement naïve mirrored messages before the domain model can represent multiple presentation surfaces.
 
 ---
 
-# P3 - Export and Interoperability
+# P3 — Export and Interoperability
 
 Potential export formats include:
 
@@ -1653,7 +1199,7 @@ Potential export formats include:
 - spreadsheet output
 - portal/API adapters
 
-Useful export areas include:
+Potential export areas include:
 
 - actual attendance
 - signup responses
@@ -1662,60 +1208,58 @@ Useful export areas include:
 - event summaries
 - historical reporting
 
-Exports should use database/domain state.
+Exports should use authoritative database/domain state.
 
-Do not scrape rendered Discord messages to reconstruct information already stored in PostgreSQL.
+Do not reconstruct information by scraping rendered Discord messages when PostgreSQL already stores the data.
 
 ---
 
-# P3 - Improved Discord Presentation
+# P3 — Improved Discord Presentation
 
 Current Discord presentation is functional rather than final.
 
-Future improvements may use newer Discord components to improve:
+Future presentation work may improve:
 
 - event readability
 - attendance summaries
 - organiser information
 - role-request presentation
-- preset administration
+- template administration
 - pagination
 - compactness
 - mobile usability
 
-Do not perform a major UI redesign while underlying domain workflows are still changing substantially.
+Keep presentation replaceable over stable services.
 
-Stable services should remain usable even if the Discord presentation is later replaced.
+Avoid a large UI redesign while important domain workflows are still evolving.
 
 ---
 
-# P3 - Pagination
+# P3 — Pagination
 
-Introduce pagination or other bounded display strategies where Discord limits justify it.
+Introduce bounded displays where actual Discord limits or usability justify them.
 
 Likely candidates include:
 
 - large event lists
 - role-request organiser views
 - attendance-response lists
-- historical attendance reports
+- attendance history
 - audit history
 - large preset definitions
 - future template lists
 
 Do not introduce a pagination framework everywhere pre-emptively.
 
-Use it where output size is a real problem.
-
 ---
 
-# P3 - Role Capacity and Waitlists
+# P3 — Role Capacity and Waitlists
 
-Role options already have a capacity concept.
+Role options already contain a capacity concept.
 
-Before implementing capacity enforcement, decide what capacity means.
+Before enforcing capacity, decide what it means.
 
-Possibilities include:
+Possible interpretations include:
 
 ```text
 organiser guidance only
@@ -1726,9 +1270,9 @@ soft warning threshold
 
 The current system records volunteer interest.
 
-It does not automatically allocate roles.
+It does not guarantee assignment.
 
-Capacity behaviour must not accidentally convert:
+Capacity behaviour must not accidentally turn:
 
 ```text
 request
@@ -1737,14 +1281,14 @@ request
 into:
 
 ```text
-guaranteed assignment
+guaranteed role
 ```
 
 ---
 
-# P3 - Automated Role Allocation
+# P3 — Automated Role Allocation
 
-Automatic role allocation is deliberately not a current priority.
+Automatic role allocation is not a current priority.
 
 A meaningful allocation system would need to consider:
 
@@ -1752,21 +1296,21 @@ A meaningful allocation system would need to consider:
 - supervision
 - attendance availability
 - multiple requested roles
-- capacities
-- event-specific needs
+- capacity
+- event needs
 - request timing
 - organiser judgement
-- potentially team composition
+- team composition
 
-The current volunteer-request model should remain until there is a strong practical reason to automate allocation.
+The volunteer-request model should remain until there is a strong operational reason to automate allocation.
 
-If allocation is ever introduced, organisers should retain meaningful control.
+If allocation is introduced later, organisers should retain meaningful control.
 
 ---
 
-# P3 - Advanced Analytics
+# P3 — Advanced Analytics
 
-Potential later analytics include:
+Potential future analytics include:
 
 - signup accuracy by event type
 - attendance trends
@@ -1778,40 +1322,40 @@ Potential later analytics include:
 - template usage
 - recurrence attendance trends
 
-Analytics must remain informational.
+Analytics should remain informational.
 
-Do not automatically turn them into disciplinary scores or punitive automation.
+Context matters for Tentative responses, supervisors, organisers, technical problems, and exceptional event circumstances.
 
-Context matters, particularly for:
-
-- Tentative members
-- supervisors
-- organisers
-- technical problems
-- exceptional event circumstances
+Do not turn aggregate reporting into automatic disciplinary scoring.
 
 ---
 
-# P3 - Additional Integrations
+# P3 — Additional Integrations
 
-Possible future external systems include:
+Possible external systems include:
 
-- existing community attendance bot
+- existing community attendance tooling
 - existing community portal
 - Google Sheets
 - other event systems
 
-External integrations should use adapters.
+External systems should connect through clear adapters or service boundaries.
 
-Provider-specific assumptions should not spread throughout the core event-management services.
+Provider-specific assumptions should not spread through core event-management behaviour.
 
 ---
 
-# Development Practices That Apply Across the Roadmap
+# Development principles across the roadmap
 
-These are not individual roadmap features.
+These are not roadmap features.
 
-They are expectations for all future work.
+They apply to all future implementation work.
+
+## PostgreSQL remains authoritative
+
+Discord messages, channels, roles, DMs, and interactions are external presentation/input surfaces.
+
+Persistent domain state remains authoritative in PostgreSQL.
 
 ---
 
@@ -1821,32 +1365,30 @@ For discovered bugs:
 
 ```text
 reproduce
-   |
-   v
+    |
+    v
 add failing regression
-   |
-   v
-confirm correct failure
-   |
-   v
-implement narrow fix
-   |
-   v
-run targeted coverage
-   |
-   v
+    |
+    v
+confirm intended failure
+    |
+    v
+implement narrow correction
+    |
+    v
+run focused coverage
+    |
+    v
 run full gate
 ```
 
-Do not skip the regression simply because the fix appears obvious.
+Do not skip the regression merely because the correction appears obvious.
 
 ---
 
-## Direct service integration testing
+## Test services directly where the database matters
 
-New reusable service boundaries should receive direct integration coverage where they interact with PostgreSQL.
-
-This is particularly important for:
+New reusable service boundaries should receive PostgreSQL-backed integration tests where behaviour depends on:
 
 - ownership
 - locks
@@ -1858,69 +1400,51 @@ This is particularly important for:
 
 ---
 
-## Real PostgreSQL for integration tests
+## Use real PostgreSQL for database integration tests
 
-Continue using Testcontainers and real PostgreSQL for database integration tests.
+Continue using Testcontainers.
 
-Do not replace race-sensitive database tests with an in-memory approximation.
+Do not replace lock-sensitive or transaction-sensitive coverage with an in-memory approximation.
 
 ---
 
-## Deterministic race testing
+## Test races deterministically
 
 Prefer:
 
-- explicit locks
-- promises/barriers
-- controlled interleavings
+- explicit database locks
+- controlled promises/barriers
+- deliberate interleavings
 
 over arbitrary sleeps.
 
-A concurrency test should prove the intended race ordering rather than merely hope the machine was slow enough.
+A concurrency test should prove the intended ordering.
 
 ---
 
-## Discord side effects after authoritative decisions
+## Order Discord side effects around authoritative decisions deliberately
 
-External Discord calls cannot be transactional.
+Discord calls cannot participate in a PostgreSQL transaction.
 
-Future workflows must deliberately decide:
+Every workflow involving external side effects should define:
 
-- what database decision happens before Discord
-- what state is rechecked afterwards
-- what happens if Discord fails
-- how a losing concurrent Discord side effect is cleaned up
-
----
-
-## Full verification before PR-ready work
-
-The expected full gate remains:
-
-```bash
-npm run test:unit
-npm run test:integration
-npm run test:coverage
-npm run typecheck
-npm run typecheck:test
-```
-
-Manual Discord smoke tests should also be performed when a change depends materially on:
-
-- command registration
-- components
-- role selection
-- channel selection
-- permissions
-- mentions
-- DMs
-- real Discord error behaviour
+- the authoritative database decision
+- when Discord is called
+- what is revalidated afterwards
+- what happens on Discord failure
+- how a losing concurrent side effect is reconciled or removed
 
 ---
 
-## Small reviewable commits and PRs
+## Preserve snapshot independence
 
-Prefer coherent milestones over extremely large feature branches.
+Reusable configuration should not become a live dependency for existing events unless a feature explicitly requires that relationship.
+
+When generating or applying reusable state, decide which values become event-owned snapshots.
+
+---
+
+## Prefer small coherent PRs
 
 Useful boundaries include:
 
@@ -1928,212 +1452,50 @@ Useful boundaries include:
 domain/service foundation
 Discord adapter
 reliability follow-up
-complete subsystem milestone
+complete feature milestone
 ```
 
 A PR should tell one understandable story where practical.
 
 ---
 
-## Documentation checkpoints
+## Full verification before PR-ready work
 
-After a substantial architectural milestone:
+The normal full gate is:
 
-- update `ARCHITECTURE.md`
-- update `DECISIONS.md` when invariants changed
-- reconcile `ROADMAP.md`
-- rewrite stale `CURRENT-WORK.md`
-- update `ADMIN-GUIDE.md` for public command changes
-- update `TESTING-GUIDE.md` when workflow changes
-
-Do not allow completed features to remain indefinitely described as future work.
-
----
-
-# Recently Completed Milestones
-
-The following areas were previously roadmap work but are now established enough that they are **not future roadmap items**.
-
-This section is intentionally concise.
-
-Detailed current behaviour belongs elsewhere in the documentation.
-
----
-
-## Reliability and automated testing foundation
-
-Completed work includes:
-
-- Vitest unit tests
-- PostgreSQL integration tests using Testcontainers
-- coverage reporting
-- production and test typechecking
-- deterministic concurrency testing patterns
-- scheduler retry regression coverage
-- scheduler stale-lock handling
-- scheduler stale-worker fencing
-- migration-chain testing
-
----
-
-## Publication reliability
-
-Completed work includes:
-
-- immediate publication
-- manual publication
-- scheduled publication
-- duplicate/racing publication protection
-- publication destination snapshotting
-- lifecycle revalidation
-- cancellation safety
-- deleted attendance-message recovery
-
----
-
-## Organiser reliability and escalation
-
-Completed work includes:
-
-- dormant unpublished-event nominees
-- primary confirmation/decline
-- primary timeout
-- backup escalation
-- backup timeout
-- general cover
-- cover claiming
-- warning reconciliation
-- organiser feature locking
-- DM-first delivery control
-- organiser safety deadline
-- missing-organiser-at-start handling
-- late-publication safety behaviour
-- post-start cover claiming when still required
-
-The confirmed-organiser unavailability workflow remains future work.
-
----
-
-## Core role-request system
-
-Completed work includes:
-
-- event-level role options
-- qualification rules
-- supervision-required qualification
-- independent multi-select role requests
-- explicit withdrawal
-- shared pools across groups
-- signup-gated groups
-- attendance-aware request availability
-- scheduled closing
-- signed before/after-start timing
-- scheduled opening
-- durable opening/closing actions
-- event-start rescheduling
-- publication-intent-aware automatic opening
-- manual-hold deferral without consuming scheduler retries
-- publication wake-up for already-due groups
-- intentional pre-publication role-group support
-- in-flight publication-intent race protection
-- deleted-message recovery
-- concurrent publication/recovery protection
-
-Richer editing of existing event-level role configuration remains future work.
-
----
-
-## Reusable role-request preset foundation
-
-Completed work includes:
-
-- preset schema
-- reusable options
-- qualification snapshots
-- reusable request groups
-- ordered mappings
-- fixed or apply-time-default channels
-- notification-role snapshots
-- signed opening/closing defaults
-- preset create/list/show commands
-- option creation
-- group creation
-- application to existing events
-- event-level provenance
-- durable action creation during application
-- parent preset lifecycle
-- option lifecycle
-- group lifecycle
-- warning when option deactivation leaves an active group unusable
-- snapshot independence
-- preset application/mutation locking
-
-Editing existing preset definitions remains the immediate next phase.
-
----
-
-# Deliberately Not Prioritised
-
-The following remain lower priority than reliable event administration, templates, recurrence, and useful integration:
-
-- complete Discord UI redesign
-- automated disciplinary systems
-- automated role allocation
-- hardcoding many naval or linebattle subtypes
-- premature microservices
-- premature monorepo architecture
-- speculative generic framework abstractions
-- building a competing portal where collaboration is practical
-- large-scale analytics before the underlying event workflows stabilise
-
-The project goal remains:
-
-```text
-a robust,
-understandable,
-well-tested,
-portable event-management system
+```bash
+npm run test:unit
+npm run test:integration
+npm run test:coverage
+npm run typecheck
+npm run typecheck:test
+git diff --check
 ```
 
-rather than maximum feature count.
+Use manual Discord smoke tests where behaviour materially depends on:
+
+- command registration
+- Discord components
+- channel selectors
+- role selectors
+- permissions
+- mentions
+- DMs
+- Discord-specific error behaviour
 
 ---
 
-# Review Points
+## Documentation maintenance
 
-The roadmap should be reconciled again after major milestones.
+After substantial milestones:
 
-The next obvious review points are:
+- update `ARCHITECTURE.md` when current structure or invariants change
+- update `DECISIONS.md` when a durable design choice changes or is introduced
+- update `ADMIN-GUIDE.md` when administrator behaviour changes
+- update `TESTING-GUIDE.md` when testing strategy changes
+- keep this roadmap focused on future work
+- rewrite `CURRENT-WORK.md` around the new checkpoint rather than appending history indefinitely
 
-```text
-event templates complete
+Completed roadmap items should leave this document once their durable information has been captured elsewhere.
 
-recurring generation complete
-
-confirmed-organiser unavailability complete
-
-major external integration begins
-```
-
-At each checkpoint:
-
-1. remove completed work from future sections
-2. move enduring behaviour into architecture/decision documentation
-3. reconsider priorities using actual community use
-4. record newly-discovered reliability requirements
-5. avoid retaining obsolete plans solely because they appeared in an older roadmap
-
----
-
-# Related Documentation
-
-See:
-
-- [`../README.md`](../README.md) for the project overview
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) for current implementation structure
-- [`DECISIONS.md`](DECISIONS.md) for durable invariants and design rationale
-- [`CURRENT-WORK.md`](CURRENT-WORK.md) for the exact current development checkpoint
-- [`TESTING-GUIDE.md`](TESTING-GUIDE.md) for verification workflow
-- [`ADMIN-GUIDE.md`](ADMIN-GUIDE.md) for currently available administrator commands
-
-Where this roadmap conflicts with an implemented invariant recorded in `DECISIONS.md`, the decision record takes precedence until the project explicitly changes that decision.
+Git history and regression tests are the historical record. The roadmap is for what remains to be built.
