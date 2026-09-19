@@ -1695,21 +1695,34 @@ describe("organiser cover-request delivery", () => {
     expect(sendCoverRequest).toHaveBeenCalledTimes(1);
   });
 
-  it("returns failed when the configured Event Organiser role has been deleted", async () => {
+  it("posts a cover request without pinging when the configured Event Organiser role has been deleted", async () => {
     // Arrange
+    const sentCoverRequest = {
+      id: "820000000000000009",
+
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const sendCoverRequest = vi.fn().mockResolvedValue(sentCoverRequest);
+
     const channel = {
       id: WARNING_CHANNEL_ID,
 
       type: ChannelType.GuildText,
 
       isSendable: vi.fn().mockReturnValue(true),
+
+      send: sendCoverRequest,
     };
 
     const fetchChannel = vi.fn().mockResolvedValue(channel);
 
     /*
-     * discord.js RoleManager#fetch() converts Discord's Unknown Role response
-     * into null for a single-role fetch.
+     * discord.js may represent a deleted role as null for a single-role
+     * fetch.
+     *
+     * Losing the optional notification audience must not discard the
+     * claimable administration message while its destination is still usable.
      */
     const fetchRole = vi.fn().mockResolvedValue(null);
 
@@ -1740,9 +1753,15 @@ describe("organiser cover-request delivery", () => {
 
     // Assert
     expect(result).toEqual({
-      kind: "failed",
+      kind: "sent",
 
-      delivery: "failed",
+      delivery: "posted_without_ping",
+
+      channelId: WARNING_CHANNEL_ID,
+
+      messageId: "820000000000000009",
+
+      message: sentCoverRequest,
     });
 
     expect(fetchChannel).toHaveBeenCalledTimes(1);
@@ -1752,6 +1771,32 @@ describe("organiser cover-request delivery", () => {
     expect(fetchRole).toHaveBeenCalledTimes(1);
 
     expect(fetchRole).toHaveBeenCalledWith(ORGANISER_ROLE_ID);
+
+    expect(sendCoverRequest).toHaveBeenCalledTimes(1);
+
+    expect(sendCoverRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining(
+          "🚨 **Event organiser cover required**",
+        ),
+
+        allowedMentions: {
+          parse: [],
+        },
+      }),
+    );
+
+    const sentPayload = sendCoverRequest.mock.calls[0]?.[0];
+
+    /*
+     * The deleted role must not survive as a mention and must not be replaced
+     * by a broader audience.
+     */
+    expect(sentPayload?.content).not.toContain(`<@&${ORGANISER_ROLE_ID}>`);
+
+    expect(sentPayload?.allowedMentions).toEqual({
+      parse: [],
+    });
   });
 
   it("propagates an unexpected Event Organiser role fetch failure", async () => {
