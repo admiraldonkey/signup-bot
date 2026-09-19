@@ -1,6 +1,6 @@
 # Testing Guide
 
-**Last reconciled:** 10 September 2026
+**Last reconciled:** 19 September 2026
 
 ## Purpose
 
@@ -43,18 +43,35 @@ Neither replaces the other.
 
 For current administrator commands, see:
 
-```text
-docs/ADMIN-GUIDE.md
-```
+- [`ADMIN-GUIDE.md`](ADMIN-GUIDE.md)
 
 For architectural and behavioural context, also read:
 
-```text
-docs/ARCHITECTURE.md
-docs/DECISIONS.md
-docs/CURRENT-WORK.md
-docs/ROADMAP.md
-```
+- [`ARCHITECTURE.md`](ARCHITECTURE.md)
+- [`DECISIONS.md`](DECISIONS.md)
+- [`CURRENT-WORK.md`](CURRENT-WORK.md)
+- [`ROADMAP.md`](ROADMAP.md)
+
+---
+
+# Guide Map
+
+Use this document according to the kind of change being made.
+
+| Area                 | Relevant guidance                                              |
+| -------------------- | -------------------------------------------------------------- |
+| Everyday development | testing philosophy, targeted-test workflow, typechecks         |
+| Database changes     | PostgreSQL integration tests, migrations, Testcontainers       |
+| Scheduler work       | durable actions, retries, stale ownership, deterministic races |
+| Discord adapters     | unit tests plus targeted real Discord smoke tests              |
+| Concurrency          | explicit locks, barriers, controlled interleaving              |
+| Reliability fixes    | red regression first, narrow production correction             |
+| Role-request presets | snapshot, lifecycle, mutation and application invariants       |
+| Event templates      | P1 generation, snapshot, ownership and rollback expectations   |
+| Recurrence           | occurrence identity, horizon, DST, duplicate prevention        |
+| PR readiness         | full automated gate, diff checks, targeted manual smoke        |
+
+The current implementation objective is documented in [`CURRENT-WORK.md`](CURRENT-WORK.md).
 
 ---
 
@@ -2222,9 +2239,9 @@ Verify:
 
 ---
 
-# Future Template Reminder Regression
+# P1 Template Reminder Regression Requirement
 
-When event templates are implemented, add a regression before relying on existing reminder-rescheduling code.
+Before template-generated events rely on the existing reminder-rescheduling code, add this regression.
 
 Generated events may remain:
 
@@ -2926,7 +2943,7 @@ Verify:
 
 Where practical in the development server, delete or temporarily remove the configured destination.
 
-Verify the bot does not silently recreate the message in an unrelated default channel.
+Verify the bot does not recreate the message in an unrelated default channel.
 
 ---
 
@@ -3382,122 +3399,408 @@ The suite already contains substantial coverage in these areas and future change
 - stale worker completion
 - authoritative rescheduling
 - attendance interaction races
+- deleted attendance-message recovery
 - role-request eligibility
 - role-request withdrawal races
 - scheduled role-request opening
 - role-request closing
-- role-request publication
+- role-request publication intent
 - role-request message recovery
-- attendance message recovery
 - organiser confirmation and decline
 - organiser warning reconciliation
 - organiser timeout
 - backup escalation
 - general cover
 - cover ownership races
-- organiser feature disable races
+- organiser feature-disable races
 - organiser safety deadlines
 - late publication
 - event-time organiser rescheduling
+- deleted Event Administration channel handling
+- deleted Event Organiser role degradation
+- `posted_without_ping` scheduler delivery
+- `@everyone` organiser-notification protection
 - reusable preset creation
 - preset application
+- preset metadata editing
+- preset role-option editing
+- qualification-role replacement
+- preset request-group editing
+- ordered group-option mapping replacement
 - preset lifecycle
 - preset guild isolation
 - preset child ownership
+- preset no-op semantics
+- preset snapshot independence
+- preset application/edit concurrency
 
 This list is representative rather than an exhaustive test catalogue.
 
 ---
 
-# Expectations for Immediate Future Preset Editing
+# Established Preset Editing Regression Standard
 
-The next production feature area is editing existing reusable role-request presets.
+Reusable preset editing is implemented.
 
-Each database mutation should receive direct integration coverage.
+Future changes to that subsystem should preserve the regression dimensions established during the P0 preset work.
 
-Expected test dimensions include:
+For database mutations, relevant coverage includes:
 
 ```text
 success
-unchanged/no-op
+
+unchanged / no-op
+
 guild isolation
+
+parent ownership
+
 child ownership
-inactive parent remains editable
+
+inactive reusable state remains editable where intended
+
 invalid final configuration
+
 transaction rollback
+
 snapshot independence
+
 application/edit concurrency
 ```
 
-For qualification-role replacement, test:
+## Complete-set replacement operations
 
-- full replacement
-- duplicate role rejection
-- conflicting qualification levels
-- `@everyone` rejection
-- qualified-only option left with no qualification role
-- rollback if any new mapping is invalid
+For operations such as qualification-role replacement, notification-role replacement, or ordered group-option replacement, test:
 
-For group-option mapping changes, test:
+- complete replacement semantics
+- duplicates
+- invalid members
+- foreign-preset children
+- empty-set policy
+- ordering where ordering is meaningful
+- lifecycle-state interaction
+- no mutation before complete validation
+- rollback on invalid replacement
+- idempotent equivalent replacement
 
-- order
-- duplicate option rejection
-- foreign-preset option
-- inactive option handling
-- empty active group policy
-- transaction rollback
+## Snapshot independence
 
-For metadata edits, test:
+A reusable source mutation must not rewrite event-level state already created from that source.
 
-- unchanged timestamps
-- name uniqueness
-- empty/invalid values
-- inactive preset edit
+Where applicable, test both:
 
-Discord command tests should then verify only the adapter concerns on top.
+```text
+source changed
+```
+
+and:
+
+```text
+existing event snapshot unchanged
+```
+
+in the same regression.
+
+## Preset application concurrency
+
+Application uses the parent preset locking contract.
+
+Concurrency-sensitive mutations should preserve:
+
+```text
+application
+    -> parent FOR SHARE
+
+preset mutation
+    -> parent FOR UPDATE
+```
+
+Deterministic integration tests should prove application sees either:
+
+```text
+complete old reusable graph
+```
+
+or:
+
+```text
+complete new reusable graph
+```
+
+rather than partially-mutated state.
+
+## Command-adapter coverage
+
+Discord command tests should focus on adapter concerns such as:
+
+- option parsing
+- explicit clears
+- replacement ordering
+- Discord role/channel validation
+- useful validation messages
+- successful response formatting
+- no-op response formatting
+- audit invocation
+
+The PostgreSQL-backed service suite remains authoritative for persistence and locking behaviour.
 
 ---
 
-# Testing Expectations for Future Templates
+# P1 Event Template Testing Expectations
 
-Before templates are considered complete, coverage should establish:
+Event templates are the current major feature area.
 
-- template ownership
-- template lifecycle
-- generated event creation
-- dormant organiser snapshots
-- role-request preset snapshots
-- reminder snapshots
-- publication scheduling
-- event independence after generation
-- later template edit does not mutate existing event
-- rollback on failed generation
-- no duplicate side effects
+Testing should begin at the schema and service boundary rather than at the Discord command surface.
 
-Use the existing `createStoredEvent()` boundary rather than testing template generation by simulating a Discord command where possible.
+## P1.1 schema reconciliation
 
----
+If P1.1 changes schema, verify:
 
-# Testing Expectations for Future Recurrence
+- the committed migration chain still applies from an empty database
+- the new migration preserves existing application data
+- foreign keys reflect intended ownership
+- uniqueness constraints reflect domain identity rather than UI assumptions
+- obsolete scaffolding is removed only through a new migration
+- old applied migrations remain unchanged
+- schema source and generated SQL agree
 
-Recurring generation will require especially strong integration coverage.
+Relevant migration changes should receive direct migration-chain integration coverage.
+
+## Template ownership
 
 Test:
 
-- recurrence calculation
-- timezone handling
+```text
+template belongs to guild A
+
+guild B attempts:
+    inspect
+    edit
+    generate
+    deactivate
+
+result:
+    rejected / not found
+```
+
+Template child records must also be validated through the owning parent.
+
+## Template lifecycle
+
+Where templates receive active/inactive state, test:
+
+- active template can generate
+- inactive template cannot generate
+- inactive template remains inspectable
+- inactive template remains editable where intended
+- deactivation does not alter generated events
+- unchanged lifecycle mutation is idempotent
+
+## Generated event creation
+
+A generation service should receive direct PostgreSQL-backed coverage.
+
+Verify that generation creates one coherent event containing the intended:
+
+- core event fields
+- publication state
+- ping-role snapshots
+- dormant organiser assignments
+- reminders
+- role-request snapshots
+- scheduled actions
+- template provenance
+
+Do not rely on a slash command test to prove those database guarantees.
+
+## Generated event independence
+
+After generation, mutate the source template.
+
+Verify that the existing event retains its previously snapshotted:
+
+- event fields
+- ping roles
+- organisers
+- reminders
+- role-request configuration
+- publication schedule
+
+Then generate another event and verify future generation uses the new template state where intended.
+
+## Organiser snapshots
+
+Template organiser defaults should become normal dormant organiser assignments.
+
+Test:
+
+- primary-only
+- primary + backup
+- no organisers
+- invalid organiser
+- organiser feature disabled
+- later template organiser edit does not rewrite existing assignments
+- generated organisers follow normal publication activation
+
+## Role-request configuration
+
+If templates reference reusable role-request presets, test:
+
+- valid preset snapshot
+- inactive preset handling
+- invalid reusable graph
+- logical option-key conflict
+- multiple-preset ordering if supported
+- rollback if preset application fails
+- later preset mutation does not rewrite generated event
+- later template mutation does not rewrite generated event
+
+The existing preset application service should remain independently tested.
+
+## Reminder snapshots
+
+Template reminder definitions should become ordinary event reminders.
+
+Test:
+
+- event-start-relative reminders
+- signup-close-relative reminders
+- fixed destination snapshots
+- event ping-role behaviour
+- later template reminder edit does not rewrite existing event reminders
+- event time edit reschedules generated reminders through normal reminder logic
+
+## Long-lived unpublished generated events
+
+Add a regression for a generated event that remains:
+
+```text
+scheduled
+publishedAt = null
+```
+
+for a substantial period.
+
+A legitimate future signup-close-relative reminder must not be marked missed or cancelled solely because the event has not yet been publicly published.
+
+This regression should exist before template generation relies on the current reminder-validity path.
+
+## Publication scheduling
+
+Test:
+
+- immediate publication where supported
+- manual publication configuration
+- future scheduled publication
+- invalid publication/signup ordering
+- event remains real before publication
+- generated publication destination is event-owned
+- later template destination change does not relocate existing event
+
+## Transaction rollback
+
+Generation should be atomic for authoritative database state.
+
+Introduce a controlled failure after part of generation has begun and verify that partial:
+
+- events
+- organiser assignments
+- reminders
+- preset applications
+- role-request groups
+- scheduled actions
+
+are not left behind.
+
+## Idempotency and duplicate prevention
+
+Where generation can be retried or invoked by durable work, test repeated execution.
+
+The operation must not create duplicate generated state merely because the first caller completed but the caller did not observe success.
+
+## Concurrency
+
+Any generation path that may race should use deterministic PostgreSQL tests.
+
+Relevant cases may include:
+
+```text
+two generators target same occurrence
+
+template edit races generation
+
+template deactivation races generation
+```
+
+The exact lock contract should be tested once P1 establishes it.
+
+## Discord adapters
+
+Template command tests should be added only after the service contract exists.
+
+Command tests should verify:
+
+- option parsing
+- autocomplete or ID lookup if introduced
+- Discord role/channel validation
+- authorisation
+- response formatting
+- audit invocation
+
+Do not make command tests the primary proof of template-generation correctness.
+
+---
+
+# P1 Recurrence Testing Expectations
+
+Recurring generation requires especially strong PostgreSQL-backed and calendar-focused integration coverage.
+
+Test:
+
+- recurrence-rule parsing
+- timezone interpretation
 - daylight-saving transitions
+- ambiguous local times
+- invalid local times
 - rolling generation horizon
+- no generation outside the intended horizon
 - idempotent repeated generation
 - concurrent generators
 - immutable occurrence identity
 - moved occurrence not regenerated
-- cancelled occurrence not regenerated
-- template disable
-- template recurrence edit
+- edited occurrence not duplicated
+- cancelled occurrence not recreated unintentionally
+- template deactivation
+- recurrence deactivation
+- recurrence-rule edit
 - already-generated event independence
+- future not-yet-generated occurrences following updated template state
+- bounded scheduled-action creation
+- restart-safe generation
+- retry-safe generation
 
-Avoid using the current mutable event `startsAt` as the only occurrence identity in either implementation or tests.
+The critical identity regression is:
+
+```text
+original recurrence slot
+        |
+        v
+occurrence generated
+        |
+        v
+administrator moves event
+        |
+        v
+generator runs again
+        |
+        v
+same original slot recognised
+        |
+        v
+no duplicate
+```
+
+Do not use mutable `events.startsAt` as the only generated-occurrence identity.
 
 ---
 

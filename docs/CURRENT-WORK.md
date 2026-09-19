@@ -1,1395 +1,86 @@
 # Current Development State
 
-**Last reconciled:** 18 September 2026
+**Last reconciled:** 19 September 2026
 
-This document is the short-form handoff for the current development checkpoint.
+This document is the short-form handoff for the active development checkpoint.
 
-It is intentionally not a chronological changelog.
+It is not a changelog and should not accumulate detailed descriptions of completed milestones.
 
-For durable context, read these alongside it:
+For durable project context, use:
 
-- [`README.md`](../README.md)
+- [`../README.md`](../README.md)
+- [`README.md`](./README.md)
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md)
 - [`DECISIONS.md`](./DECISIONS.md)
 - [`ROADMAP.md`](./ROADMAP.md)
 - [`TESTING-GUIDE.md`](./TESTING-GUIDE.md)
 - [`ADMIN-GUIDE.md`](./ADMIN-GUIDE.md)
 
-If this document becomes substantially longer because completed work keeps being appended to it, rewrite it around the new checkpoint instead.
+If this file grows substantially because completed work is being retained, rewrite it around the new checkpoint.
 
 ---
 
-## Current Repository Checkpoint
+# Current Repository Checkpoint
 
-The current development branch completes P0.8, the final administrator-facing `/role-preset` UX review.
+The P0 foundation and reliability phase is complete.
 
-The reusable preset administration surface now includes:
+The project currently has established implementations for:
 
-```text
-create
-edit
-list
-show
+- persistent event creation and lifecycle
+- immediate, manual, and scheduled publication
+- attendance signups
+- actual attendance recording and comparison
+- announcements and persistent reminders
+- organiser nomination, escalation, cover, and safety workflows
+- organiser feature controls
+- event-level role requests
+- qualification and supervision rules
+- scheduled role-request opening and closing
+- role-request message recovery
+- reusable role-request presets
+- preset editing and lifecycle management
+- preset application using event-level snapshot semantics
+- durable PostgreSQL-backed scheduled work
+- PostgreSQL-backed audit logging
+- Discord presentation recovery for key message types
+- regression-first reliability coverage
+- deterministic PostgreSQL concurrency testing
 
-option-add
-option-edit
-option-qualifications-set
-option-set-active
-
-group-add
-group-edit
-group-options-set
-group-set-active
-
-apply
-set-active
-```
-
-The final UX review did not add new domain mutations.
-
-It improved navigation and presentation around the existing authoritative services.
-
-Notable changes include:
-
-```text
-/role-preset
-    "creates and manages"
-    rather than only "creates and inspects"
-
-/role-preset list
-    points administrators to /role-preset show for child IDs
-    points to include-inactive:true when no active presets exist
-
-/role-preset show
-    labels inactive mapped options
-    distinguishes Fixed from Apply-time guild default channels
-    warns when an active group has no active mapped option
-
-lifecycle activation
-    describes eligibility rather than guaranteeing successful application
-
-preset application failures
-    provide concrete repair commands
-```
-
-Preset administration remains intentionally ID-based.
-
-The supported lookup flow is:
-
-```text
-list
-    -> preset ID
-    -> show
-    -> option/group IDs
-    -> mutation command
-```
-
-Autocomplete was reviewed but not added because this flow is deterministic, guild-scoped, and does not justify another lookup path at current administration scale.
-
-Preset application remains the final authoritative validator of the complete active graph.
-
-No schema, persistence, snapshot, or concurrency contracts changed during P0.8.
-
-The planned reusable preset administration work is now complete.
-
----
-
-# Current Activity
-
-P0.11 deleted Event Organiser role behaviour is implemented and verified.
-
-Unlike P0.10, this review exposed a production gap.
-
-Previously, organiser-cover delivery could treat a missing configured Event Organiser role as complete notification failure.
-
-Discord `10011 Unknown Role` was also not classified as definitive role absence.
-
-The notification boundary now distinguishes:
-
-```text
-deleted / absent organiser role
-        |
-        v
-notification audience unavailable
-```
-
-from:
+The final focused pre-template reliability reviews are also complete:
 
 ```text
 deleted Event Administration channel
-        |
-        v
-delivery destination unavailable
+    -> definitive destination failure
+    -> no guessed fallback channel
+    -> scheduler distinguishes permanent failure from retryable errors
+
+deleted Event Organiser role
+    -> notification audience unavailable
+    -> claimable admin message can still post
+    -> delivery = posted_without_ping
+    -> @everyone is never used as fallback
 ```
 
-When the administrative channel remains usable:
-
-```text
-missing organiser role
-        |
-        v
-post claimable message
-        |
-        v
-omit role ping
-        |
-        v
-posted_without_ping
-```
-
-The shared cover-delivery path explicitly handles:
-
-```text
-role fetch returns null
-
-Discord 10011 Unknown Role
-
-configured role resolves to @everyone
-```
-
-without producing a role ping.
-
-Unexpected role-resolution failures still propagate.
-
-`@everyone` is never accepted as an organiser-notification fallback, even if the bot has `MentionEveryone`.
-
-Scheduler integration coverage verifies `posted_without_ping` as successful delivery for:
-
-```text
-ordinary organiser cover
-
-T-15 organiser safety cover
-
-T+0 missing-organiser alert
-```
-
-For all three paths:
-
-```text
-scheduled action
-    -> completes successfully
-
-Discord message
-    -> persisted and tracked
-
-audit
-    -> outcome success
-    -> delivery posted_without_ping
-```
-
-PostgreSQL organiser state remains authoritative.
-
-P0.10 and P0.11 are now complete.
-
-P0.12 remains an ongoing regression-led reliability principle rather than a separate repository-wide rewrite.
-
-The next major feature area is:
+The next major development phase is:
 
 ```text
 P1
 Event Templates
 ```
 
-The first template task is P1.1: reconcile the repository's existing template schema scaffolding against the current event architecture before implementing new template behaviour.
-
 ---
 
-# Most Recently Completed Feature Area
+# Immediate Objective
 
-## Preset request-group definition editing
+## P1.1 — Reconcile existing event-template schema scaffolding
 
-`/role-preset group-edit` now provides administrator-facing editing for existing reusable request groups.
+Before implementing template commands or generation behaviour, inspect the current repository's template-related schema and migration history.
 
-The command supports:
+The repository contains template concepts that predate several important architectural developments.
 
-```text
-name
-description
-clear-description
-channel
-clear-channel
-requires-signup
+Do not assume that existing template scaffolding represents the final design.
 
-open-minutes-before-start
-open-minutes-after-start
-
-close-minutes-before-start
-close-minutes-after-start
-
-notify-role-1
-notify-role-2
-notify-role-3
-notify-role-4
-clear-notification-roles
-```
-
-Replacement notification roles are validated as one complete ordered collection.
-
-The service then replaces the authoritative child rows transactionally and mirrors the first configured role into the temporary legacy compatibility fields.
-
-An unrelated metadata or timing edit leaves notification rows untouched.
-
-## Snapshot independence
-
-Editing reusable group state does not alter an event which already received that preset.
-
-Direct integration coverage verifies that changing reusable:
-
-```text
-channel
-notification roles
-signup rule
-opening timing
-closing timing
-```
-
-leaves the existing event-level request-group snapshot unchanged.
-
-## Application race
-
-A deterministic PostgreSQL concurrency regression verifies:
-
-```text
-application starts first
-    -> parent FOR SHARE
-
-group edit starts second
-    -> waits for parent FOR UPDATE
-
-application commits complete old snapshot
-    -> edit proceeds afterwards
-```
-
-The reverse lock ordering similarly permits application to observe the complete new definition after mutation.
-
-No partially-edited reusable graph can be snapshotted.
-
----
-
-# Current Role-Request Preset Capability
-
-The reusable preset subsystem is now established enough that future work should treat it as existing architecture rather than a prototype.
-
-Current administrator capabilities include:
-
-```text
-/role-preset create
-/role-preset edit
-/role-preset list
-/role-preset show
-/role-preset option-add
-/role-preset option-edit
-/role-preset option-qualifications-set
-/role-preset group-add
-/role-preset group-edit
-/role-preset apply
-/role-preset set-active
-/role-preset option-set-active
-/role-preset group-set-active
-```
-
-The system currently supports reusable:
-
-- logical role options
-- descriptions
-- request restrictions
-- capacities
-- qualification-role snapshots
-- fully-qualified and supervision-required qualification levels
-- multiple request groups
-- ordered option mappings
-- signup requirements
-- fixed destination channels
-- apply-time default-channel resolution
-- up to four ordered notification-role snapshots per request group
-- event-relative opening offsets
-- event-relative closing offsets
-
-The remaining preset-definition editing work is focused on group-option mappings rather than parent metadata, option definitions, qualification roles, or request-group definitions.
-
----
-
-# Preset Snapshot Architecture
-
-Preset application uses snapshot semantics.
-
-Conceptually:
-
-```text
-Reusable preset
-       |
-       | apply
-       v
-Event-level role-request configuration
-       |
-       v
-Runtime uses event-level state
-```
-
-After application, the event does not continuously consult the source preset.
-
-Later preset changes must not alter an already-applied event.
-
-This includes:
-
-- lifecycle changes
-- future metadata edits
-- future qualification edits
-- future group timing edits
-- future mapping edits
-
-Source IDs remain useful as provenance.
-
-They are not live inheritance.
-
----
-
-# Preset Application Concurrency Contract
-
-Preset application and mutation serialise through the preset parent row.
-
-Current contract:
-
-```text
-preset application
-    -> role_request_presets FOR SHARE
-
-preset mutation
-    -> role_request_presets FOR UPDATE
-```
-
-Future preset-edit operations must participate in the same contract.
-
-The intended guarantee is:
-
-```text
-application sees complete state before mutation
-
-or
-
-application sees complete state after mutation
-```
-
-It must not observe a half-edited preset graph.
-
-This is one of the most important requirements for the next feature phase.
-
----
-
-# Role-Request Preset Application
-
-Applying a reusable preset to an event currently:
-
-1. validates the event and event type
-2. verifies the preset belongs to the guild
-3. verifies the preset is active
-4. locks the preset for application
-5. validates active role options
-6. validates qualification configuration
-7. validates active groups
-8. validates group-option mappings
-9. validates signup requirements
-10. resolves any apply-time default role-request channel
-11. validates request-group timing
-12. creates event-level role options
-13. snapshots qualification roles
-14. creates event-level request groups
-15. snapshots mappings and notification metadata
-16. stores source provenance
-17. creates durable opening actions
-18. creates durable closing actions
-19. records that this preset was applied to this event
-
-The operational snapshot and the required scheduler work are created atomically.
-
-Do not split those into independent best-effort operations.
-
----
-
-# Current Role-Request Scheduling State
-
-Scheduled role-request opening and closing are implemented.
-
-Preset-derived groups may have event-relative opening and closing rules.
-
-Application creates durable actions using keys such as:
-
-```text
-role_request_group_open:<groupId>
-role_request_group_close:<groupId>
-```
-
-Current group lifecycle presentation distinguishes:
-
-```text
-Planned
-Pending publication
-Open
-Closed
-```
-
-A request group is not considered genuinely open merely because its opening time has arrived.
-
-If its usable Discord message has not successfully been linked yet, it remains pending publication.
-
-Automatic opening also respects event publication intent.
-
-```text
-published event
-    -> normal due publication
-
-manual-held unpublished event
-    -> defer
-
-future scheduled publication
-    -> intentional earlier group may publish
-
-overdue scheduled publication
-    -> defer until event publishes
-```
-
-A deferred opening is parked at `closesAt` without consuming scheduler retry attempts.
-
-Successful event publication wakes already-due groups whose request windows remain valid.
-
-Future groups are not pulled forward.
-
----
-
-# Event Start Changes and Role-Request Groups
-
-Changing the event start recalculates still-relevant role-request scheduling.
-
-Current rules include:
-
-```text
-Unposted group with relative opening
-    -> recalculate opening
-    -> reschedule opening action
-    -> recalculate closing
-    -> reschedule closing action
-
-Already-posted group
-    -> preserve historical opening
-    -> recalculate closing
-    -> reschedule closing action
-
-Manual immediate group
-    -> preserve immediate opening
-    -> recalculate closing only
-
-Closed group
-    -> remain closed
-```
-
-A manually-created immediately-posted group has:
-
-```text
-openMinutesBeforeStart = null
-```
-
-This means:
-
-```text
-no event-relative opening rule
-```
-
-Do not infer a synthetic offset later.
-
----
-
-# Role-Request Message Recovery
-
-Deleted role-request group messages can now be recovered where the authoritative destination remains known.
-
-Current behaviour:
-
-```text
-stored message exists
-    -> edit it
-
-Discord explicitly reports message deleted
-    -> rebuild from PostgreSQL
-    -> send replacement
-    -> conditionally claim new linkage
-
-another recovery already won
-    -> remove losing replacement
-    -> preserve winner
-
-channel deleted or unavailable
-    -> do not guess another destination
-
-unexpected Discord error
-    -> propagate rather than pretending deletion occurred
-```
-
-Recovery does not replay the original notification-role ping.
-
-The same broad database-authoritative pattern is used for attendance/event message recovery.
-
----
-
-# Current Organiser Architecture
-
-The organiser subsystem is mature enough that future feature work should preserve its existing service boundaries and concurrency rules.
-
-Current organiser assignment slots include:
-
-```text
-primary
-backup
-cover
-```
-
-Assignments retain history through statuses such as:
-
-```text
-pending
-confirmed
-declined
-timed_out
-replaced
-removed
-```
-
-Current ownership is represented separately.
-
-The event creator is not implicitly the organiser.
-
----
-
-# Dormant Organiser Semantics
-
-Organisers assigned to an unpublished event remain dormant.
-
-Normally:
-
-```text
-activatedAt = null
-responseDeadlineAt = null
-```
-
-until the organiser workflow activates.
-
-This prevents private preparation time from consuming the organiser's response period.
-
-Normal primary activation happens around event publication.
-
-However, publication timing is subordinate to the organiser safety rules described below.
-
----
-
-# Organiser Notification Delivery
-
-The organiser subsystem currently supports:
-
-```text
-organisersEnabled
-organiserDmsEnabled
-```
-
-When organiser DM delivery is enabled:
-
-```text
-try DM
-    |
-    +---- success
-    |
-    +---- failure
-            |
-            v
-Event Administration channel
-```
-
-When DM delivery is disabled:
-
-```text
-skip DM
-    |
-    v
-Event Administration channel
-```
-
-These are separate controls.
-
-Disabling organiser DMs does not disable organiser management as a whole.
-
----
-
-# Organiser Escalation
-
-Normal progression is:
-
-```text
-Primary
-   |
-   +---- confirms -> resolved
-   |
-   +---- declines / times out
-                |
-                v
-             Backup
-                |
-                +---- confirms -> resolved
-                |
-                +---- declines / times out
-                             |
-                             v
-                         General Cover
-```
-
-General cover is claimable by an eligible organiser.
-
-The system must never produce multiple simultaneous current organisers through a race between:
-
-- confirmation
-- timeout
-- backup activation
-- cover escalation
-- cover claim
-- replacement
-- cancellation
-- completion
-
----
-
-# Organiser Warning and Cover Reconciliation
-
-Administrative organiser-warning messages are linked back to their assignment.
-
-Once an assignment resolves, the warning is updated where possible.
-
-Current warning-resolution cases include:
-
-- confirmed
-- declined
-- timed out
-- replaced
-- removed
-- cancelled event
-- completed event
-
-General-cover and missing-organiser-at-start messages are separately tracked through `event_messages`.
-
-Outstanding tracked cover presentation is reconciled after relevant states including:
-
-```text
-cover claimed
-active organiser established
-older cover message superseded at event start
-organisers disabled
-event cancelled
-event completed
-```
-
-Reconciliation removes interactive components so old `Claim Event` buttons do not remain apparently usable.
-
-Known deleted Discord messages or channels are recorded as missing presentation without invalidating authoritative organiser state.
-
-Unexpected Discord failures remain distinguishable from deletion.
-
-The event-start supersession path first sends and durably links the new T+0 alert, then resolves older general-cover messages.
-
----
-
-# Organiser Safety Deadline
-
-The organiser workflow now includes an event-level safety deadline.
-
-Default guild configuration currently uses a lead of approximately:
-
-```text
-15 minutes before event start
-```
-
-subject to guild configuration.
-
-At the safety deadline, if no organiser has confirmed:
-
-- unresolved nominee flow is retired
-- obsolete nominee warning/timeout work is cancelled or made irrelevant
-- general cover becomes the authoritative path
-
-This prevents the normal primary or backup response window from consuming the final useful period before the event.
-
----
-
-# Missing Organiser at Event Start
-
-There is a separate event-level check at:
-
-```text
-T + 0
-```
-
-If the event still has no organiser, the system can issue urgent administrative handling.
-
-The safety deadline and the event-start alert solve different problems.
-
-Do not merge them into one action.
-
-Stable keys include:
-
-```text
-organiser_cover_deadline:<eventId>
-organiser_missing_at_start:<eventId>
-```
-
----
-
-# Late Publication and Organisers
-
-An event may be published after its normal organiser safety deadline.
-
-In that case the system must not activate the dormant primary and grant a fresh full response window that has already become operationally obsolete.
-
-Current event timing remains authoritative.
-
-Late publication should therefore enter the appropriate cover/safety path.
-
-This behaviour is regression tested and must be preserved.
-
----
-
-# Cover Claims After Event Start
-
-An older rule rejected all organiser cover claims after event start.
-
-That rule is obsolete.
-
-Current intended behaviour allows an eligible organiser to claim cover after the event begins when:
-
-- the event remains operational
-- organisers are enabled
-- no valid organiser currently owns the event
-- general cover remains the appropriate path
-
-The fact that the start timestamp has passed does not make finding an organiser pointless.
-
-Do not reintroduce the blanket post-start rejection.
-
----
-
-# Organiser Feature Locking
-
-Normal organiser operations use the guild settings row as part of a feature-lock contract.
-
-Conceptually:
-
-```text
-normal organiser operation
-    -> guild_settings FOR SHARE
-
-disable organiser subsystem
-    -> guild_settings FOR UPDATE
-```
-
-This prevents a normal organiser operation from reading "enabled", waiting, then completing after the administrator has already disabled the subsystem.
-
-New organiser operations should participate in the established contract.
-
----
-
-# Current Event Creation Boundary
-
-Database-side event creation is centralised in:
-
-```text
-src/events/event-creation-service.ts
-```
-
-The primary reusable boundary is:
-
-```ts
-createStoredEvent(...)
-```
-
-It handles persistent creation concerns such as:
-
-- event row
-- ping-role snapshots
-- dormant organiser assignments
-- scheduled publication
-- attendance closure
-- completion scheduling
-- template provenance where supplied
-
-Discord command parsing and immediate Discord presentation remain adapter concerns.
-
-This boundary is intentionally important for future template and recurrence work.
-
-Future generators should reuse event creation rather than simulate `/event create`.
-
----
-
-# Event Publication
-
-Event publication supports:
-
-```text
-immediate
-manual
-scheduled
-```
-
-Publication state remains separate from event lifecycle.
-
-An unpublished event is still a real persistent event.
-
-Scheduled publication uses:
-
-```text
-publish_event
-```
-
-Manual publication can supersede outstanding scheduled publication safely.
-
-Publication uses conditional database authority so concurrent publication attempts cannot both become authoritative.
-
-A losing duplicate Discord message is removed where practical.
-
----
-
-# Attendance State
-
-Attendance intention and actual attendance remain separate.
-
-Signup states include:
-
-```text
-Attending
-Tentative
-Not Attending
-```
-
-Actual attendance is recorded independently after or during the event.
-
-No-signup events remain a first-class mode.
-
-A no-signup event:
-
-- has no attendance-response buttons
-- has no signup deadline
-- may still record actual attendance
-- may use organisers
-- may use role requests where enabled
-- may use reminders and announcements
-- must not create fake signup-reliability conclusions
-
----
-
-# Role-Request Domain Invariants
-
-Future work must preserve the following current rules.
-
-## Requests are event-level
-
-A logical request is identified by:
-
-```text
-event
-+ user
-+ role option
-```
-
-The Discord request group is presentation/provenance.
-
-It does not own a separate volunteer pool.
-
----
-
-## Shared pools across groups
-
-The same logical role may appear in several request groups.
-
-For example:
-
-```text
-Early Command Interest
-    Captain
-
-Main Naval Roles
-    Captain
-```
-
-Both represent the same event-level Captain pool.
-
----
-
-## Requests are independent
-
-Members may request several roles at once.
-
-They are not ranked first, second, and third preferences.
-
----
-
-## Duplicate clicks are not withdrawals
-
-Clicking an already-requested role keeps the request intact.
-
-Withdrawal is explicit through request management.
-
----
-
-## Qualification and notification are separate
-
-Qualification answers:
-
-```text
-Who may request this role?
-```
-
-Notification answers:
-
-```text
-Who should be told the request group opened?
-```
-
-Do not merge these concepts.
-
----
-
-## Supervision-required eligibility is intentional
-
-A role may distinguish:
-
-```text
-qualified
-supervision_required
-```
-
-A supervision-required member can still express interest where allowed.
-
-The organiser needs visibility of that distinction.
-
----
-
-## Attendance availability does not destroy role willingness
-
-Changing attendance to Not Attending may make a stored request unavailable.
-
-It does not automatically delete the request.
-
-If the member returns to an eligible attendance state, the existing request can become available again without receiving a new request timestamp.
-
----
-
-# Durable Scheduler State
-
-The PostgreSQL-backed scheduler currently handles work including:
-
-```text
-publish_event
-close_attendance
-complete_event
-
-event reminders
-
-organiser warnings
-organiser timeouts
-organiser escalation
-organiser cover deadlines
-missing organiser at event start
-
-role-request group opening
-role-request group closing
-```
-
-The scheduler includes:
-
-- persistent action rows
-- conditional action claiming
-- processing locks
-- stale-lock recovery
-- bounded retry
-- increasing retry delay
-- terminal failure
-- cancellation
-- authoritative rescheduling
-- stale-worker completion fencing
-
----
-
-# Scheduler Retry Policy
-
-Current retry behaviour begins approximately:
-
-```text
-Attempt 1 -> retry after 1 minute
-Attempt 2 -> retry after 2 minutes
-Attempt 3 -> retry after 4 minutes
-Attempt 4 -> retry after 8 minutes
-Attempt 5 -> terminal failure
-```
-
-A sixth execution attempt must not be created accidentally.
-
-The exact delay numbers are less important than preserving:
-
-```text
-bounded
-persistent
-increasing
-```
-
-retry behaviour.
-
----
-
-# Stale Scheduler Worker Fencing
-
-A worker may:
-
-1. claim work
-2. become stalled
-3. lose ownership through recovery or authoritative rescheduling
-4. later resume
-
-That stale worker must not overwrite the newer scheduler state.
-
-Completion/retry updates therefore depend on continued ownership of the claimed attempt.
-
-This invariant is regression tested.
-
-Do not weaken it for convenience.
-
----
-
-# Administrative Rescheduling
-
-An administrator moving event timing is not a scheduler failure.
-
-When a logical action is authoritatively rescheduled, stale attempt metadata should be reset where appropriate.
-
-Typical reset:
-
-```text
-status = pending
-attemptCount = 0
-lockedAt = null
-completedAt = null
-lastError = null
-```
-
-The new schedule becomes authoritative.
-
----
-
-# Discord Message Recovery
-
-Core automatic message recovery is implemented for:
-
-- event attendance/publication messages
-- role-request group messages
-
-Important recovery rules:
-
-```text
-database state remains authoritative
-
-only known deleted-message conditions trigger recreation
-
-destination must still be known
-
-recovery must not replay normal notification pings
-
-concurrent replacements must leave one authoritative linkage
-
-deleted destination channel does not trigger guesswork
-
-unexpected Discord errors are not silently treated as deletion
-```
-
-Further administrative tooling for intentionally moving or recreating messages in a different channel remains future work.
-
----
-
-# Audit State
-
-Administrative audit records are persisted in PostgreSQL.
-
-The database audit record is authoritative.
-
-Discord log-channel output is optional presentation.
-
-Automatic scheduler actions are also audited where appropriate.
-
-Idempotent lifecycle no-ops should not be recorded as though a mutation occurred.
-
----
-
-# Automated Testing State
-
-The project currently uses:
-
-```text
-Vitest
-PostgreSQL
-Testcontainers
-V8 coverage
-TypeScript production typecheck
-TypeScript test typecheck
-```
-
-Database integration tests run against real disposable PostgreSQL instances.
-
-They are not in-memory database simulations.
-
-This is required because important behaviour depends on:
-
-- transactions
-- locks
-- uniqueness constraints
-- migration behaviour
-- concurrent claims
-- row ownership
-- PostgreSQL error semantics
-
----
-
-# Current Test Commands
-
-Focused tests should normally be run during implementation.
-
-Full commands available include:
-
-```bash
-npm run test:unit
-npm run test:integration
-npm run test:coverage
-npm run typecheck
-npm run typecheck:test
-```
-
-The normal full pre-PR verification gate is:
-
-```bash
-npm run test:unit
-npm run test:integration
-npm run test:coverage
-npm run typecheck
-npm run typecheck:test
-```
-
-See `TESTING-GUIDE.md` for detailed sequencing.
-
----
-
-# Regression-First Workflow
-
-When a bug is found:
-
-```text
-reproduce problem
-      |
-      v
-write regression
-      |
-      v
-confirm it fails for the intended reason
-      |
-      v
-implement narrow production fix
-      |
-      v
-add companion/positive coverage where useful
-      |
-      v
-run targeted tests
-      |
-      v
-run broader subsystem tests
-      |
-      v
-run full verification gate
-```
-
-The red regression should be observed before the fix.
-
-It does not normally need to be committed as a permanently failing commit.
-
-This supersedes older documentation which recommended committing every red regression separately.
-
----
-
-# Concurrency Test Convention
-
-Race tests should prefer deterministic coordination.
-
-Use techniques such as:
-
-- explicit PostgreSQL row locks
-- transactions
-- controlled promises/barriers
-- conditional updates
-- known service boundaries
-
-Avoid relying on arbitrary sleep durations as proof that one operation probably reached a race point before another.
-
----
-
-# Manual Discord Testing
-
-Manual Discord smoke testing remains useful when a change depends on behaviour that mocks or PostgreSQL tests do not fully represent.
-
-Examples include:
-
-- slash-command registration
-- Discord command option UX
-- role selection
-- channel selection
-- real permission behaviour
-- mentionability
-- DM delivery
-- Event Administration fallback
-- deleted real messages
-- real button/component behaviour
-- message appearance
-
-Do not perform manual Discord testing for every pure database helper.
-
-Do perform it when the Discord surface itself changed materially.
-
----
-
-# Current Known or Deliberately Deferred Work
-
-There is no known blocker at this checkpoint preventing continued feature development.
-
-The following work is deliberately unfinished.
-
----
-
-## Preset editing
-
-Implemented editing currently includes:
-
-- preset name and description metadata
-- role-option display name
-- role-option description
-- role-option request restriction
-- role-option capacity
-- complete qualification-role replacement
-- request-group name and description
-- request-group destination behaviour
-- complete ordered request-group notification-role replacement
-- request-group signup rule
-- request-group opening timing
-- request-group closing timing
-
-The remaining existing-definition mutation is:
-
-```text
-group-option mapping editing
-```
-
-That work must preserve the current preset mutation lock and event snapshot independence.
-
----
-
-## Notification-role compatibility-column cleanup
-
-The historical singular request-group notification columns remain temporarily present:
-
-```text
-notify_role_id
-notify_role_name_snapshot
-```
-
-They are compatibility shadows for the expand-and-contract migration to notification-role child collections.
-
-Do not remove them in the current feature PR.
-
-After the collection-aware application revision has been deployed safely, add a separate cleanup migration that removes the legacy columns and then removes the fallback/mirroring code that exists only for mixed-version deployment compatibility.
-
----
-
-## Confirmed organiser becomes unavailable
-
-A confirmed organiser does not yet have a complete self-service unavailability workflow.
-
-Intended direction:
-
-```text
-confirmed primary unavailable
-        |
-        +---- viable backup
-        |
-        +---- otherwise general cover
-```
-
-This should reuse existing organiser assignment and escalation services.
-
----
-
-## Event Administration channel deletion
-
-Organiser behaviour should receive further targeted reliability coverage for the case where the configured Event Administration channel itself is deleted.
-
-Requirements include distinguishing:
-
-```text
-definitive Discord deletion
-```
-
-from:
-
-```text
-transient/unexpected failure
-```
-
-Do not guess a new administrative destination automatically.
-
----
-
-## Organiser notification role deletion
-
-Further targeted verification is worthwhile when the configured organiser notification role no longer exists.
-
-Missing notification presentation must not corrupt authoritative organiser state.
-
----
-
-## Event-level role-request editing
-
-Current event-level role options/groups are functional but do not yet have a full rich edit lifecycle comparable to the planned preset edit surface.
-
-This is lower priority than reusable preset editing and templates.
-
----
-
-## Rich attendance participation context
-
-Actual attendance currently records presence.
-
-Future reporting may distinguish event-specific roles such as:
-
-```text
-participant
-supervisor
-organiser
-server_admin
-other
-```
-
-This remains planned.
-
----
-
-# Immediate Next Objective
-
-The focused pre-template organiser deletion-behaviour reviews are complete.
-
-The next task is:
-
-```text
-P1.1
-Reconcile existing event-template schema scaffolding
-```
-
-Before implementing template commands or generation behaviour, inspect the repository's existing template-related schema and migrations against the architecture now established by:
+The reconciliation must compare existing template state against the architecture now established by:
 
 ```text
 createStoredEvent()
@@ -1398,271 +89,220 @@ event lifecycle
 
 publication scheduling
 
+event ping-role snapshots
+
 organiser assignments
 
 reminders
 
-event ping-role snapshots
+role-request presets
 
-reusable role-request presets
+preset application
 
-preset snapshot semantics
+event-level role-request snapshots
+
+durable scheduled actions
+
+audit behaviour
 ```
 
-Do not preserve old template scaffolding merely because it already exists.
-
-Determine deliberately:
+The output of P1.1 should deliberately answer:
 
 ```text
-which existing template fields remain useful
+Which existing template tables/fields remain useful?
 
-which concepts are obsolete
+Which old assumptions are obsolete?
 
-which new tables or relationships are needed
+What new tables or relationships are required?
 
-how generated events retain source-template provenance
+Where does reusable template state end?
 
-where snapshot boundaries belong
+Where does event-owned snapshot state begin?
+
+How does a generated event retain source-template provenance?
+
+How should template lifecycle affect future generation?
+
+How should templates reference reusable role-request configuration?
+
+How should template reminder definitions become event_reminders?
 ```
 
-Any schema change must use an explicit new migration.
+Do not start by adding slash commands.
 
-Do not mutate old applied migrations.
-
-P0.12 regression-led reliability principles continue to apply while template work proceeds.
-
----
-
-# Preset Administration Milestone
-
-Current status:
-
-```text
-completed:
-    preset foundation
-    preset application
-    lifecycle controls
-    metadata editing
-    role-option editing
-    qualification editing
-    request-group editing
-    group-option mapping editing
-    administrator UX review
-    preset edit regression coverage
-```
-
-The preset mutation and administration surface should now be treated as established.
-
-Do not resume preset-foundation work unless:
-
-- real administrator usage exposes a concrete missing operation
-- a regression demonstrates incorrect behaviour
-- event-template work identifies a genuine reusable-boundary requirement
-
----
-
-# Preset Editing Requirements
-
-Before implementing any edit operation, preserve these invariants.
-
-## Parent lock
-
-```text
-mutation
-    -> preset parent FOR UPDATE
-```
-
----
-
-## Snapshot independence
-
-Existing event snapshots do not change.
-
----
-
-## Guild isolation
-
-A guild cannot mutate another guild's preset.
-
----
-
-## Child ownership
-
-An option or group from preset B cannot be edited through preset A.
-
----
-
-## Idempotency
-
-Requesting a value already stored should normally return:
-
-```text
-unchanged
-```
-
-without falsely updating timestamps or creating a success audit mutation.
-
----
-
-## Atomic multi-row edits
-
-Qualification replacements and mapping changes should be transactional.
-
-A partially-applied edit graph must not become visible.
-
----
-
-## Application remains authoritative
-
-Discord-side validation may improve UX.
-
-Preset application must still validate the complete graph itself.
-
----
-
-# Resolved Preset-Editing Decisions
-
-The major preset-editing design questions are resolved.
-
-Group-option mapping updates use:
-
-```text
-complete ordered replacement
-```
-
-rather than incremental add/remove operations.
-
-Reusable edits may preserve temporarily unusable configuration where doing so keeps lifecycle and structural state independent.
-
-The Discord command surfaces warnings for such state.
-
-Preset application remains the final authoritative validator.
-
-These choices are recorded in `DECISIONS.md` and covered by regression tests.
-
----
-
-# Work After Preset Editing
-
-The intended main sequence is now:
-
-```text
-Preset administration complete
-        |
-        v
-Focused P0.10 / P0.11
-organiser deletion-behaviour checks
-        |
-        | complete
-        v
-Event templates
-        |
-        v
-Recurring event generation
-```
+Establish the data model and snapshot contract first.
 
 ---
 
 # Event Template Direction
 
-Event templates are planned but not complete.
+A template is reusable source configuration for creating an ordinary event.
 
-Some schema scaffolding exists.
-
-Do not treat that scaffolding as a finished architecture contract.
-
-Future templates should generate:
+Conceptually:
 
 ```text
-ordinary persistent events
+template
+    |
+    | generate
+    v
+ordinary persistent event
 ```
 
-through reusable event-creation boundaries.
+A generated event must not continuously consult its source template at runtime.
 
-Generated events should receive event-level snapshots and become independently editable.
+After generation:
+
+```text
+template
+    -> provenance only
+
+event
+    -> owns runtime state
+```
+
+This means an existing generated event must remain independent when:
+
+- the template name changes
+- template defaults change
+- organisers on the template change
+- template reminder definitions change
+- template audience changes
+- referenced reusable configuration changes
+- the template is deactivated
+
+Normal template edits should affect future generation by default.
 
 ---
 
-# Template Snapshot Expectations
+# Required Template Snapshot Boundaries
 
-Future template generation should be able to snapshot concepts including:
+P1 design must explicitly review each of these.
 
-- event defaults
-- ping roles
-- organisers
-- role-request configuration
-- reminders
+## Event defaults
+
+Candidate template defaults include:
+
+- event type
+- region
+- timezone
+- name
+- description
+- local start time
+- duration
+- signup behaviour
+- signup-close timing
+- detailed-response timing
 - publication timing
-- signup timing
+- publication destination behaviour
 
-After generation, the event owns those values.
-
-Changing the template later should normally affect only subsequently generated occurrences.
-
----
-
-# Template Organisers
-
-Template organiser defaults should become:
+The current normal event duration default is approximately:
 
 ```text
-ordinary dormant event organiser assignments
+60 minutes
 ```
 
-They should then follow the same organiser activation, escalation, safety, and cover workflow as any manually-created event.
+Do not reintroduce older two-hour assumptions.
 
 ---
 
-# Template Role Requests
+## Ping roles
 
-Templates should build on the existing reusable role-request preset subsystem rather than inventing a second incompatible reusable role graph.
+Template ping roles should become ordinary event-level role snapshots.
 
-The exact relationship still needs design work.
-
-Whatever approach is chosen must ultimately produce normal event-level role-request state.
+Generated events should retain the audience captured at generation time rather than reading current template roles whenever they publish.
 
 ---
 
-# Template Reminders
+## Organisers
 
-Reminder defaults should become ordinary:
+Template organiser defaults should become ordinary dormant event organiser assignments.
+
+They must then use the existing organiser workflow.
+
+Do not create template-specific runtime organiser state.
+
+---
+
+## Role requests
+
+Templates should build on the existing role-request preset system.
+
+Do not create a second reusable role-request graph.
+
+The exact template-to-preset relationship still requires design work.
+
+Whatever model is selected must ultimately create normal event-level role-request state.
+
+After snapshotting:
+
+- event role options/groups belong to the event
+- later preset edits do not rewrite the event
+- later template edits do not rewrite the event
+- normal role-request scheduler behaviour applies
+
+---
+
+## Reminders
+
+Template reminder defaults should become ordinary:
 
 ```text
 event_reminders
 ```
 
-and normal durable scheduled actions for each generated event.
+with ordinary durable scheduled actions.
 
-Known future implementation concern:
+Important P1 review:
 
-Generated events may exist in:
+Template-generated events may exist as:
 
 ```text
 scheduled
 unpublished
 ```
 
-state for weeks.
+for a substantial period before public publication.
 
-Current signup-close reminder rescheduling/validity behaviour must be reviewed before templates use it so valid future reminders are not incorrectly marked obsolete merely because public signups have not opened yet.
+Review current signup-close reminder validity/rescheduling logic before using it for generated events.
 
-Do not forget this check when template work begins.
+A legitimate future reminder must not be treated as obsolete merely because publication or public signup activation has not happened yet.
+
+---
+
+## Publication
+
+Template publication defaults should create ordinary event publication state and scheduled actions.
+
+Generated events should remain manually inspectable/editable before their eventual publication time.
+
+---
+
+## Provenance
+
+Generated events should retain source-template provenance for:
+
+- administration
+- debugging
+- future recurrence identity
+- reporting
+
+Provenance must not create a live runtime dependency.
 
 ---
 
 # Recurrence Direction
 
-Recurring generation should come after one-off template generation is stable.
+Recurring event generation comes after one-off template generation is stable.
 
-Current intended model:
+Current intended shape:
 
 ```text
-recurrence rule
-      |
-      v
-rolling generator
-      |
-      v
+recurrence definition
+        |
+        v
+bounded generator
+        |
+        v
 ordinary event occurrences
 ```
 
@@ -1672,156 +312,250 @@ Likely recurrence representation:
 RFC 5545 compatible RRULE
 ```
 
-A rolling generation horizon of roughly several weeks has been discussed, with approximately 21 days as a plausible initial value.
+A mature recurrence library should be evaluated rather than implementing calendar recurrence manually.
 
-The exact horizon is not yet a fixed product requirement.
+A rolling horizon of approximately several weeks has been discussed.
 
----
-
-# Immutable Occurrence Identity
-
-Recurring events must not use mutable `startsAt` as their sole occurrence identity.
-
-A generated occurrence needs an immutable schedule identity so moving one event does not cause the generator to recreate the original slot.
-
-This is a critical future recurrence invariant.
-
----
-
-# Development Workflow Rules
-
-A fresh development conversation should follow these rules unless explicitly changed.
-
----
-
-## Read project documentation first
-
-Before substantial work, review:
+Roughly:
 
 ```text
-README.md
-docs/ARCHITECTURE.md
-docs/DECISIONS.md
-docs/ROADMAP.md
-docs/CURRENT-WORK.md
-docs/TESTING-GUIDE.md
+21 days
 ```
 
-Read `ADMIN-GUIDE.md` when working on Discord administrator UX.
+is a design candidate, not a fixed requirement.
 
 ---
 
-## Inspect current code before proposing patches
+# Critical Future Recurrence Invariant
 
-Do not assume an older conversation's line numbers or file contents still match the repository.
+Do not use mutable event start time as the sole occurrence identity.
 
-Use the current branch.
+A recurring occurrence needs an immutable identity for its original schedule slot.
 
-If local source differs from the public branch, locally supplied code/output is authoritative for the active change.
-
----
-
-## Provide exact implementation instructions
-
-When giving implementation help, prefer:
-
-- exact file path
-- exact insertion/replacement location
-- complete pasteable code
-- explicit new-file versus replacement instructions
-- exact test commands
-- expected red or green result
-- explicit commit boundary
-
-Avoid vague instructions such as:
+Otherwise:
 
 ```text
-add something like this somewhere in the handler
+generate Monday event
+        |
+        v
+administrator moves it to Tuesday
+        |
+        v
+generator checks Monday
+        |
+        v
+"missing"
+        |
+        v
+duplicate event
 ```
 
-when the exact integration point can be determined.
+Occurrence identity must survive later event edits.
+
+Generation must also be idempotent and concurrency-safe.
 
 ---
 
-## Regression first for bugs
-
-For a bug:
-
-```text
-red regression first
-then production fix
-```
-
-Do not recreate a regression the developer reports is already implemented.
-
----
+# Existing Architectural Invariants P1 Must Preserve
 
 ## PostgreSQL is authoritative
 
-Do not make Discord messages authoritative state.
+Discord presentation is external and fallible.
+
+Do not make Discord messages, channels, or components authoritative domain state.
 
 ---
 
-## External side effects come after authoritative state where appropriate
+## Generated state must be independently owned
 
-Discord operations cannot be transactional.
+A generated event owns its runtime configuration.
 
-Structure flows so stale Discord success cannot overwrite newer PostgreSQL state.
-
-Re-check after external calls where races matter.
+Do not turn template configuration into a live dependency unless a future feature explicitly requires that relationship.
 
 ---
 
-## Preserve lock order
+## Existing snapshots stay independent
 
-Before adding a new transaction that touches several shared rows:
+Changes to reusable source configuration must not rewrite existing event snapshots.
 
-1. inspect neighbouring services
-2. determine their lock order
-3. use a compatible order
-4. add a concurrency regression if the new operation can race
-
-Do not independently invent the reverse order.
+This principle already applies to role-request presets and should guide templates.
 
 ---
 
-## Prefer narrow reusable services
+## Durable work remains durable
 
-Extract domain/application services when they create a real reusable or testable boundary.
+Publication, reminders, organiser actions, role-request opening/closing, and completion use PostgreSQL-backed scheduled actions.
 
-Do not refactor into generic frameworks merely to reduce line counts.
-
----
-
-## Preserve portability
-
-High-value domain behaviour should not depend unnecessarily on:
-
-- Discord interaction objects
-- one slash-command layout
-- hardcoded regiment role names
-- one deployment environment
-
-Portability does not require turning the application into a framework.
+Template generation must create or coordinate durable actions through established boundaries rather than creating separate in-memory timers.
 
 ---
 
-## Preserve public-repository quality
+## Discord side effects require deliberate ordering
 
-Code and documentation should remain credible to:
+Discord calls cannot be transactional with PostgreSQL.
 
-- collaborators
-- recruiters
-- potential employers
-- future maintainers
+For any new template/recurrence workflow involving Discord:
 
-Do not exaggerate scale, production readiness, or unimplemented functionality.
+1. identify the authoritative database decision
+2. define when the external side effect happens
+3. revalidate state where races matter
+4. define cleanup/reconciliation after a losing race
+5. preserve retryability for transient failures
+6. distinguish permanent unavailable destinations from unexpected failures
 
 ---
 
-# Full Verification Expectations
+## Guild ownership must remain explicit
 
-For a normal completed feature or reliability PR:
+Reusable configuration must be scoped to its owning guild.
+
+Template, preset, event, organiser, and role relationships must not permit cross-guild mutation through foreign IDs.
+
+---
+
+## Idempotency matters
+
+Repeated generation, retry, or administration commands should not create duplicate state.
+
+When a request is already satisfied, prefer a clear unchanged/idempotent result rather than inventing a mutation.
+
+---
+
+## Cancellation and completion remain final
+
+New scheduled/template logic must not revive:
+
+- cancelled events
+- completed events
+- retired organiser ownership
+- obsolete scheduled actions
+- closed role-request groups
+
+---
+
+# Schema and Migration Rules
+
+Schema work must follow the existing migration model.
+
+Schema source:
+
+```text
+src/db/schema.ts
+```
+
+Versioned migrations:
+
+```text
+drizzle/
+```
+
+After an intentional schema change:
+
+```bash
+npm run db:generate
+```
+
+Review generated SQL before committing it.
+
+Do not edit old migrations that may already have been applied.
+
+Schema work should include relevant migration-chain coverage.
+
+---
+
+# Development Workflow
+
+## Inspect current code first
+
+Before proposing a P1 patch:
+
+1. inspect the current branch
+2. inspect `src/db/schema.ts`
+3. inspect existing template-related migrations
+4. inspect event creation services
+5. inspect relevant tests
+6. inspect current architecture/decision records
+
+Do not rely on old conversation line numbers or stale snippets.
+
+---
+
+## Regression-first for defects
+
+When a bug is discovered:
+
+```text
+red regression first
+    |
+    v
+narrow production correction
+```
+
+Do not recreate a regression the developer reports is already present.
+
+---
+
+## Prefer direct service coverage
+
+New reusable template services should receive direct PostgreSQL-backed integration coverage.
+
+Particularly test:
+
+- guild ownership
+- child ownership
+- validation
+- transactions
+- no-op behaviour
+- snapshot independence
+- scheduled-action creation
+- locking
+- concurrency
+
+---
+
+## Use deterministic database races
+
+For concurrency-sensitive behaviour prefer:
+
+- explicit PostgreSQL locks
+- controlled barriers
+- deliberate interleaving
+
+Do not rely on timing sleeps when a race can be demonstrated deterministically.
+
+---
+
+## Keep Discord adapters thin where practical
+
+Command handlers should coordinate Discord input/output.
+
+Reusable template creation, mutation, generation, and recurrence behaviour should live behind service boundaries where that improves clarity and testability.
+
+Do not introduce abstractions without a real boundary.
+
+---
+
+# Testing Expectations
+
+Normal development sequence:
+
+```text
+targeted test
+    |
+    v
+affected suite
+    |
+    v
+typechecks
+    |
+    v
+broader integration coverage
+    |
+    v
+full gate
+```
+
+Normal PR-ready gate:
 
 ```bash
 npm run test:unit
@@ -1829,291 +563,68 @@ npm run test:integration
 npm run test:coverage
 npm run typecheck
 npm run typecheck:test
-```
-
-Also run:
-
-```bash
 git diff --check
 ```
 
-before committing or opening the PR.
+Schema work additionally requires:
 
-Schema work should additionally include migration generation/review and relevant migration-chain tests.
+- migration review
+- relevant migration-chain tests
+- verification that generated migrations preserve existing state
 
----
-
-# Manual Test Expectations for Upcoming Preset Editing
-
-Manual Discord testing will be warranted once the command surface changes.
-
-Likely scenarios include:
-
-- rename preset
-- edit description
-- edit inactive preset
-- edit role option
-- replace qualification roles
-- edit group timing
-- edit channel behaviour
-- edit notification role
-- change mappings
-- inspect updated preset
-- apply edited preset to a fresh event
-- confirm existing previously-applied event remains unchanged
-- verify invalid edit/application feedback
-- verify idempotent edits
-
-Automated service tests should establish the persistence and snapshot guarantees first.
+Use manual Discord smoke tests only where behaviour materially depends on real Discord surfaces.
 
 ---
 
-# Do Not Regress These Behaviours
+# Documentation Expectations During P1
 
-A future implementation should stop and investigate if it would violate any of the following.
+When template work establishes new durable behaviour:
+
+- update `ARCHITECTURE.md`
+- add or amend `DECISIONS.md` for durable design choices
+- keep `ROADMAP.md` focused on remaining work
+- rewrite this file around the current checkpoint as P1 advances
+- update `ADMIN-GUIDE.md` when commands become user-facing
+- update `TESTING-GUIDE.md` when new testing patterns or subsystem expectations become established
+
+Do not let detailed completed-template history accumulate here.
+
+---
+
+# P1.1 Recommended Starting Sequence
+
+The first fresh development session should proceed approximately as follows:
 
 ```text
-PostgreSQL state is authoritative.
+1. Sync main and create a focused P1.1 branch
 
-Publication state is separate from event lifecycle.
+2. Inspect template-related tables in src/db/schema.ts
 
-Unpublished events are persistent real events.
+3. Inspect migrations that introduced or changed template fields
 
-Cancellation remains final.
+4. Trace createStoredEvent() and current event creation transactions
 
-Event creator is not implicitly organiser.
+5. Trace:
+       publication setup
+       ping-role snapshots
+       organiser assignment creation
+       reminder creation
+       preset application
+       scheduled-action creation
 
-Unpublished organiser nominees begin dormant.
+6. Compare existing template scaffolding with those boundaries
 
-Organiser nominee flow yields to the event safety deadline.
+7. Write down proposed retained/removed/new schema
 
-Cover may remain claimable after event start while the event is still operational.
+8. Record any durable design decisions
 
-Once endsAt has passed, new organiser escalation is obsolete even if completion status has not caught up yet.
-
-Tracked organiser cover/start messages are reconciled when they become obsolete.
-
-A T+0 replacement alert is durably linked before older cover messages are superseded.
-
-Only one organiser assignment may own the event at a time.
-
-Normal organiser operations participate in the guild feature lock.
-
-Role options are event-level.
-
-Role requests are event + user + option.
-
-Several request groups may share one volunteer pool.
-
-Role requests are independent and multi-select.
-
-Repeated request clicks do not withdraw.
-
-Qualification and notification audience are different concepts.
-
-Supervision-required eligibility is deliberate.
-
-Changing attendance does not automatically destroy stored role willingness.
-
-Manual immediate role-request opening remains distinct from relative scheduled opening.
-
-Scheduled work is durable and idempotent.
-
-Stale scheduler workers cannot overwrite newer state.
-
-Administrative rescheduling resets stale retry state.
-
-Deleted-message recovery requires a known destination.
-
-Recovery does not replay normal notification pings.
-
-Unexpected Discord failures are not proof of deletion.
-
-Role-request presets are reusable source configuration.
-
-Preset application creates independent event-level snapshots.
-
-Runtime role requests do not continuously consult their source preset.
-
-Preset application takes the parent shared lock.
-
-Preset mutation takes the parent exclusive lock.
-
-Preset lifecycle changes are non-destructive.
-
-Option deactivation does not silently cascade into group deactivation.
+9. Only then begin migration/service implementation
 ```
 
----
-
-# Current Public Testing Position
-
-The bot is being developed for real community use and has undergone substantial automated and manual verification.
-
-The current Discord presentation is functional but not considered the final UI.
-
-Near-term effort should continue to prioritise:
-
-- correct behaviour
-- reliability
-- administrator workflow
-- maintainable services
-- regression coverage
-- portability
-
-over large cosmetic Discord-message redesigns.
-
----
-
-# Handoff Checklist
-
-A fresh development session should orient itself in this order.
+Likely first branch name:
 
 ```text
-1. Confirm current branch and git status
-
-2. Read:
-   README.md
-   ARCHITECTURE.md
-   DECISIONS.md
-   ROADMAP.md
-   CURRENT-WORK.md
-   TESTING-GUIDE.md
-
-3. Read ADMIN-GUIDE.md for command/admin changes
-
-4. Inspect the exact current source and tests for the target subsystem
-
-5. Treat PostgreSQL and regression tests as behavioural evidence
-
-6. Preserve the decision record unless a newer explicit decision supersedes it
-
-7. Write failing regression first for bugs
-
-8. Build new reusable functionality behind direct service tests
-
-9. Run targeted tests before broader suites
-
-10. Run the full gate before considering work PR-ready
-
-11. Perform a targeted manual Discord smoke test when the real Discord surface changed
+feat/event-template-schema
 ```
 
----
-
-# Immediate Handoff Summary
-
-At this checkpoint:
-
-```text
-role-request preset foundation is implemented
-
-preset application is implemented
-
-scheduled preset-derived group opening/closing is implemented
-
-automatic role-group publication respects event publication intent
-
-manual-held events do not leak scheduled role groups
-
-intentional pre-publication role groups remain supported
-
-deferred role-group openings do not consume retry attempts
-
-successful event publication wakes due deferred openings
-
-future role groups remain scheduled normally
-
-role-request publication revalidates after Discord side effects
-
-preset parent lifecycle is implemented
-
-preset option lifecycle is implemented
-
-preset group lifecycle is implemented
-
-message recovery is implemented for core attendance and role-request messages
-
-organiser safety and cover-message reconciliation are implemented
-
-graceful shutdown drains active scheduler work before Discord and PostgreSQL teardown
-
-PostgreSQL pool error logging is sanitised and does not emit raw pg client internals
-
-11 September database outages were diagnosed as PostgreSQL addon restarts with no observed scheduler-state damage
-
-role-request groups support up to four ordered optional notification roles
-
-preset notification roles snapshot into independent event-level collections
-
-scheduled publication resolves notification roles independently
-
-manual role-group posting persists and pings multiple roles
-
-legacy singular notification columns remain temporary deployment compatibility shadows
-
-preset request-group definition editing is implemented
-
-request-group edits preserve omitted fields and require explicit destructive clears
-
-notification-role editing uses complete ordered replacement semantics
-
-request-group editing serialises against preset application through the parent lock
-
-existing event request-group snapshots remain independent after reusable group edits
-
-preset group-option mapping replacement is implemented
-
-mapping replacement uses complete ordered semantics
-
-inactive preset options may remain mapped
-
-option lifecycle and mapping membership remain independent
-
-mapping replacement serialises against preset application
-
-existing event mapping snapshots remain independent
-
-preset administration UX review is implemented
-
-list/show provide deterministic ID discovery
-
-inactive mapped options and unusable active groups are visible
-
-fixed and apply-time-default channels are distinguished
-
-lifecycle activation wording does not promise graph validity
-
-preset application failures provide actionable repair guidance
-
-autocomplete was reviewed and deliberately not added
-
-P0.10 Event Administration channel deletion behaviour is verified
-
-Discord 10003 is treated as definitive destination loss
-
-unexpected Discord failures retain retry/error behaviour
-
-P0.11 deleted Event Organiser role behaviour is implemented
-
-missing organiser roles degrade to tracked unpinged cover messages
-
-Discord 10011 is treated as definitive role absence
-
-unexpected role-resolution failures remain observable
-
-@everyone is never used as an organiser notification fallback
-
-ordinary cover, T-15 and T+0 track posted_without_ping as successful delivery
-
-PostgreSQL organiser state remains authoritative when notification presentation degrades
-
-automated unit/integration/coverage/typechecking is green
-
-next production activity:
-    P1.1 reconcile existing event-template schema scaffolding
-```
-
-Do not resume an older reliability or preset-foundation task simply because an older chat or stale document says it is still pending.
-
-Use the current repository and reconciled documentation as the development baseline.
+or another narrowly equivalent P1.1 name.

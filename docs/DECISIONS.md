@@ -43,6 +43,30 @@ Where current production behaviour is known to be wrong and a regression test ex
 
 ---
 
+# Decision Map
+
+This file is chronological within broad topic areas.
+
+Use the following topic map when looking for a particular design concern:
+
+| Area                        | Typical decisions covered                                                        |
+| --------------------------- | -------------------------------------------------------------------------------- |
+| Core events and persistence | database authority, lifecycle, publication, snapshots                            |
+| Organisers                  | assignment ownership, escalation, cover, feature locking, notification behaviour |
+| Role requests               | role identity, qualification, groups, scheduling, publication                    |
+| Reusable presets            | snapshot semantics, lifecycle, editing, locking, mappings                        |
+| Scheduler and reliability   | durable work, retries, recovery, ownership fencing                               |
+| Attendance                  | signups, actual attendance, reporting semantics                                  |
+| Reminders and announcements | durable reminders, destinations, rescheduling                                    |
+| Feature configuration       | server-level feature controls                                                    |
+| Testing and development     | regression-first workflow, deterministic races, PR gates                         |
+| Templates and recurrence    | generated-event independence, template snapshots, occurrence identity            |
+| Integration and portability | public documentation, service boundaries, future external interfaces             |
+
+The [`Summary of Highest-Risk Invariants`](#summary-of-highest-risk-invariants) near the end is the quickest reference before a substantial refactor.
+
+---
+
 # Core Event and Persistence Decisions
 
 ## D001 - PostgreSQL is the authoritative source of application state
@@ -150,7 +174,7 @@ Several later workflows depend on the event already existing before publication.
 
 **Status: Current**
 
-Mutable guild defaults should not silently alter already-configured events.
+Mutable guild defaults should not unexpectedly alter already-configured events.
 
 Examples of values that may require event-level snapshots include:
 
@@ -241,7 +265,7 @@ Do not rely only on the guild's current default attendance channel when publicat
 
 ### Reason
 
-Changing the guild default should not silently move an event that has already been prepared or scheduled.
+Changing the guild default should not unexpectedly move an event that has already been prepared or scheduled.
 
 ---
 
@@ -1475,7 +1499,7 @@ Discord roles may provide:
 - defaults
 - validation hints
 
-They must not silently become historical truth.
+They must not become historical truth.
 
 ---
 
@@ -1730,7 +1754,7 @@ If the destination channel itself has disappeared, the bot must not guess a diff
 
 Changing presentation destination is an administrative choice.
 
-Recovery should restore lost presentation, not silently redesign configuration.
+Recovery should restore lost presentation, not redesign configuration.
 
 ---
 
@@ -2045,7 +2069,7 @@ Reactivation restores the same definition.
 
 **Status: Current**
 
-If an administrator deactivates the last active option mapped into an active group, the lifecycle operation does not silently deactivate that group.
+If an administrator deactivates the last active option mapped into an active group, the lifecycle operation does not automatically deactivate that group.
 
 Instead:
 
@@ -2673,6 +2697,34 @@ Do not assume the public branch contains a local uncommitted fix.
 
 # Template and Recurrence Decisions
 
+These decisions describe the agreed architectural direction entering P1.
+
+They are not evidence that event templates or recurrence are already implemented.
+
+P1.1 may refine schema details where the repository's older template scaffolding conflicts with the architecture established since those tables were introduced.
+
+In particular, D120 explicitly permits revising or superseding incomplete existing template schema.
+
+The durable principles that should survive that reconciliation are:
+
+```text
+template = reusable source
+
+generated event = ordinary independent event
+
+organiser defaults = event organiser snapshots
+
+reminder defaults = event reminder snapshots
+
+role-request configuration = established preset snapshot model
+
+template edits = future generation by default
+
+recurrence identity != mutable event start time
+```
+
+---
+
 ## D113 - Templates should generate ordinary persistent events
 
 **Status: Planned**
@@ -2758,7 +2810,7 @@ without redefining the recurring series.
 
 Changing a template should normally affect occurrences generated afterwards.
 
-It should not silently rewrite already-generated events.
+It should not automatically rewrite already-generated events.
 
 A future explicit propagation feature could be designed separately.
 
@@ -2958,16 +3010,19 @@ Particularly important examples include:
 
 ```text
 implemented
+    -> persistent event lifecycle
+    -> immediate/manual/scheduled publication
+    -> organiser workflows and safety handling
+    -> event-level role requests
     -> reusable role-request presets
-    -> preset application
-    -> preset lifecycle
-    -> scheduled role-request opening
-    -> organiser safety deadlines
-    -> core message recovery
+    -> preset editing and lifecycle
+    -> scheduled role-request groups
+    -> reminders
+    -> message recovery
+    -> focused deleted-channel/deleted-role reliability handling
 
 planned
-    -> remaining preset group-option mapping editing and final UX review
-    -> full event templates
+    -> event templates
     -> recurring event generation
     -> confirmed-organiser unavailability workflow
     -> richer participation context
@@ -3336,6 +3391,80 @@ The existing `list -> show -> mutate` flow exposes the required identifiers whil
 
 ---
 
+## D133 - Organiser notification destination loss and audience loss are different failures
+
+**Status: Current**
+
+The organiser notification system distinguishes the Discord destination from the optional notification audience.
+
+A deleted Event Administration channel means:
+
+```text
+destination unavailable
+    -> claimable message cannot be posted there
+```
+
+A deleted Event Organiser role means:
+
+```text
+notification audience unavailable
+    -> Event Administration channel may still be usable
+    -> claimable message should still post
+    -> delivery = posted_without_ping
+```
+
+Discord may report a missing organiser role through:
+
+```text
+role fetch -> null
+```
+
+or:
+
+```text
+10011 Unknown Role
+```
+
+Both represent definitive role absence.
+
+By contrast, an unexpected role-resolution or Discord transport error remains an unexpected failure and must preserve the appropriate retry/observability path.
+
+The guild's `@everyone` role must never become an automatic organiser-notification fallback.
+
+This remains true even when the bot has `MentionEveryone`.
+
+For scheduler-driven organiser messages:
+
+```text
+posted_without_ping
+    -> successful delivery
+    -> message linkage is persisted
+    -> scheduled action completes
+    -> audit records the actual delivery mode
+```
+
+A definitive deleted Event Administration channel is different:
+
+```text
+10003 Unknown Channel
+    -> destination unavailable
+    -> no guessed replacement channel
+```
+
+### Reason
+
+Organiser state is authoritative in PostgreSQL.
+
+The ability to mention a role is presentation.
+
+Losing an optional notification audience should not discard a useful claimable administration message when its destination still exists.
+
+Conversely, losing the destination itself must not cause the bot to choose an unrelated channel.
+
+Treating confirmed Discord deletion separately from unexpected transport failures also preserves retry behaviour and operational observability.
+
+---
+
 # Summary of Highest-Risk Invariants
 
 The following decisions are especially easy to break during an otherwise well-intentioned refactor.
@@ -3385,6 +3514,20 @@ normal organiser work
 
 feature disable
     -> exclusive feature lock
+
+admin channel missing
+    -> destination failure
+    -> no guessed fallback
+
+organiser role missing
+    -> audience degradation
+    -> posted_without_ping when admin channel remains usable
+
+@everyone
+    -> never organiser notification fallback
+
+unexpected Discord error
+    -> not proof of deleted channel or role
 ```
 
 ## Role requests
