@@ -106,22 +106,30 @@ P1
 Event Templates
 ```
 
-The first task is not to expose template commands.
+P1.1 schema reconciliation is complete.
 
-P1 begins by reconciling the repository's existing template schema scaffolding against the architecture that now exists for:
+The current template persistence model now represents reusable source configuration for:
 
 ```text
-event creation
-publication
-ping-role snapshots
-organisers
-reminders
-role-request presets
-scheduled actions
-audit
+event defaults
+publication intent
+ping-role defaults
+optional organiser defaults
+reminder definitions
+optional role-request preset reference
 ```
 
-Existing template-related tables and columns are therefore **scaffolding**, not an immutable contract.
+Administrator-facing template behaviour and one-off generation are not yet implemented.
+
+The immediate architecture task is to strengthen the existing service boundaries so one future template-generation transaction can atomically create:
+
+```text
+ordinary event
+event-owned snapshots
+durable scheduled work
+```
+
+without making Discord command handlers or independently-committing public services the composition boundary.
 
 ## Planned areas
 
@@ -3878,14 +3886,38 @@ event_types
 event_audiences
 ```
 
-## Template scaffolding
+## Template source configuration
 
 ```text
 event_templates
-template_role_options
+event_template_ping_roles
+event_template_organiser_defaults
+event_template_reminders
 ```
 
-These tables are not evidence of a complete template product feature.
+Templates may also reference:
+
+```text
+zero or one role_request_preset
+```
+
+through:
+
+```text
+event_templates.role_request_preset_id
+```
+
+Generated events may retain:
+
+```text
+events.template_id
+```
+
+as source provenance.
+
+This is the implemented persistence foundation for P1 templates.
+
+It is not evidence that template generation or administrator-facing template commands are already implemented.
 
 ## Reusable role-request presets
 
@@ -4135,43 +4167,53 @@ Future UX may make this clearer before application, but the database/domain beha
 
 # P1 Event Template Architecture
 
-**Status: Planned architecture — active development phase**
+**Status: schema foundation implemented — generation and administration planned**
 
 Event templates are the current major feature area.
 
-The repository already contains template-related schema scaffolding, including concepts such as:
+P1.1 reconciled the repository's original template scaffolding through:
+
+```text
+0021_reconcile-event-template-schema
+```
+
+The current reusable source model is:
 
 ```text
 event_templates
-template_role_options
+    |
+    +---- event_template_ping_roles
+    |
+    +---- event_template_organiser_defaults
+    |
+    +---- event_template_reminders
+    |
+    +---- optional role_request_preset_id
+```
+
+Generated events retain:
+
+```text
 events.template_id
 ```
 
-Some of this predates:
+as source provenance.
 
-- reusable role-request presets
-- the current organiser architecture
-- reminder persistence
-- publication snapshot semantics
-- the current durable scheduler
-- the extracted `createStoredEvent()` service
-
-Those existing tables and fields must therefore be reviewed rather than preserved automatically.
-
-The current P1.1 task is to decide deliberately:
+The obsolete:
 
 ```text
-retain
-replace
-extend
-or remove
+template_role_options
 ```
 
-for each existing template concept.
+graph and the older singular template ping-role, role-request channel/timing, attendance-open, and recurrence fields were removed.
 
-No old template migration should be edited after the fact.
+The schema now represents reusable source configuration only.
 
-Any schema correction must use a new migration.
+Template generation and administrator-facing template commands are not yet implemented.
+
+Recurrence remains deliberately separate until one-off template generation is stable.
+
+No historical applied migration was edited. The reconciliation was introduced through a new forward migration.
 
 ---
 
@@ -4247,17 +4289,25 @@ It must not be assumed as part of ordinary template editing.
 
 # Template Provenance
 
-Generated events should retain source-template provenance.
-
-The existing nullable:
+Generated events retain source-template provenance through:
 
 ```text
 events.template_id
 ```
 
-is one current scaffolding mechanism for this concept.
+This remains nullable because manually-created events have no source template.
 
-P1.1 must determine whether that representation remains sufficient.
+For generated events it identifies the reusable source aggregate that produced the event.
+
+The foreign key uses:
+
+```text
+ON DELETE RESTRICT
+```
+
+so hard deletion cannot erase historical source provenance.
+
+Normal template lifecycle should therefore use reversible active/inactive state.
 
 Provenance is useful for:
 
@@ -4267,7 +4317,9 @@ Provenance is useful for:
 - future recurrence identity
 - tracing how an event was generated
 
-Provenance must not become a live runtime dependency on the current template definition.
+`template_id` is **not** a live runtime configuration relationship.
+
+After generation, the event owns its runtime state and ordinary event behaviour must not reread the current template merely because provenance exists.
 
 ---
 
@@ -4364,45 +4416,48 @@ Later template organiser changes should affect future generation by default, not
 
 # Template Role-Request Semantics
 
-Templates must build on the existing reusable role-request preset architecture.
+Templates build on the existing reusable role-request preset architecture.
 
 Do not create a second reusable role-request graph inside the template subsystem.
 
-The preferred model remains:
+The reconciled P1 schema supports:
 
 ```text
 template
     |
-    | references reusable role-request configuration
+    | zero or one role_request_preset_id
     v
-generation
+role_request_preset
     |
-    | snapshot
+    | generation-time snapshot
     v
 ordinary event-level role-request state
 ```
 
-The exact template-to-preset relationship is intentionally still open for P1.1 design.
+The preset relationship is reusable source configuration only.
 
-Possible questions include:
+Generation must validate that the referenced preset:
 
-- whether a template references zero, one, or several presets
-- whether ordering is required
-- whether applying the referenced configuration occurs inside the generation transaction
-- how conflicting logical role-option keys are reported
-- how inactive presets or invalid reusable graphs affect generation
+- belongs to the same guild as the template
+- is usable for generation
+- satisfies the established preset graph invariants
 
-Whatever model is selected, the end state must use the established event-level tables and runtime behaviour.
+Preset application during generation must occur inside the same authoritative PostgreSQL transaction as the rest of generated event creation.
 
 After generation:
 
 - the event owns its role options
 - the event owns its request groups
+- the event owns its qualification-role snapshots
+- the event owns its notification-role snapshots
+- the event owns its durable role-request scheduled actions
 - later preset edits do not change the event
 - later template edits do not change the event
 - ordinary role-request scheduler behaviour applies
 
-The existing preset snapshot and locking semantics are the reference model.
+The existing preset snapshot and locking semantics remain the reference model.
+
+Template generation must reuse those semantics rather than reproducing their behaviour in a template-specific implementation.
 
 ---
 
@@ -4446,20 +4501,34 @@ The reminder then belongs to that event.
 
 Later template changes must not automatically rewrite already-generated reminder instances.
 
-## Important P1 reminder review
+## Long-lived unpublished reminder validity
 
-Template-generated events may exist for a substantial period as:
+The required P1 reminder review is complete.
+
+Template-generated events may legitimately exist as:
 
 ```text
 status = scheduled
 publishedAt = null
 ```
 
-That is valid.
+for a substantial period before publication.
 
-Before templates rely on the current reminder-rescheduling logic, P1 must verify that a legitimate future reminder is not marked obsolete merely because the event has not yet been publicly published or opened for signups.
+A regression identified that signup-close reminders were previously invalidated whenever the event status was not `open`.
 
-In particular, signup-close-relative reminders need regression coverage for long-lived unpublished generated events.
+That incorrectly cancelled legitimate future reminders for unpublished `scheduled` events.
+
+The reminder rescheduling path now preserves a future signup-close reminder when:
+
+```text
+status = scheduled
+signupsEnabled = true
+attendanceClosesAt = future
+```
+
+while a genuinely `closed` event still invalidates that signup-close reminder.
+
+PostgreSQL integration coverage protects both sides of this lifecycle boundary.
 
 ---
 
@@ -4582,49 +4651,68 @@ The exact commands and mutation services remain future implementation work.
 
 # P1.1 Schema Reconciliation
 
-Before template feature implementation begins, P1.1 must inspect:
+P1.1 is complete.
+
+The reconciliation established the following source/runtime boundary.
+
+Reusable template source state:
 
 ```text
-src/db/schema.ts
-
-template-related migrations
-
 event_templates
 
-template_role_options
+event_template_ping_roles
 
-events.template_id
+event_template_organiser_defaults
+
+event_template_reminders
+
+optional event_templates.role_request_preset_id
 ```
 
-against the current event architecture.
-
-The review must answer:
+Generated runtime state remains ordinary event-owned state:
 
 ```text
-Which existing fields remain useful?
+events
 
-Which assumptions predate the current architecture?
+event_ping_roles
 
-Which relationships should be removed or superseded?
+event_organiser_assignments
 
-Which additional tables are required?
+event_reminders
 
-Where is template source state stored?
+event_role_options
 
-Where does event-owned snapshot state begin?
+event_role_option_qualification_roles
 
-How is source-template provenance represented?
+role_request_groups
 
-How do reminder definitions relate to event_reminders?
+role_request_group_options
 
-How do templates reference role-request presets?
+role_request_group_notification_roles
 
-What lifecycle state belongs to templates?
+event_role_request_preset_applications
 
-What future recurrence identity must be supported?
+scheduled_actions
 ```
 
-Existing schema scaffolding is evidence of earlier intent, not a requirement to preserve the old shape.
+Key decisions established by the reconciliation:
+
+- templates are reusable source configuration, not runtime events
+- recurrence does not belong in the one-off template source aggregate
+- template role requests reuse the existing preset architecture
+- P1 initially supports zero or one preset reference per template
+- ping roles use an ordered child collection
+- organiser defaults are optional source rows
+- organiser feature disablement must not prevent template generation
+- reminders use reusable source definitions and snapshot into ordinary event reminders
+- publication source intent is explicitly `manual`, `scheduled`, or `immediate`
+- `events.template_id` remains provenance and uses deletion restriction
+- generated events must remain independent after generation
+- old applied migrations remain untouched
+
+Migration-chain integration coverage verifies the reconciled schema against a fresh PostgreSQL database.
+
+The next architecture task is exposing transaction-aware service boundaries so generation can create the event, snapshots, and durable actions atomically.
 
 ---
 
@@ -4924,7 +5012,9 @@ The following invariants are particularly important.
 - Template organiser defaults become ordinary dormant organiser assignments.
 - Template reminders become ordinary event reminders.
 - Template role requests must reuse the established role-request preset/snapshot architecture.
-- Existing template schema is scaffolding until P1.1 deliberately confirms or replaces it.
+- P1.1 established the current template source schema through `event_templates` and its reusable child collections.
+- A template may reference zero or one reusable role-request preset, which must snapshot into ordinary event-owned state during generation.
+- Template organiser defaults are optional and must not prevent generation when guild organiser functionality is disabled.
 - Recurring occurrences need immutable series identity separate from mutable event start time.
 - Recurrence generation must be idempotent and bounded.
 
@@ -4950,7 +5040,7 @@ The following invariants are particularly important.
 
 # Development Direction
 
-The foundational platform and reusable role-request preset milestone are complete.
+The foundational platform, reusable role-request preset milestone, and P1.1 template-schema reconciliation are complete.
 
 The current architectural sequence is:
 
@@ -4959,13 +5049,17 @@ P0 foundation and reliability
         |
         | complete
         v
-P1 event-template schema reconciliation
+P1.1 template schema reconciliation
+        |
+        | complete
+        v
+transaction-aware generation service boundaries
         |
         v
 one-off template generation
         |
         v
-template administration
+template administration and editing
         |
         v
 recurring event generation
@@ -4974,15 +5068,32 @@ recurring event generation
 later P2 / P3 product work
 ```
 
-The immediate architecture task is P1.1:
+The immediate architecture task is to make the established event-creation, reminder, preset-snapshot, and durable-action boundaries composable inside one authoritative generation transaction.
+
+The refactor should preserve current public behaviour while enabling a future generation flow conceptually shaped as:
 
 ```text
-reconcile existing template schema scaffolding
-against the current event architecture
+lock and validate template source
+        |
+        v
+resolve source defaults
+        |
+        v
+create ordinary event
+        |
+        +---- ping-role snapshots
+        +---- optional organiser assignments
+        +---- reminder snapshots
+        +---- role-request preset snapshot
+        +---- durable scheduled actions
+        |
+        v
+commit atomically
 ```
 
-Template development should therefore begin from the established boundaries for:
+Template development should continue to preserve the established boundaries for:
 
+- PostgreSQL authority
 - event creation
 - snapshot ownership
 - organisers
@@ -4994,7 +5105,7 @@ Template development should therefore begin from the established boundaries for:
 - guild ownership
 - concurrency
 
-rather than preserving incomplete older template assumptions.
+Immediate Discord side effects remain outside the authoritative PostgreSQL transaction and must follow the existing post-commit/revalidation principles.
 
 Reliability remains a continuing development standard throughout P1 rather than a separate broad rewrite phase.
 

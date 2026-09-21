@@ -2697,22 +2697,26 @@ Do not assume the public branch contains a local uncommitted fix.
 
 # Template and Recurrence Decisions
 
-These decisions describe the agreed architectural direction entering P1.
+These decisions describe the durable architectural direction for P1 templates and later recurrence.
 
-They are not evidence that event templates or recurrence are already implemented.
+P1.1 schema reconciliation is complete.
 
-P1.1 may refine schema details where the repository's older template scaffolding conflicts with the architecture established since those tables were introduced.
+It established the reusable template source model and removed obsolete pre-preset scaffolding, but it did **not** implement template generation, administrator-facing template commands, or recurrence.
 
-In particular, D120 explicitly permits revising or superseding incomplete existing template schema.
+D120 records why the original scaffolding could be revised rather than preserved.
 
-The durable principles that should survive that reconciliation are:
+D134 records the current template source/runtime boundary established by P1.1.
+
+Decisions below that remain marked **Planned** describe behaviour that is still to be implemented.
+
+The durable principles are:
 
 ```text
 template = reusable source
 
 generated event = ordinary independent event
 
-organiser defaults = event organiser snapshots
+organiser defaults = optional event organiser snapshots
 
 reminder defaults = event reminder snapshots
 
@@ -2870,11 +2874,11 @@ The preset subsystem already solves qualification, groups, channels, scheduling,
 
 ---
 
-## D120 - Existing template schema is scaffolding, not a finished contract
+## D120 - Existing template schema scaffolding may be revised rather than preserved
 
-**Status: Current clarification**
+**Status: Applied during P1.1**
 
-The repository currently contains template-related schema including:
+The repository entered P1 with early template schema including:
 
 ```text
 event_templates
@@ -2882,13 +2886,32 @@ template_role_options
 events.template_id
 ```
 
-Some of this predates the completed reusable role-request preset design.
+That scaffolding predated several later architectural developments.
 
-Future template implementation may revise or supersede parts of this scaffolding.
+P1.1 therefore treated it as evidence of earlier intent rather than a compatibility contract.
+
+Migration:
+
+```text
+0021_reconcile-event-template-schema
+```
+
+removed obsolete source concepts and established the current template source model.
+
+In particular:
+
+- `template_role_options` was removed
+- template role requests now reference the established preset architecture
+- singular template ping-role state became an ordered child collection
+- template reminder definitions gained their own reusable source table
+- primary/backup organiser defaults gained their own source table
+- publication intent became explicit
+- recurrence was removed from the one-off template aggregate
+- `events.template_id` was retained as provenance
 
 ### Reason
 
-Schema presence must not force future implementation to preserve an older incomplete model when later architecture provides a better boundary.
+Schema presence must not force the implementation to preserve an older incomplete model when later architecture establishes a clearer ownership and snapshot boundary.
 
 ---
 
@@ -3462,6 +3485,110 @@ Losing an optional notification audience should not discard a useful claimable a
 Conversely, losing the destination itself must not cause the bot to choose an unrelated channel.
 
 Treating confirmed Discord deletion separately from unexpected transport failures also preserves retry behaviour and operational observability.
+
+---
+
+## D134 - Template source state is separate from generated event-owned state
+
+**Status: Current schema contract**
+
+P1 templates are reusable source configuration.
+
+The current source aggregate is:
+
+```text
+event_templates
+    |
+    +---- event_template_ping_roles
+    +---- event_template_organiser_defaults
+    +---- event_template_reminders
+    +---- optional role_request_preset_id
+```
+
+Generation must copy or resolve that reusable state into ordinary event-owned state.
+
+The generated event must not continuously consult the current template definition.
+
+### Role-request relationship
+
+P1 initially supports:
+
+```text
+zero or one role-request preset per template
+```
+
+The preset remains reusable source configuration.
+
+Generation must use the existing preset snapshot architecture rather than creating template-specific role-request runtime state.
+
+### Organiser defaults
+
+Template organiser defaults are optional.
+
+Supported reusable slots are:
+
+```text
+primary
+backup
+```
+
+`cover` remains runtime recovery state.
+
+If guild organiser functionality is disabled, template generation must remain available and must not fail merely because organiser defaults exist.
+
+No organiser assignments should be created while the feature is disabled.
+
+### Publication intent
+
+Templates explicitly distinguish:
+
+```text
+manual
+scheduled
+immediate
+```
+
+source intent.
+
+Scheduled publication requires a publication offset.
+
+Manual and immediate source intent do not store one.
+
+Generated events continue to use the existing runtime publication architecture rather than a template-specific publication state machine.
+
+### Provenance
+
+Generated events retain:
+
+```text
+events.template_id
+```
+
+as provenance.
+
+The relationship uses deletion restriction.
+
+Normal template lifecycle therefore favours active/inactive state rather than destructive deletion.
+
+### Recurrence
+
+Recurrence is not part of the one-off template source aggregate.
+
+It will be designed separately after one-off generation is stable.
+
+### Reason
+
+The template must provide reusable configuration without becoming a second runtime event model.
+
+Snapshotting into existing event-owned state preserves:
+
+- independent event editing
+- stable historical behaviour
+- established scheduler semantics
+- existing organiser behaviour
+- existing reminder behaviour
+- existing role-request behaviour
+- future portability across non-Discord interfaces
 
 ---
 

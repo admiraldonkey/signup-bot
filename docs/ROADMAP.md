@@ -91,43 +91,6 @@ After generation:
 
 ---
 
-## P1.1 — Reconcile existing template schema scaffolding
-
-This is the immediate next task.
-
-The repository already contains early template-related schema concepts created before several newer subsystems reached their current architecture.
-
-Before implementing template commands or generation behaviour:
-
-1. inspect the current template-related schema and migrations
-2. identify which existing fields remain useful
-3. identify obsolete assumptions
-4. compare the scaffolding with current event creation and snapshot boundaries
-5. design the minimum coherent schema for the first template implementation
-6. generate explicit new migrations for intentional changes
-
-Do not preserve old scaffolding merely because it already exists.
-
-Do not edit previously-applied migration files.
-
-The review must consider the architecture now established by:
-
-- `createStoredEvent()`
-- event lifecycle
-- publication scheduling
-- event ping-role snapshots
-- organiser assignments
-- reminders
-- reusable role-request presets
-- preset application
-- event-level role-request snapshots
-- durable scheduled actions
-- audit behaviour
-
-The reconciliation should establish where template source state ends and event-owned snapshot state begins.
-
----
-
 ## P1.2 — Template identity and lifecycle
 
 Templates will need persistent identity and ownership.
@@ -232,6 +195,10 @@ They must participate in the normal organiser lifecycle:
 
 Do not create a separate template-specific runtime organiser workflow.
 
+Organiser defaults are optional.
+
+If organiser functionality is disabled for the guild, template generation must still succeed without creating organiser assignments.
+
 ---
 
 ## P1.6 — Template role-request defaults
@@ -251,7 +218,9 @@ generation
 event-level role-request snapshot
 ```
 
-The exact template-to-preset relationship must be decided deliberately during schema design.
+The reconciled P1 schema supports zero or one reusable role-request preset reference per template.
+
+Generation must validate guild ownership and source usability before snapshotting that preset into event-owned state.
 
 Required outcomes:
 
@@ -294,29 +263,6 @@ ordinary durable scheduled action
 Each generated event owns its reminder rows and scheduled actions.
 
 Later template edits should not rewrite reminders already snapshotted into existing events.
-
----
-
-## P1.8 — Review reminder validity for long-lived unpublished events
-
-Template-generated events may exist as:
-
-```text
-scheduled
-unpublished
-```
-
-for days or weeks before public publication.
-
-Before template generation uses the existing reminder rescheduling/validity helpers, review signup-close reminder behaviour carefully.
-
-A future reminder must not be treated as obsolete merely because:
-
-- the event is still unpublished
-- public signups have not opened yet
-- the event was generated substantially in advance
-
-This is a required implementation review for templates, not an optional later polish item.
 
 ---
 
@@ -431,10 +377,12 @@ Conceptually:
 ```text
 generated event
     |
-    +---- source_template_id
+    +---- template_id
     |
     +---- event-owned snapshot state
 ```
+
+The reconciled schema retains this provenance through `events.template_id` and prevents hard template deletion while generated events still reference it.
 
 An existing event must continue functioning if its source template is later edited or deactivated.
 

@@ -3552,19 +3552,36 @@ Event templates are the current major feature area.
 
 Testing should begin at the schema and service boundary rather than at the Discord command surface.
 
-## P1.1 schema reconciliation
+## P1.1 schema reconciliation baseline
 
-If P1.1 changes schema, verify:
+P1.1 schema reconciliation is complete.
 
-- the committed migration chain still applies from an empty database
-- the new migration preserves existing application data
+Migration:
+
+```text
+0021_reconcile-event-template-schema
+```
+
+established the current template source model and removed obsolete template scaffolding.
+
+Direct PostgreSQL-backed migration-chain coverage verifies the reconciled schema through:
+
+```text
+tests/integration/templates/event-template-schema.test.ts
+```
+
+The completed P1.1 work established the testing precedent that template schema changes must verify:
+
+- the committed migration chain applies from an empty database
+- new migrations preserve required existing application data
 - foreign keys reflect intended ownership
 - uniqueness constraints reflect domain identity rather than UI assumptions
-- obsolete scaffolding is removed only through a new migration
+- obsolete scaffolding is removed only through new forward migrations
 - old applied migrations remain unchanged
 - schema source and generated SQL agree
+- important delete/update semantics are exercised against PostgreSQL rather than inferred only from Drizzle declarations
 
-Relevant migration changes should receive direct migration-chain integration coverage.
+Future template schema changes should continue using direct migration-chain integration coverage where the migration itself carries meaningful behaviour.
 
 ## Template ownership
 

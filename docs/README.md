@@ -15,7 +15,7 @@ If several files appear to discuss the same subsystem, prefer the document whose
 | [`ARCHITECTURE.md`](./ARCHITECTURE.md)   | Developers                  | Current subsystem architecture, persistence model, data flow, scheduling, concurrency, recovery, and structural invariants |
 | [`DECISIONS.md`](./DECISIONS.md)         | Developers                  | Durable architectural/product decisions and the reasons behind non-obvious behaviour                                       |
 | [`ROADMAP.md`](./ROADMAP.md)             | Contributors                | Future development only                                                                                                    |
-| [`CURRENT-WORK.md`](./CURRENT-WORK.md)   | Active development sessions | Current checkpoint, immediate objective, implementation constraints, and fresh-chat handoff                                |
+| [`CURRENT-WORK.md`](./CURRENT-WORK.md)   | Active development sessions | Current checkpoint, immediate objective, and implementation constraints handoff                                            |
 | [`TESTING-GUIDE.md`](./TESTING-GUIDE.md) | Developers                  | Unit/integration/manual testing strategy and verification workflow                                                         |
 | [`ADMIN-GUIDE.md`](./ADMIN-GUIDE.md)     | Discord administrators      | Current setup commands, event administration workflows, operational behaviour, and troubleshooting                         |
 
@@ -224,8 +224,10 @@ P1 — Event Templates
 Immediate task:
 
 ```text
-P1.1 — reconcile existing event-template schema scaffolding
+P1 — establish transaction-aware service boundaries for atomic one-off template generation
 ```
+
+The P1.1 template-schema reconciliation is complete. Administrator-facing template commands and generation behaviour are not yet implemented.
 
 See:
 

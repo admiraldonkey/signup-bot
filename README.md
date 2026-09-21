@@ -15,7 +15,7 @@ The project replaces reaction based signups and manual event coordination with p
 | ---------------------------- | ----------------------------------------- |
 | Runtime                      | Node.js                                   |
 | Language                     | TypeScript                                |
-| Discord                      | discord.js 14                             |
+| Discord API                  | discord.js 14                             |
 | Database                     | PostgreSQL                                |
 | ORM/schema                   | Drizzle ORM                               |
 | Migrations                   | drizzle-kit                               |
@@ -732,20 +732,27 @@ Non-obvious concurrency and lifecycle behaviour should be protected by tests so 
 
 The core event-management and reusable role-request foundation is established.
 
-Recent reliability work completed focused handling for:
-
-- deleted Event Administration channels
-- deleted Event Organiser notification roles
-- degraded unpinged cover delivery
-- retryable versus definitive Discord failures
-
-The next major feature area is:
+The current major feature area is:
 
 ```text
 Event Templates
 ```
 
-The immediate task is to reconcile existing template schema scaffolding with the current event architecture before implementing template commands or generation.
+The P1.1 template-schema reconciliation is complete.
+
+The repository now has the persistent source model required for future template behaviour, including:
+
+- reusable template event defaults
+- ordered template ping roles
+- optional primary/backup organiser defaults
+- reusable reminder definitions
+- an optional reusable role-request preset reference
+- explicit template publication intent
+- source-template provenance on generated events
+
+Template administrator commands and generation behaviour are not yet implemented.
+
+The immediate implementation focus is establishing reusable transaction-aware service boundaries so one-off template generation can create an ordinary event and all required snapshot state atomically.
 
 After one-off template generation is stable, planned work moves into recurring event generation.
 
@@ -765,21 +772,23 @@ template
 ordinary persistent event
 ```
 
-Generated events should receive event-level snapshots and become independently editable.
+Generated events will receive event-owned snapshots and become independently editable.
 
-Future template work is expected to integrate with existing:
+The reconciled source model integrates with existing:
 
 - event creation
 - organiser assignments
-- ping roles
+- ping-role snapshots
 - reminders
 - publication scheduling
 - role-request presets
 - durable scheduler actions
 
-Recurrence should generate bounded ordinary occurrences rather than maintaining one mutable magical event row.
+The template remains reusable source configuration and provenance.
 
-The exact schema is intentionally being reconciled before implementation.
+It does not become a live runtime configuration dependency for generated events.
+
+Recurrence remains a later concern and should generate bounded ordinary occurrences rather than maintaining one mutable special event row.
 
 ---
 
