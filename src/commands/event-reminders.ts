@@ -17,6 +17,7 @@ import {
   sendEventCustomMessage,
   validateEventMessageDestination,
 } from "../events/event-custom-message.js";
+import { createEventReminder } from "../reminders/reminder-creation-service.js";
 import {
   buildReminderActionKey,
   calculateReminderDueAt,
@@ -130,53 +131,22 @@ export async function addEventReminder(
     return;
   }
 
-  const now = new Date();
+  const reminder = await createEventReminder({
+    eventId: event.id,
 
-  const reminder = await db.transaction(async (transaction) => {
-    const [createdReminder] = await transaction
-      .insert(eventReminders)
-      .values({
-        eventId: event.id,
+    timingReference,
 
-        timingReference,
+    minutesBefore,
 
-        minutesBefore,
+    message,
 
-        message,
+    channelId,
 
-        channelId,
+    pingEventRoles,
 
-        pingEventRoles,
+    createdByUserId: interaction.user.id,
 
-        enabled: true,
-
-        createdByUserId: interaction.user.id,
-
-        updatedAt: now,
-      })
-      .returning({
-        id: eventReminders.id,
-      });
-
-    if (!createdReminder) {
-      throw new Error("The reminder could not be created.");
-    }
-
-    await transaction.insert(scheduledActions).values({
-      eventId: event.id,
-
-      actionKey: buildReminderActionKey(createdReminder.id),
-
-      dueAt,
-
-      status: "pending",
-
-      attemptCount: 0,
-
-      updatedAt: now,
-    });
-
-    return createdReminder;
+    dueAt,
   });
 
   await writeAuditLog({
