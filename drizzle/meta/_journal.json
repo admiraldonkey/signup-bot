@@ -148,6 +148,13 @@
       "when": 1789663646181,
       "tag": "0020_add-group-notification-roles",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1790027571639,
+      "tag": "0021_reconcile-event-template-schema",
+      "breakpoints": true
     }
   ]
 }

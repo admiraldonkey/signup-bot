@@ -722,8 +722,6 @@ export async function applyRoleRequestPresetToEvent(
             activePresetOptions.map((option) => ({
               eventId: event.id,
 
-              sourceTemplateRoleOptionId: null,
-
               sourceRoleRequestPresetOptionId: option.id,
 
               key: option.key,

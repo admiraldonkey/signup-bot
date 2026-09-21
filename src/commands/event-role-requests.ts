@@ -188,8 +188,6 @@ export async function addEventRoleOption(
       .values({
         eventId: event.id,
 
-        sourceTemplateRoleOptionId: null,
-
         key,
 
         displayName: name,

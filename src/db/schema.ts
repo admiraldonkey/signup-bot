@@ -1,5 +1,6 @@
 import {
   boolean,
+  check,
   index,
   integer,
   pgEnum,
@@ -230,127 +231,6 @@ export const eventAudiences = pgTable(
     ),
 
     index("event_audiences_owner_guild_idx").on(table.ownerGuildId),
-  ],
-);
-
-/*
- * Recurring event configurations.
- *
- * A template describes something like "Sunday Naval Event".
- * An individual occurrence is stored separately in the events table.
- */
-
-export const eventTemplates = pgTable(
-  "event_templates",
-  {
-    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-
-    ownerGuildId: integer("owner_guild_id")
-      .notNull()
-      .references(() => discordGuilds.id, { onDelete: "cascade" }),
-
-    eventTypeId: integer("event_type_id")
-      .notNull()
-      .references(() => eventTypes.id, { onDelete: "restrict" }),
-
-    name: varchar("name", { length: 150 }).notNull(),
-
-    description: text("description"),
-
-    timezone: varchar("timezone", { length: 64 })
-      .notNull()
-      .default("Europe/London"),
-
-    /*
-     * This will eventually contain an RFC 5545 recurrence rule, such as a
-     * weekly Friday schedule.
-     */
-    recurrenceRule: text("recurrence_rule"),
-
-    /*
-     * Stored as HH:MM in the template's local timezone.
-     * Actual event occurrences use full timestamps.
-     */
-    localStartTime: varchar("local_start_time", { length: 5 }),
-
-    durationMinutes: integer("duration_minutes"),
-
-    attendanceOpenMinutesBefore: integer("attendance_open_minutes_before")
-      .notNull()
-      .default(120),
-
-    attendanceCloseMinutesBefore: integer("attendance_close_minutes_before")
-      .notNull()
-      .default(60),
-
-    roleRequestsOpenMinutesBefore: integer("role_requests_open_minutes_before")
-      .notNull()
-      .default(60),
-
-    attendanceChannelId: text("attendance_channel_id"),
-
-    roleRequestChannelId: text("role_request_channel_id"),
-
-    pingRoleId: text("ping_role_id"),
-
-    active: boolean("active").notNull().default(true),
-
-    createdAt: timestamp("created_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-
-    updatedAt: timestamp("updated_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-  },
-  (table) => [
-    index("event_templates_owner_guild_idx").on(table.ownerGuildId),
-    index("event_templates_event_type_idx").on(table.eventTypeId),
-  ],
-);
-
-/*
- * Default role-request choices attached to a recurring template.
- */
-
-export const templateRoleOptions = pgTable(
-  "template_role_options",
-  {
-    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-
-    templateId: integer("template_id")
-      .notNull()
-      .references(() => eventTemplates.id, { onDelete: "cascade" }),
-
-    key: varchar("key", { length: 64 }).notNull(),
-
-    displayName: varchar("display_name", { length: 100 }).notNull(),
-
-    description: text("description"),
-
-    /*
-     * Null means that no fixed capacity has been configured.
-     */
-    capacity: integer("capacity"),
-
-    sortOrder: integer("sort_order").notNull().default(0),
-
-    active: boolean("active").notNull().default(true),
-
-    createdAt: timestamp("created_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-
-    updatedAt: timestamp("updated_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-  },
-  (table) => [
-    uniqueIndex("template_role_options_template_key_unique").on(
-      table.templateId,
-      table.key,
-    ),
-    index("template_role_options_template_idx").on(table.templateId),
   ],
 );
 
@@ -689,6 +569,354 @@ export const roleRequestPresetGroupOptions = pgTable(
 );
 
 /*
+ * Reusable source configuration for creating ordinary persistent events.
+ *
+ * Templates are not runtime events. Generation snapshots their current source
+ * configuration into the existing event-owned tables and scheduled actions.
+ *
+ * Recurrence is deliberately modelled separately later. One-off template
+ * generation must be stable before recurrence is added.
+ */
+export const eventTemplates = pgTable(
+  "event_templates",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+
+    ownerGuildId: integer("owner_guild_id")
+      .notNull()
+      .references(() => discordGuilds.id, {
+        onDelete: "cascade",
+      }),
+
+    eventTypeId: integer("event_type_id")
+      .notNull()
+      .references(() => eventTypes.id, {
+        onDelete: "restrict",
+      }),
+
+    /*
+     * Null means no audience is configured on the template.
+     *
+     * Generation snapshots the selected audience ID into the ordinary event.
+     */
+    audienceId: integer("audience_id"),
+
+    /*
+     * P1 initially supports zero or one reusable role-request preset per
+     * template.
+     *
+     * The preset is source configuration only. Generation snapshots it into
+     * ordinary event-owned role-request state through the existing preset
+     * application boundary.
+     */
+    roleRequestPresetId: integer("role_request_preset_id"),
+
+    name: varchar("name", {
+      length: 150,
+    }).notNull(),
+
+    description: text("description"),
+
+    timezone: varchar("timezone", {
+      length: 64,
+    })
+      .notNull()
+      .default("Europe/London"),
+
+    /*
+     * Optional reusable local-time default in HH:MM form.
+     *
+     * Keeping this nullable allows one-off generation to supply a specific
+     * occurrence time when the template itself does not prescribe one.
+     */
+    localStartTime: varchar("local_start_time", {
+      length: 5,
+    }),
+
+    durationMinutes: integer("duration_minutes").notNull().default(60),
+
+    signupsEnabled: boolean("signups_enabled").notNull().default(true),
+
+    /*
+     * Offset from event start used to resolve attendanceClosesAt when an
+     * occurrence is generated.
+     *
+     * It remains stored even when signups are disabled so re-enabling signups
+     * does not discard the reusable closing-time default.
+     */
+    attendanceCloseMinutesBefore: integer("attendance_close_minutes_before")
+      .notNull()
+      .default(60),
+
+    showDetailedDeadline: boolean("show_detailed_deadline")
+      .notNull()
+      .default(false),
+
+    /*
+     * Source-level publication intent.
+     *
+     * Supported values:
+     * - manual: create an unpublished event for later manual publication
+     * - scheduled: create a durable future publish_event action
+     * - immediate: publish through the normal post-commit publication path
+     *
+     * Runtime events continue to use the existing publication state rather
+     * than gaining a second template-specific publication model.
+     */
+    publicationMode: varchar("publication_mode", {
+      length: 16,
+    })
+      .notNull()
+      .default("manual"),
+
+    /*
+     * Required only for scheduled publication.
+     *
+     * Null for manual and immediate source intent.
+     */
+    publishMinutesBeforeStart: integer("publish_minutes_before_start"),
+
+    /*
+     * Null means generation should resolve the guild's current default
+     * publication/attendance destination and snapshot the result onto the
+     * generated event.
+     *
+     * A non-null value is a fixed reusable template destination.
+     */
+    publicationChannelId: text("publication_channel_id"),
+
+    active: boolean("active").notNull().default(true),
+
+    createdByUserId: text("created_by_user_id").notNull(),
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    /*
+     * Use explicit short names for new foreign keys rather than relying on
+     * generated identifiers approaching PostgreSQL's identifier limit.
+     */
+    foreignKey({
+      name: "evt_tpl_audience_fk",
+      columns: [table.audienceId],
+      foreignColumns: [eventAudiences.id],
+    }).onDelete("set null"),
+
+    foreignKey({
+      name: "evt_tpl_preset_fk",
+      columns: [table.roleRequestPresetId],
+      foreignColumns: [roleRequestPresets.id],
+    }).onDelete("set null"),
+
+    check(
+      "evt_tpl_pub_mode_chk",
+      sql`${table.publicationMode} in ('manual', 'scheduled', 'immediate')`,
+    ),
+
+    check(
+      "evt_tpl_pub_offset_chk",
+      sql`(
+        (${table.publicationMode} = 'scheduled'
+          and ${table.publishMinutesBeforeStart} is not null)
+        or
+        (${table.publicationMode} <> 'scheduled'
+          and ${table.publishMinutesBeforeStart} is null)
+      )`,
+    ),
+
+    /*
+     * Preserve the existing index names where the old scaffolding already had
+     * the same relationship, avoiding pointless drop/recreate churn.
+     */
+    index("event_templates_owner_guild_idx").on(table.ownerGuildId),
+
+    index("event_templates_event_type_idx").on(table.eventTypeId),
+
+    index("evt_tpl_audience_idx").on(table.audienceId),
+
+    index("evt_tpl_preset_idx").on(table.roleRequestPresetId),
+  ],
+);
+
+/*
+ * Ordered Discord roles which a template will snapshot into event_ping_roles.
+ *
+ * The readable name is deliberately retained with the reusable source
+ * configuration so generation does not depend on Discord role lookup merely
+ * to construct the event snapshot.
+ */
+export const eventTemplatePingRoles = pgTable(
+  "event_template_ping_roles",
+  {
+    templateId: integer("template_id").notNull(),
+
+    discordRoleId: text("discord_role_id").notNull(),
+
+    roleNameSnapshot: varchar("role_name_snapshot", {
+      length: 100,
+    }).notNull(),
+
+    sortOrder: integer("sort_order").notNull().default(0),
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "evt_tpl_ping_roles_pk",
+      columns: [table.templateId, table.discordRoleId],
+    }),
+
+    foreignKey({
+      name: "evt_tpl_ping_roles_tpl_fk",
+      columns: [table.templateId],
+      foreignColumns: [eventTemplates.id],
+    }).onDelete("cascade"),
+
+    index("evt_tpl_ping_roles_order_idx").on(table.templateId, table.sortOrder),
+  ],
+);
+
+/*
+ * Optional organiser defaults for future generated events.
+ *
+ * Zero rows is a completely valid template state. Templates therefore remain
+ * usable when the guild organiser feature is disabled.
+ *
+ * Generation must treat these rows as source defaults only. When organisers
+ * are enabled they become ordinary dormant event_organiser_assignments.
+ * When the guild organiser feature is disabled, generation must still succeed
+ * without creating organiser assignments.
+ *
+ * Only primary and backup are reusable defaults. Cover is runtime recovery
+ * state and never belongs to template source configuration.
+ */
+export const eventTemplateOrganiserDefaults = pgTable(
+  "event_template_organiser_defaults",
+  {
+    templateId: integer("template_id").notNull(),
+
+    slot: varchar("slot", {
+      length: 16,
+    }).notNull(),
+
+    discordUserId: text("discord_user_id").notNull(),
+
+    displayNameSnapshot: varchar("display_name_snapshot", {
+      length: 100,
+    }).notNull(),
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "evt_tpl_org_defaults_pk",
+      columns: [table.templateId, table.slot],
+    }),
+
+    foreignKey({
+      name: "evt_tpl_org_tpl_fk",
+      columns: [table.templateId],
+      foreignColumns: [eventTemplates.id],
+    }).onDelete("cascade"),
+
+    /*
+     * A single Discord user cannot be both the primary and backup default.
+     */
+    uniqueIndex("evt_tpl_org_user_uq").on(
+      table.templateId,
+      table.discordUserId,
+    ),
+
+    check("evt_tpl_org_slot_chk", sql`${table.slot} in ('primary', 'backup')`),
+  ],
+);
+
+/*
+ * Reusable reminder definitions.
+ *
+ * Generation copies each definition into an ordinary event_reminders row and
+ * creates the normal durable reminder scheduled action.
+ *
+ * channelId is nullable deliberately:
+ * - non-null -> use this fixed template destination
+ * - null -> resolve the generated event's publication destination once and
+ *           snapshot that resolved channel into event_reminders.channel_id
+ */
+export const eventTemplateReminders = pgTable(
+  "event_template_reminders",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+
+    templateId: integer("template_id").notNull(),
+
+    /*
+     * Initially supported:
+     * - event_start
+     * - signup_close
+     *
+     * Keep this aligned with event_reminders rather than creating a separate
+     * template-only timing language.
+     */
+    timingReference: varchar("timing_reference", {
+      length: 32,
+    }).notNull(),
+
+    minutesBefore: integer("minutes_before").notNull(),
+
+    message: text("message").notNull(),
+
+    channelId: text("channel_id"),
+
+    pingEventRoles: boolean("ping_event_roles").notNull().default(true),
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    foreignKey({
+      name: "evt_tpl_reminders_tpl_fk",
+      columns: [table.templateId],
+      foreignColumns: [eventTemplates.id],
+    }).onDelete("cascade"),
+
+    index("evt_tpl_reminders_tpl_idx").on(table.templateId),
+  ],
+);
+
+/*
  * One actual event occurrence.
  *
  * This may have been created from a template or created as a one-off event.
@@ -700,7 +928,7 @@ export const events = pgTable(
     id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
 
     templateId: integer("template_id").references(() => eventTemplates.id, {
-      onDelete: "set null",
+      onDelete: "restrict",
     }),
 
     ownerGuildId: integer("owner_guild_id")
@@ -1050,10 +1278,11 @@ export const actualAttendanceRecords = pgTable(
 );
 
 /*
- * Role choices copied from the template into one actual event.
+ * Event-owned logical role choices.
  *
- * Copying them preserves event history and lets admins customise one
- * occurrence without changing every future event.
+ * These may be configured directly or snapshotted from reusable role-request
+ * presets. Once present, they belong to the event and remain independent of
+ * later reusable-source edits.
  */
 
 export const eventRoleOptions = pgTable(
@@ -1064,12 +1293,6 @@ export const eventRoleOptions = pgTable(
     eventId: integer("event_id")
       .notNull()
       .references(() => events.id, { onDelete: "cascade" }),
-
-    sourceTemplateRoleOptionId: integer(
-      "source_template_role_option_id",
-    ).references(() => templateRoleOptions.id, {
-      onDelete: "set null",
-    }),
 
     sourceRoleRequestPresetOptionId: integer(
       "source_role_request_preset_option_id",
