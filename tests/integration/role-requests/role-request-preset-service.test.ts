@@ -2,9 +2,15 @@ import type { Pool } from "pg";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { pool as applicationPool } from "../../../src/db/client.js";
+import {
+  db as applicationDb,
+  pool as applicationPool,
+} from "../../../src/db/client.js";
 
-import { applyRoleRequestPresetToEvent } from "../../../src/role-requests/role-request-preset-service.js";
+import {
+  applyRoleRequestPresetToEvent,
+  applyRoleRequestPresetToEventInTransaction,
+} from "../../../src/role-requests/role-request-preset-service.js";
 
 import {
   editPresetRequestGroup,
@@ -673,6 +679,47 @@ describe("role-request preset application service", () => {
         },
       ]),
     );
+  });
+
+  it("participates in a caller-owned transaction and rolls back the complete preset snapshot with it", async () => {
+    // Arrange
+    const fixture = await createFixture(pool);
+
+    // Act
+    await expect(
+      applicationDb.transaction(async (transaction) => {
+        const result = await applyRoleRequestPresetToEventInTransaction(
+          transaction,
+          {
+            guildDatabaseId: fixture.guildId,
+            eventId: fixture.eventId,
+            presetId: fixture.presetId,
+            appliedByUserId: ADMIN_USER_ID,
+          },
+        );
+
+        expect(result.kind).toBe("applied");
+
+        if (result.kind !== "applied") {
+          throw new Error(
+            `Expected transactional preset application to succeed, received "${result.kind}".`,
+          );
+        }
+
+        expect(result.eventRoleOptionIds).toHaveLength(2);
+        expect(result.roleRequestGroupIds).toHaveLength(2);
+
+        /*
+         * Simulate a later template-generation step failing after the preset
+         * provenance row, event-owned snapshot and durable scheduler actions
+         * have all been created.
+         */
+        throw new Error("force caller-owned transaction rollback");
+      }),
+    ).rejects.toThrow("force caller-owned transaction rollback");
+
+    // Assert
+    await assertNoPresetSnapshot(pool, fixture.eventId);
   });
 
   it("serialises preset metadata editing behind an in-flight preset application", async () => {

@@ -1,6 +1,6 @@
 import { and, asc, eq, inArray } from "drizzle-orm";
 
-import { db } from "../db/client.js";
+import { db, type DatabaseTransaction } from "../db/client.js";
 
 import {
   eventRoleOptionQualificationRoles,
@@ -136,857 +136,8 @@ export async function applyRoleRequestPresetToEvent(
   input: ApplyRoleRequestPresetInput,
 ): Promise<ApplyRoleRequestPresetResult> {
   try {
-    return await db.transaction(
-      async (transaction): Promise<ApplyRoleRequestPresetResult> => {
-        /*
-         * startsAt, signupsEnabled and lifecycle state all affect the
-         * snapshot we are about to create.
-         *
-         * Lock the event so /event edit cannot change those authoritative
-         * values halfway through application.
-         */
-        const [event] = await transaction
-          .select({
-            id: events.id,
-
-            startsAt: events.startsAt,
-
-            signupsEnabled: events.signupsEnabled,
-
-            status: events.status,
-
-            roleRequestsEnabled: eventTypes.roleRequestsEnabled,
-          })
-          .from(events)
-          .innerJoin(eventTypes, eq(eventTypes.id, events.eventTypeId))
-          .where(
-            and(
-              eq(events.id, input.eventId),
-
-              eq(events.ownerGuildId, input.guildDatabaseId),
-            ),
-          )
-          .limit(1)
-          .for("update");
-
-        if (!event) {
-          return {
-            kind: "event_not_found",
-          };
-        }
-
-        if (event.status === "cancelled" || event.status === "completed") {
-          return {
-            kind: "event_terminal",
-
-            status: event.status,
-          };
-        }
-
-        if (!event.roleRequestsEnabled) {
-          return {
-            kind: "role_requests_disabled",
-          };
-        }
-
-        /*
-         * Preset mutation services should take FOR UPDATE on this same
-         * parent row.
-         *
-         * FOR SHARE therefore gives application a stable source snapshot
-         * while allowing multiple readers where safe.
-         */
-        const [preset] = await transaction
-          .select({
-            id: roleRequestPresets.id,
-
-            active: roleRequestPresets.active,
-          })
-          .from(roleRequestPresets)
-          .where(
-            and(
-              eq(roleRequestPresets.id, input.presetId),
-
-              eq(roleRequestPresets.ownerGuildId, input.guildDatabaseId),
-            ),
-          )
-          .limit(1)
-          .for("share");
-
-        if (!preset) {
-          return {
-            kind: "preset_not_found",
-          };
-        }
-
-        if (!preset.active) {
-          return {
-            kind: "preset_inactive",
-          };
-        }
-
-        /*
-         * If this preset has already been applied, report idempotently before
-         * treating its already-created role-option keys as conflicts.
-         */
-        const [existingApplication] = await transaction
-          .select({
-            eventId: eventRoleRequestPresetApplications.eventId,
-          })
-          .from(eventRoleRequestPresetApplications)
-          .where(
-            and(
-              eq(eventRoleRequestPresetApplications.eventId, event.id),
-
-              eq(eventRoleRequestPresetApplications.presetId, preset.id),
-            ),
-          )
-          .limit(1);
-
-        if (existingApplication) {
-          return {
-            kind: "already_applied",
-          };
-        }
-
-        const presetOptions = await transaction
-          .select({
-            id: roleRequestPresetOptions.id,
-
-            key: roleRequestPresetOptions.key,
-
-            displayName: roleRequestPresetOptions.displayName,
-
-            description: roleRequestPresetOptions.description,
-
-            requestRestriction: roleRequestPresetOptions.requestRestriction,
-
-            capacity: roleRequestPresetOptions.capacity,
-
-            sortOrder: roleRequestPresetOptions.sortOrder,
-
-            active: roleRequestPresetOptions.active,
-          })
-          .from(roleRequestPresetOptions)
-          .where(eq(roleRequestPresetOptions.presetId, preset.id))
-          .orderBy(
-            asc(roleRequestPresetOptions.sortOrder),
-
-            asc(roleRequestPresetOptions.id),
-          );
-
-        const activePresetOptions = presetOptions.filter(
-          (option) => option.active,
-        );
-
-        if (activePresetOptions.length === 0) {
-          return {
-            kind: "invalid_preset",
-
-            reason: "no_active_options",
-          };
-        }
-
-        for (const option of activePresetOptions) {
-          if (!isRequestRestriction(option.requestRestriction)) {
-            return {
-              kind: "invalid_preset",
-
-              reason: "invalid_request_restriction",
-
-              presetOptionId: option.id,
-            };
-          }
-        }
-
-        const activePresetOptionIds = activePresetOptions.map(
-          (option) => option.id,
-        );
-
-        const qualificationRows = await transaction
-          .select({
-            presetOptionId:
-              roleRequestPresetOptionQualificationRoles.presetOptionId,
-
-            discordRoleId:
-              roleRequestPresetOptionQualificationRoles.discordRoleId,
-
-            roleNameSnapshot:
-              roleRequestPresetOptionQualificationRoles.roleNameSnapshot,
-
-            qualificationLevel:
-              roleRequestPresetOptionQualificationRoles.qualificationLevel,
-          })
-          .from(roleRequestPresetOptionQualificationRoles)
-          .where(
-            inArray(
-              roleRequestPresetOptionQualificationRoles.presetOptionId,
-              activePresetOptionIds,
-            ),
-          )
-          .orderBy(
-            asc(roleRequestPresetOptionQualificationRoles.presetOptionId),
-
-            asc(roleRequestPresetOptionQualificationRoles.discordRoleId),
-          );
-
-        for (const qualification of qualificationRows) {
-          if (!isQualificationLevel(qualification.qualificationLevel)) {
-            return {
-              kind: "invalid_preset",
-
-              reason: "invalid_qualification_level",
-
-              presetOptionId: qualification.presetOptionId,
-            };
-          }
-        }
-
-        const qualifiedOptionIds = new Set(
-          qualificationRows.map(
-            (qualification) => qualification.presetOptionId,
-          ),
-        );
-
-        const missingQualification = activePresetOptions.find(
-          (option) =>
-            option.requestRestriction === "qualified_only" &&
-            !qualifiedOptionIds.has(option.id),
-        );
-
-        if (missingQualification) {
-          return {
-            kind: "invalid_preset",
-
-            reason: "missing_qualification_roles",
-
-            presetOptionId: missingQualification.id,
-          };
-        }
-
-        const presetGroups = await transaction
-          .select({
-            id: roleRequestPresetGroups.id,
-
-            name: roleRequestPresetGroups.name,
-
-            description: roleRequestPresetGroups.description,
-
-            channelId: roleRequestPresetGroups.channelId,
-
-            notifyRoleId: roleRequestPresetGroups.notifyRoleId,
-
-            notifyRoleNameSnapshot:
-              roleRequestPresetGroups.notifyRoleNameSnapshot,
-
-            requiresPositiveSignup:
-              roleRequestPresetGroups.requiresPositiveSignup,
-
-            openMinutesBeforeStart:
-              roleRequestPresetGroups.openMinutesBeforeStart,
-
-            closeMinutesBeforeStart:
-              roleRequestPresetGroups.closeMinutesBeforeStart,
-
-            sortOrder: roleRequestPresetGroups.sortOrder,
-
-            active: roleRequestPresetGroups.active,
-          })
-          .from(roleRequestPresetGroups)
-          .where(eq(roleRequestPresetGroups.presetId, preset.id))
-          .orderBy(
-            asc(roleRequestPresetGroups.sortOrder),
-
-            asc(roleRequestPresetGroups.id),
-          );
-
-        const activePresetGroups = presetGroups.filter((group) => group.active);
-
-        if (activePresetGroups.length === 0) {
-          return {
-            kind: "invalid_preset",
-
-            reason: "no_active_groups",
-          };
-        }
-
-        const activePresetGroupIds = activePresetGroups.map(
-          (group) => group.id,
-        );
-
-        const presetNotificationRows = await transaction
-          .select({
-            presetGroupId:
-              roleRequestPresetGroupNotificationRoles.presetGroupId,
-
-            discordRoleId:
-              roleRequestPresetGroupNotificationRoles.discordRoleId,
-
-            roleNameSnapshot:
-              roleRequestPresetGroupNotificationRoles.roleNameSnapshot,
-
-            sortOrder: roleRequestPresetGroupNotificationRoles.sortOrder,
-          })
-          .from(roleRequestPresetGroupNotificationRoles)
-          .where(
-            inArray(
-              roleRequestPresetGroupNotificationRoles.presetGroupId,
-              activePresetGroupIds,
-            ),
-          )
-          .orderBy(
-            asc(roleRequestPresetGroupNotificationRoles.presetGroupId),
-
-            asc(roleRequestPresetGroupNotificationRoles.sortOrder),
-
-            asc(roleRequestPresetGroupNotificationRoles.discordRoleId),
-          );
-
-        const notificationRolesByPresetGroupId = new Map<
-          number,
-          {
-            discordRoleId: string;
-
-            roleNameSnapshot: string | null;
-
-            sortOrder: number;
-          }[]
-        >();
-
-        for (const row of presetNotificationRows) {
-          const roles =
-            notificationRolesByPresetGroupId.get(row.presetGroupId) ?? [];
-
-          roles.push({
-            discordRoleId: row.discordRoleId,
-
-            roleNameSnapshot: row.roleNameSnapshot,
-
-            sortOrder: row.sortOrder,
-          });
-
-          notificationRolesByPresetGroupId.set(row.presetGroupId, roles);
-        }
-
-        const presetGroupMappings = await transaction
-          .select({
-            groupId: roleRequestPresetGroupOptions.groupId,
-
-            presetOptionId: roleRequestPresetGroupOptions.presetOptionId,
-
-            sortOrder: roleRequestPresetGroupOptions.sortOrder,
-          })
-          .from(roleRequestPresetGroupOptions)
-          .where(
-            inArray(
-              roleRequestPresetGroupOptions.groupId,
-              activePresetGroupIds,
-            ),
-          )
-          .orderBy(
-            asc(roleRequestPresetGroupOptions.groupId),
-
-            asc(roleRequestPresetGroupOptions.sortOrder),
-
-            asc(roleRequestPresetGroupOptions.presetOptionId),
-          );
-
-        const presetOptionById = new Map(
-          presetOptions.map((option) => [option.id, option]),
-        );
-
-        for (const mapping of presetGroupMappings) {
-          if (!presetOptionById.has(mapping.presetOptionId)) {
-            return {
-              kind: "invalid_preset",
-
-              reason: "group_option_outside_preset",
-
-              presetGroupId: mapping.groupId,
-
-              presetOptionId: mapping.presetOptionId,
-            };
-          }
-        }
-
-        const activePresetOptionIdSet = new Set(activePresetOptionIds);
-
-        /*
-         * A mapping to an inactive option is intentionally omitted from new
-         * occurrences. This lets an administrator retire one logical option
-         * without having to rewrite every group's historical configuration.
-         */
-        const activeGroupMappings = presetGroupMappings.filter((mapping) =>
-          activePresetOptionIdSet.has(mapping.presetOptionId),
-        );
-
-        for (const group of activePresetGroups) {
-          if (
-            !activeGroupMappings.some((mapping) => mapping.groupId === group.id)
-          ) {
-            return {
-              kind: "invalid_preset",
-
-              reason: "active_group_without_active_options",
-
-              presetGroupId: group.id,
-            };
-          }
-
-          if (group.requiresPositiveSignup && !event.signupsEnabled) {
-            return {
-              kind: "signup_required",
-
-              presetGroupId: group.id,
-            };
-          }
-
-          const opensAt = resolveStartRelativeTime(
-            event.startsAt,
-
-            group.openMinutesBeforeStart,
-          );
-
-          const closesAt = resolveStartRelativeTime(
-            event.startsAt,
-
-            group.closeMinutesBeforeStart,
-          );
-
-          if (opensAt.getTime() >= closesAt.getTime()) {
-            return {
-              kind: "invalid_preset",
-
-              reason: "invalid_group_window",
-
-              presetGroupId: group.id,
-            };
-          }
-        }
-
-        let defaultRoleRequestChannelId: string | null = null;
-
-        if (activePresetGroups.some((group) => group.channelId === null)) {
-          /*
-           * Take a shared lock while resolving the server default so a
-           * concurrent /setup configure update cannot change the value
-           * halfway through this snapshot transaction.
-           */
-          const [settings] = await transaction
-            .select({
-              defaultRoleRequestChannelId:
-                guildSettings.defaultRoleRequestChannelId,
-            })
-            .from(guildSettings)
-            .where(eq(guildSettings.guildId, input.guildDatabaseId))
-            .limit(1)
-            .for("share");
-
-          defaultRoleRequestChannelId =
-            settings?.defaultRoleRequestChannelId ?? null;
-        }
-
-        const resolvedGroups = [];
-
-        for (const group of activePresetGroups) {
-          const channelId = group.channelId ?? defaultRoleRequestChannelId;
-
-          const storedNotificationRoles =
-            notificationRolesByPresetGroupId.get(group.id) ?? [];
-
-          /*
-           * During the expand-and-contract deployment, an old app revision may still
-           * have created a preset group using only the legacy singular columns after
-           * migration 0020 performed its initial backfill.
-           *
-           * Prefer the authoritative collection whenever present. Fall back to the
-           * singular compatibility shadow only when no child rows exist.
-           */
-          const notificationRoles =
-            storedNotificationRoles.length > 0
-              ? storedNotificationRoles
-              : group.notifyRoleId
-                ? [
-                    {
-                      discordRoleId: group.notifyRoleId,
-
-                      roleNameSnapshot: group.notifyRoleNameSnapshot,
-
-                      sortOrder: 0,
-                    },
-                  ]
-                : [];
-
-          if (channelId === null) {
-            return {
-              kind: "missing_default_channel",
-
-              presetGroupId: group.id,
-            };
-          }
-
-          resolvedGroups.push({
-            ...group,
-
-            channelId,
-
-            notificationRoles,
-
-            opensAt: resolveStartRelativeTime(
-              event.startsAt,
-
-              group.openMinutesBeforeStart,
-            ),
-
-            closesAt: resolveStartRelativeTime(
-              event.startsAt,
-
-              group.closeMinutesBeforeStart,
-            ),
-          });
-        }
-
-        /*
-         * Check for an ordinary existing key conflict before claiming the
-         * application marker.
-         *
-         * The event row lock serialises this service against another
-         * application to the same event. The INSERT below still uses
-         * conflict handling as the final database-enforced race boundary
-         * against other event-role-option writers.
-         */
-        const existingRoleOptions = await transaction
-          .select({
-            key: eventRoleOptions.key,
-          })
-          .from(eventRoleOptions)
-          .where(
-            and(
-              eq(eventRoleOptions.eventId, event.id),
-
-              inArray(
-                eventRoleOptions.key,
-                activePresetOptions.map((option) => option.key),
-              ),
-            ),
-          )
-          .orderBy(asc(eventRoleOptions.id));
-
-        const existingRoleOption = existingRoleOptions[0];
-
-        if (existingRoleOption) {
-          return {
-            kind: "role_option_conflict",
-
-            key: existingRoleOption.key,
-          };
-        }
-
-        /*
-         * Claim the provenance/idempotency row before creating the snapshot.
-         *
-         * If anything later fails, the surrounding PostgreSQL transaction
-         * rolls this row back together with every copied child row.
-         */
-        const [application] = await transaction
-          .insert(eventRoleRequestPresetApplications)
-          .values({
-            eventId: event.id,
-
-            presetId: preset.id,
-
-            appliedByUserId: input.appliedByUserId,
-          })
-          .onConflictDoNothing({
-            target: [
-              eventRoleRequestPresetApplications.eventId,
-
-              eventRoleRequestPresetApplications.presetId,
-            ],
-          })
-          .returning({
-            eventId: eventRoleRequestPresetApplications.eventId,
-          });
-
-        if (!application) {
-          return {
-            kind: "already_applied",
-          };
-        }
-
-        const now = new Date();
-
-        const insertedEventOptions = await transaction
-          .insert(eventRoleOptions)
-          .values(
-            activePresetOptions.map((option) => ({
-              eventId: event.id,
-
-              sourceRoleRequestPresetOptionId: option.id,
-
-              key: option.key,
-
-              displayName: option.displayName,
-
-              description: option.description,
-
-              requestRestriction: option.requestRestriction,
-
-              capacity: option.capacity,
-
-              sortOrder: option.sortOrder,
-
-              active: true,
-
-              updatedAt: now,
-            })),
-          )
-          .onConflictDoNothing({
-            target: [eventRoleOptions.eventId, eventRoleOptions.key],
-          })
-          .returning({
-            id: eventRoleOptions.id,
-
-            key: eventRoleOptions.key,
-
-            sourcePresetOptionId:
-              eventRoleOptions.sourceRoleRequestPresetOptionId,
-          });
-
-        if (insertedEventOptions.length !== activePresetOptions.length) {
-          const insertedKeys = new Set(
-            insertedEventOptions.map((option) => option.key),
-          );
-
-          const conflictedOption = activePresetOptions.find(
-            (option) => !insertedKeys.has(option.key),
-          );
-
-          throw new RoleOptionConflictError(
-            conflictedOption?.key ?? activePresetOptions[0]?.key ?? "unknown",
-          );
-        }
-
-        const eventOptionIdByPresetOptionId = new Map<number, number>();
-
-        for (const option of insertedEventOptions) {
-          if (option.sourcePresetOptionId === null) {
-            throw new Error(
-              "A preset-derived event role option was returned without its source preset option ID.",
-            );
-          }
-
-          eventOptionIdByPresetOptionId.set(
-            option.sourcePresetOptionId,
-
-            option.id,
-          );
-        }
-
-        if (qualificationRows.length > 0) {
-          await transaction.insert(eventRoleOptionQualificationRoles).values(
-            qualificationRows.map((qualification) => ({
-              eventRoleOptionId: requireMappedId(
-                eventOptionIdByPresetOptionId,
-
-                qualification.presetOptionId,
-
-                "preset option",
-              ),
-
-              discordRoleId: qualification.discordRoleId,
-
-              roleNameSnapshot: qualification.roleNameSnapshot,
-
-              qualificationLevel: qualification.qualificationLevel,
-            })),
-          );
-        }
-
-        const insertedGroups = await transaction
-          .insert(roleRequestGroups)
-          .values(
-            resolvedGroups.map((group) => ({
-              eventId: event.id,
-
-              sourceRoleRequestPresetGroupId: group.id,
-
-              name: group.name,
-
-              description: group.description,
-
-              channelId: group.channelId,
-
-              messageId: null,
-
-              notifyRoleId: group.notificationRoles[0]?.discordRoleId ?? null,
-
-              notifyRoleNameSnapshot:
-                group.notificationRoles[0]?.roleNameSnapshot ?? null,
-
-              requiresPositiveSignup: group.requiresPositiveSignup,
-
-              openMinutesBeforeStart: group.openMinutesBeforeStart,
-
-              opensAt: group.opensAt,
-
-              closeMinutesBeforeStart: group.closeMinutesBeforeStart,
-
-              closesAt: group.closesAt,
-
-              closedAt: null,
-
-              createdByUserId: input.appliedByUserId,
-
-              updatedAt: now,
-            })),
-          )
-          .returning({
-            id: roleRequestGroups.id,
-
-            sourcePresetGroupId:
-              roleRequestGroups.sourceRoleRequestPresetGroupId,
-          });
-
-        if (insertedGroups.length !== resolvedGroups.length) {
-          throw new Error(
-            "The database did not return every created role-request group.",
-          );
-        }
-
-        const eventGroupIdByPresetGroupId = new Map<number, number>();
-
-        for (const group of insertedGroups) {
-          if (group.sourcePresetGroupId === null) {
-            throw new Error(
-              "A preset-derived role-request group was returned without its source preset group ID.",
-            );
-          }
-
-          eventGroupIdByPresetGroupId.set(
-            group.sourcePresetGroupId,
-
-            group.id,
-          );
-        }
-
-        const eventNotificationRoleValues = resolvedGroups.flatMap((group) =>
-          group.notificationRoles.map((role) => ({
-            groupId: requireMappedId(
-              eventGroupIdByPresetGroupId,
-
-              group.id,
-
-              "preset group",
-            ),
-
-            discordRoleId: role.discordRoleId,
-
-            roleNameSnapshot: role.roleNameSnapshot,
-
-            sortOrder: role.sortOrder,
-          })),
-        );
-
-        if (eventNotificationRoleValues.length > 0) {
-          await transaction
-            .insert(roleRequestGroupNotificationRoles)
-            .values(eventNotificationRoleValues);
-        }
-
-        if (activeGroupMappings.length > 0) {
-          await transaction.insert(roleRequestGroupOptions).values(
-            activeGroupMappings.map((mapping) => ({
-              groupId: requireMappedId(
-                eventGroupIdByPresetGroupId,
-
-                mapping.groupId,
-
-                "preset group",
-              ),
-
-              eventRoleOptionId: requireMappedId(
-                eventOptionIdByPresetOptionId,
-
-                mapping.presetOptionId,
-
-                "preset option",
-              ),
-
-              sortOrder: mapping.sortOrder,
-            })),
-          );
-        }
-
-        /*
-         * Planned preset-derived groups need durable opening and closing
-         * work from the moment they become authoritative event state.
-         *
-         * Creating these actions inside this transaction prevents a process
-         * interruption from committing groups without the scheduler work
-         * needed to realise their lifecycle.
-         *
-         * Store the actual resolved timestamps, not the preset offsets.
-         * From this point onwards the event-level snapshot is authoritative.
-         */
-        await transaction.insert(scheduledActions).values(
-          resolvedGroups.flatMap((group) => {
-            const eventGroupId = requireMappedId(
-              eventGroupIdByPresetGroupId,
-
-              group.id,
-
-              "preset group",
-            );
-
-            return [
-              {
-                eventId: event.id,
-
-                actionKey: makeRoleRequestGroupOpenActionKey(eventGroupId),
-
-                dueAt: group.opensAt,
-              },
-
-              {
-                eventId: event.id,
-
-                actionKey: makeRoleRequestGroupCloseActionKey(eventGroupId),
-
-                dueAt: group.closesAt,
-              },
-            ];
-          }),
-        );
-
-        return {
-          kind: "applied",
-
-          eventId: event.id,
-
-          presetId: preset.id,
-
-          eventRoleOptionIds: activePresetOptions.map((option) =>
-            requireMappedId(
-              eventOptionIdByPresetOptionId,
-
-              option.id,
-
-              "preset option",
-            ),
-          ),
-
-          roleRequestGroupIds: activePresetGroups.map((group) =>
-            requireMappedId(
-              eventGroupIdByPresetGroupId,
-
-              group.id,
-
-              "preset group",
-            ),
-          ),
-        };
-      },
+    return await db.transaction((transaction) =>
+      applyRoleRequestPresetToEventInTransaction(transaction, input),
     );
   } catch (error) {
     /*
@@ -1001,13 +152,854 @@ export async function applyRoleRequestPresetToEvent(
     if (error instanceof RoleOptionConflictError) {
       return {
         kind: "role_option_conflict",
-
         key: error.key,
       };
     }
 
     throw error;
   }
+}
+
+/**
+ * Copies one reusable role-request preset into an existing event inside a
+ * caller-owned transaction.
+ *
+ * The preset is source configuration only. The created event-level options,
+ * groups, qualification roles, notification roles, mappings and durable
+ * scheduled actions become authoritative once the caller commits.
+ *
+ * The caller owns commit and rollback.
+ *
+ * A narrow concurrent event-role-option conflict is deliberately surfaced by
+ * throwing RoleOptionConflictError. Callers must allow that error to escape
+ * their transaction so partial preset state is rolled back. The public
+ * applyRoleRequestPresetToEvent() wrapper converts it to the normal
+ * role_option_conflict domain result only after rollback.
+ */
+export async function applyRoleRequestPresetToEventInTransaction(
+  transaction: DatabaseTransaction,
+  input: ApplyRoleRequestPresetInput,
+): Promise<ApplyRoleRequestPresetResult> {
+  /*
+   * startsAt, signupsEnabled and lifecycle state all affect the
+   * snapshot we are about to create.
+   *
+   * Lock the event so /event edit cannot change those authoritative
+   * values halfway through application.
+   */
+  const [event] = await transaction
+    .select({
+      id: events.id,
+
+      startsAt: events.startsAt,
+
+      signupsEnabled: events.signupsEnabled,
+
+      status: events.status,
+
+      roleRequestsEnabled: eventTypes.roleRequestsEnabled,
+    })
+    .from(events)
+    .innerJoin(eventTypes, eq(eventTypes.id, events.eventTypeId))
+    .where(
+      and(
+        eq(events.id, input.eventId),
+
+        eq(events.ownerGuildId, input.guildDatabaseId),
+      ),
+    )
+    .limit(1)
+    .for("update");
+
+  if (!event) {
+    return {
+      kind: "event_not_found",
+    };
+  }
+
+  if (event.status === "cancelled" || event.status === "completed") {
+    return {
+      kind: "event_terminal",
+
+      status: event.status,
+    };
+  }
+
+  if (!event.roleRequestsEnabled) {
+    return {
+      kind: "role_requests_disabled",
+    };
+  }
+
+  /*
+   * Preset mutation services should take FOR UPDATE on this same
+   * parent row.
+   *
+   * FOR SHARE therefore gives application a stable source snapshot
+   * while allowing multiple readers where safe.
+   */
+  const [preset] = await transaction
+    .select({
+      id: roleRequestPresets.id,
+
+      active: roleRequestPresets.active,
+    })
+    .from(roleRequestPresets)
+    .where(
+      and(
+        eq(roleRequestPresets.id, input.presetId),
+
+        eq(roleRequestPresets.ownerGuildId, input.guildDatabaseId),
+      ),
+    )
+    .limit(1)
+    .for("share");
+
+  if (!preset) {
+    return {
+      kind: "preset_not_found",
+    };
+  }
+
+  if (!preset.active) {
+    return {
+      kind: "preset_inactive",
+    };
+  }
+
+  /*
+   * If this preset has already been applied, report idempotently before
+   * treating its already-created role-option keys as conflicts.
+   */
+  const [existingApplication] = await transaction
+    .select({
+      eventId: eventRoleRequestPresetApplications.eventId,
+    })
+    .from(eventRoleRequestPresetApplications)
+    .where(
+      and(
+        eq(eventRoleRequestPresetApplications.eventId, event.id),
+
+        eq(eventRoleRequestPresetApplications.presetId, preset.id),
+      ),
+    )
+    .limit(1);
+
+  if (existingApplication) {
+    return {
+      kind: "already_applied",
+    };
+  }
+
+  const presetOptions = await transaction
+    .select({
+      id: roleRequestPresetOptions.id,
+
+      key: roleRequestPresetOptions.key,
+
+      displayName: roleRequestPresetOptions.displayName,
+
+      description: roleRequestPresetOptions.description,
+
+      requestRestriction: roleRequestPresetOptions.requestRestriction,
+
+      capacity: roleRequestPresetOptions.capacity,
+
+      sortOrder: roleRequestPresetOptions.sortOrder,
+
+      active: roleRequestPresetOptions.active,
+    })
+    .from(roleRequestPresetOptions)
+    .where(eq(roleRequestPresetOptions.presetId, preset.id))
+    .orderBy(
+      asc(roleRequestPresetOptions.sortOrder),
+
+      asc(roleRequestPresetOptions.id),
+    );
+
+  const activePresetOptions = presetOptions.filter((option) => option.active);
+
+  if (activePresetOptions.length === 0) {
+    return {
+      kind: "invalid_preset",
+
+      reason: "no_active_options",
+    };
+  }
+
+  for (const option of activePresetOptions) {
+    if (!isRequestRestriction(option.requestRestriction)) {
+      return {
+        kind: "invalid_preset",
+
+        reason: "invalid_request_restriction",
+
+        presetOptionId: option.id,
+      };
+    }
+  }
+
+  const activePresetOptionIds = activePresetOptions.map((option) => option.id);
+
+  const qualificationRows = await transaction
+    .select({
+      presetOptionId: roleRequestPresetOptionQualificationRoles.presetOptionId,
+
+      discordRoleId: roleRequestPresetOptionQualificationRoles.discordRoleId,
+
+      roleNameSnapshot:
+        roleRequestPresetOptionQualificationRoles.roleNameSnapshot,
+
+      qualificationLevel:
+        roleRequestPresetOptionQualificationRoles.qualificationLevel,
+    })
+    .from(roleRequestPresetOptionQualificationRoles)
+    .where(
+      inArray(
+        roleRequestPresetOptionQualificationRoles.presetOptionId,
+        activePresetOptionIds,
+      ),
+    )
+    .orderBy(
+      asc(roleRequestPresetOptionQualificationRoles.presetOptionId),
+
+      asc(roleRequestPresetOptionQualificationRoles.discordRoleId),
+    );
+
+  for (const qualification of qualificationRows) {
+    if (!isQualificationLevel(qualification.qualificationLevel)) {
+      return {
+        kind: "invalid_preset",
+
+        reason: "invalid_qualification_level",
+
+        presetOptionId: qualification.presetOptionId,
+      };
+    }
+  }
+
+  const qualifiedOptionIds = new Set(
+    qualificationRows.map((qualification) => qualification.presetOptionId),
+  );
+
+  const missingQualification = activePresetOptions.find(
+    (option) =>
+      option.requestRestriction === "qualified_only" &&
+      !qualifiedOptionIds.has(option.id),
+  );
+
+  if (missingQualification) {
+    return {
+      kind: "invalid_preset",
+
+      reason: "missing_qualification_roles",
+
+      presetOptionId: missingQualification.id,
+    };
+  }
+
+  const presetGroups = await transaction
+    .select({
+      id: roleRequestPresetGroups.id,
+
+      name: roleRequestPresetGroups.name,
+
+      description: roleRequestPresetGroups.description,
+
+      channelId: roleRequestPresetGroups.channelId,
+
+      notifyRoleId: roleRequestPresetGroups.notifyRoleId,
+
+      notifyRoleNameSnapshot: roleRequestPresetGroups.notifyRoleNameSnapshot,
+
+      requiresPositiveSignup: roleRequestPresetGroups.requiresPositiveSignup,
+
+      openMinutesBeforeStart: roleRequestPresetGroups.openMinutesBeforeStart,
+
+      closeMinutesBeforeStart: roleRequestPresetGroups.closeMinutesBeforeStart,
+
+      sortOrder: roleRequestPresetGroups.sortOrder,
+
+      active: roleRequestPresetGroups.active,
+    })
+    .from(roleRequestPresetGroups)
+    .where(eq(roleRequestPresetGroups.presetId, preset.id))
+    .orderBy(
+      asc(roleRequestPresetGroups.sortOrder),
+
+      asc(roleRequestPresetGroups.id),
+    );
+
+  const activePresetGroups = presetGroups.filter((group) => group.active);
+
+  if (activePresetGroups.length === 0) {
+    return {
+      kind: "invalid_preset",
+
+      reason: "no_active_groups",
+    };
+  }
+
+  const activePresetGroupIds = activePresetGroups.map((group) => group.id);
+
+  const presetNotificationRows = await transaction
+    .select({
+      presetGroupId: roleRequestPresetGroupNotificationRoles.presetGroupId,
+
+      discordRoleId: roleRequestPresetGroupNotificationRoles.discordRoleId,
+
+      roleNameSnapshot:
+        roleRequestPresetGroupNotificationRoles.roleNameSnapshot,
+
+      sortOrder: roleRequestPresetGroupNotificationRoles.sortOrder,
+    })
+    .from(roleRequestPresetGroupNotificationRoles)
+    .where(
+      inArray(
+        roleRequestPresetGroupNotificationRoles.presetGroupId,
+        activePresetGroupIds,
+      ),
+    )
+    .orderBy(
+      asc(roleRequestPresetGroupNotificationRoles.presetGroupId),
+
+      asc(roleRequestPresetGroupNotificationRoles.sortOrder),
+
+      asc(roleRequestPresetGroupNotificationRoles.discordRoleId),
+    );
+
+  const notificationRolesByPresetGroupId = new Map<
+    number,
+    {
+      discordRoleId: string;
+
+      roleNameSnapshot: string | null;
+
+      sortOrder: number;
+    }[]
+  >();
+
+  for (const row of presetNotificationRows) {
+    const roles = notificationRolesByPresetGroupId.get(row.presetGroupId) ?? [];
+
+    roles.push({
+      discordRoleId: row.discordRoleId,
+
+      roleNameSnapshot: row.roleNameSnapshot,
+
+      sortOrder: row.sortOrder,
+    });
+
+    notificationRolesByPresetGroupId.set(row.presetGroupId, roles);
+  }
+
+  const presetGroupMappings = await transaction
+    .select({
+      groupId: roleRequestPresetGroupOptions.groupId,
+
+      presetOptionId: roleRequestPresetGroupOptions.presetOptionId,
+
+      sortOrder: roleRequestPresetGroupOptions.sortOrder,
+    })
+    .from(roleRequestPresetGroupOptions)
+    .where(inArray(roleRequestPresetGroupOptions.groupId, activePresetGroupIds))
+    .orderBy(
+      asc(roleRequestPresetGroupOptions.groupId),
+
+      asc(roleRequestPresetGroupOptions.sortOrder),
+
+      asc(roleRequestPresetGroupOptions.presetOptionId),
+    );
+
+  const presetOptionById = new Map(
+    presetOptions.map((option) => [option.id, option]),
+  );
+
+  for (const mapping of presetGroupMappings) {
+    if (!presetOptionById.has(mapping.presetOptionId)) {
+      return {
+        kind: "invalid_preset",
+
+        reason: "group_option_outside_preset",
+
+        presetGroupId: mapping.groupId,
+
+        presetOptionId: mapping.presetOptionId,
+      };
+    }
+  }
+
+  const activePresetOptionIdSet = new Set(activePresetOptionIds);
+
+  /*
+   * A mapping to an inactive option is intentionally omitted from new
+   * occurrences. This lets an administrator retire one logical option
+   * without having to rewrite every group's historical configuration.
+   */
+  const activeGroupMappings = presetGroupMappings.filter((mapping) =>
+    activePresetOptionIdSet.has(mapping.presetOptionId),
+  );
+
+  for (const group of activePresetGroups) {
+    if (!activeGroupMappings.some((mapping) => mapping.groupId === group.id)) {
+      return {
+        kind: "invalid_preset",
+
+        reason: "active_group_without_active_options",
+
+        presetGroupId: group.id,
+      };
+    }
+
+    if (group.requiresPositiveSignup && !event.signupsEnabled) {
+      return {
+        kind: "signup_required",
+
+        presetGroupId: group.id,
+      };
+    }
+
+    const opensAt = resolveStartRelativeTime(
+      event.startsAt,
+
+      group.openMinutesBeforeStart,
+    );
+
+    const closesAt = resolveStartRelativeTime(
+      event.startsAt,
+
+      group.closeMinutesBeforeStart,
+    );
+
+    if (opensAt.getTime() >= closesAt.getTime()) {
+      return {
+        kind: "invalid_preset",
+
+        reason: "invalid_group_window",
+
+        presetGroupId: group.id,
+      };
+    }
+  }
+
+  let defaultRoleRequestChannelId: string | null = null;
+
+  if (activePresetGroups.some((group) => group.channelId === null)) {
+    /*
+     * Take a shared lock while resolving the server default so a
+     * concurrent /setup configure update cannot change the value
+     * halfway through this snapshot transaction.
+     */
+    const [settings] = await transaction
+      .select({
+        defaultRoleRequestChannelId: guildSettings.defaultRoleRequestChannelId,
+      })
+      .from(guildSettings)
+      .where(eq(guildSettings.guildId, input.guildDatabaseId))
+      .limit(1)
+      .for("share");
+
+    defaultRoleRequestChannelId = settings?.defaultRoleRequestChannelId ?? null;
+  }
+
+  const resolvedGroups = [];
+
+  for (const group of activePresetGroups) {
+    const channelId = group.channelId ?? defaultRoleRequestChannelId;
+
+    const storedNotificationRoles =
+      notificationRolesByPresetGroupId.get(group.id) ?? [];
+
+    /*
+     * During the expand-and-contract deployment, an old app revision may still
+     * have created a preset group using only the legacy singular columns after
+     * migration 0020 performed its initial backfill.
+     *
+     * Prefer the authoritative collection whenever present. Fall back to the
+     * singular compatibility shadow only when no child rows exist.
+     */
+    const notificationRoles =
+      storedNotificationRoles.length > 0
+        ? storedNotificationRoles
+        : group.notifyRoleId
+          ? [
+              {
+                discordRoleId: group.notifyRoleId,
+
+                roleNameSnapshot: group.notifyRoleNameSnapshot,
+
+                sortOrder: 0,
+              },
+            ]
+          : [];
+
+    if (channelId === null) {
+      return {
+        kind: "missing_default_channel",
+
+        presetGroupId: group.id,
+      };
+    }
+
+    resolvedGroups.push({
+      ...group,
+
+      channelId,
+
+      notificationRoles,
+
+      opensAt: resolveStartRelativeTime(
+        event.startsAt,
+
+        group.openMinutesBeforeStart,
+      ),
+
+      closesAt: resolveStartRelativeTime(
+        event.startsAt,
+
+        group.closeMinutesBeforeStart,
+      ),
+    });
+  }
+
+  /*
+   * Check for an ordinary existing key conflict before claiming the
+   * application marker.
+   *
+   * The event row lock serialises this service against another
+   * application to the same event. The INSERT below still uses
+   * conflict handling as the final database-enforced race boundary
+   * against other event-role-option writers.
+   */
+  const existingRoleOptions = await transaction
+    .select({
+      key: eventRoleOptions.key,
+    })
+    .from(eventRoleOptions)
+    .where(
+      and(
+        eq(eventRoleOptions.eventId, event.id),
+
+        inArray(
+          eventRoleOptions.key,
+          activePresetOptions.map((option) => option.key),
+        ),
+      ),
+    )
+    .orderBy(asc(eventRoleOptions.id));
+
+  const existingRoleOption = existingRoleOptions[0];
+
+  if (existingRoleOption) {
+    return {
+      kind: "role_option_conflict",
+
+      key: existingRoleOption.key,
+    };
+  }
+
+  /*
+   * Claim the provenance/idempotency row before creating the snapshot.
+   *
+   * If anything later fails, the surrounding PostgreSQL transaction
+   * rolls this row back together with every copied child row.
+   */
+  const [application] = await transaction
+    .insert(eventRoleRequestPresetApplications)
+    .values({
+      eventId: event.id,
+
+      presetId: preset.id,
+
+      appliedByUserId: input.appliedByUserId,
+    })
+    .onConflictDoNothing({
+      target: [
+        eventRoleRequestPresetApplications.eventId,
+
+        eventRoleRequestPresetApplications.presetId,
+      ],
+    })
+    .returning({
+      eventId: eventRoleRequestPresetApplications.eventId,
+    });
+
+  if (!application) {
+    return {
+      kind: "already_applied",
+    };
+  }
+
+  const now = new Date();
+
+  const insertedEventOptions = await transaction
+    .insert(eventRoleOptions)
+    .values(
+      activePresetOptions.map((option) => ({
+        eventId: event.id,
+
+        sourceRoleRequestPresetOptionId: option.id,
+
+        key: option.key,
+
+        displayName: option.displayName,
+
+        description: option.description,
+
+        requestRestriction: option.requestRestriction,
+
+        capacity: option.capacity,
+
+        sortOrder: option.sortOrder,
+
+        active: true,
+
+        updatedAt: now,
+      })),
+    )
+    .onConflictDoNothing({
+      target: [eventRoleOptions.eventId, eventRoleOptions.key],
+    })
+    .returning({
+      id: eventRoleOptions.id,
+
+      key: eventRoleOptions.key,
+
+      sourcePresetOptionId: eventRoleOptions.sourceRoleRequestPresetOptionId,
+    });
+
+  if (insertedEventOptions.length !== activePresetOptions.length) {
+    const insertedKeys = new Set(
+      insertedEventOptions.map((option) => option.key),
+    );
+
+    const conflictedOption = activePresetOptions.find(
+      (option) => !insertedKeys.has(option.key),
+    );
+
+    throw new RoleOptionConflictError(
+      conflictedOption?.key ?? activePresetOptions[0]?.key ?? "unknown",
+    );
+  }
+
+  const eventOptionIdByPresetOptionId = new Map<number, number>();
+
+  for (const option of insertedEventOptions) {
+    if (option.sourcePresetOptionId === null) {
+      throw new Error(
+        "A preset-derived event role option was returned without its source preset option ID.",
+      );
+    }
+
+    eventOptionIdByPresetOptionId.set(
+      option.sourcePresetOptionId,
+
+      option.id,
+    );
+  }
+
+  if (qualificationRows.length > 0) {
+    await transaction.insert(eventRoleOptionQualificationRoles).values(
+      qualificationRows.map((qualification) => ({
+        eventRoleOptionId: requireMappedId(
+          eventOptionIdByPresetOptionId,
+
+          qualification.presetOptionId,
+
+          "preset option",
+        ),
+
+        discordRoleId: qualification.discordRoleId,
+
+        roleNameSnapshot: qualification.roleNameSnapshot,
+
+        qualificationLevel: qualification.qualificationLevel,
+      })),
+    );
+  }
+
+  const insertedGroups = await transaction
+    .insert(roleRequestGroups)
+    .values(
+      resolvedGroups.map((group) => ({
+        eventId: event.id,
+
+        sourceRoleRequestPresetGroupId: group.id,
+
+        name: group.name,
+
+        description: group.description,
+
+        channelId: group.channelId,
+
+        messageId: null,
+
+        notifyRoleId: group.notificationRoles[0]?.discordRoleId ?? null,
+
+        notifyRoleNameSnapshot:
+          group.notificationRoles[0]?.roleNameSnapshot ?? null,
+
+        requiresPositiveSignup: group.requiresPositiveSignup,
+
+        openMinutesBeforeStart: group.openMinutesBeforeStart,
+
+        opensAt: group.opensAt,
+
+        closeMinutesBeforeStart: group.closeMinutesBeforeStart,
+
+        closesAt: group.closesAt,
+
+        closedAt: null,
+
+        createdByUserId: input.appliedByUserId,
+
+        updatedAt: now,
+      })),
+    )
+    .returning({
+      id: roleRequestGroups.id,
+
+      sourcePresetGroupId: roleRequestGroups.sourceRoleRequestPresetGroupId,
+    });
+
+  if (insertedGroups.length !== resolvedGroups.length) {
+    throw new Error(
+      "The database did not return every created role-request group.",
+    );
+  }
+
+  const eventGroupIdByPresetGroupId = new Map<number, number>();
+
+  for (const group of insertedGroups) {
+    if (group.sourcePresetGroupId === null) {
+      throw new Error(
+        "A preset-derived role-request group was returned without its source preset group ID.",
+      );
+    }
+
+    eventGroupIdByPresetGroupId.set(
+      group.sourcePresetGroupId,
+
+      group.id,
+    );
+  }
+
+  const eventNotificationRoleValues = resolvedGroups.flatMap((group) =>
+    group.notificationRoles.map((role) => ({
+      groupId: requireMappedId(
+        eventGroupIdByPresetGroupId,
+
+        group.id,
+
+        "preset group",
+      ),
+
+      discordRoleId: role.discordRoleId,
+
+      roleNameSnapshot: role.roleNameSnapshot,
+
+      sortOrder: role.sortOrder,
+    })),
+  );
+
+  if (eventNotificationRoleValues.length > 0) {
+    await transaction
+      .insert(roleRequestGroupNotificationRoles)
+      .values(eventNotificationRoleValues);
+  }
+
+  if (activeGroupMappings.length > 0) {
+    await transaction.insert(roleRequestGroupOptions).values(
+      activeGroupMappings.map((mapping) => ({
+        groupId: requireMappedId(
+          eventGroupIdByPresetGroupId,
+
+          mapping.groupId,
+
+          "preset group",
+        ),
+
+        eventRoleOptionId: requireMappedId(
+          eventOptionIdByPresetOptionId,
+
+          mapping.presetOptionId,
+
+          "preset option",
+        ),
+
+        sortOrder: mapping.sortOrder,
+      })),
+    );
+  }
+
+  /*
+   * Planned preset-derived groups need durable opening and closing
+   * work from the moment they become authoritative event state.
+   *
+   * Creating these actions inside this transaction prevents a process
+   * interruption from committing groups without the scheduler work
+   * needed to realise their lifecycle.
+   *
+   * Store the actual resolved timestamps, not the preset offsets.
+   * From this point onwards the event-level snapshot is authoritative.
+   */
+  await transaction.insert(scheduledActions).values(
+    resolvedGroups.flatMap((group) => {
+      const eventGroupId = requireMappedId(
+        eventGroupIdByPresetGroupId,
+
+        group.id,
+
+        "preset group",
+      );
+
+      return [
+        {
+          eventId: event.id,
+
+          actionKey: makeRoleRequestGroupOpenActionKey(eventGroupId),
+
+          dueAt: group.opensAt,
+        },
+
+        {
+          eventId: event.id,
+
+          actionKey: makeRoleRequestGroupCloseActionKey(eventGroupId),
+
+          dueAt: group.closesAt,
+        },
+      ];
+    }),
+  );
+
+  return {
+    kind: "applied",
+
+    eventId: event.id,
+
+    presetId: preset.id,
+
+    eventRoleOptionIds: activePresetOptions.map((option) =>
+      requireMappedId(
+        eventOptionIdByPresetOptionId,
+
+        option.id,
+
+        "preset option",
+      ),
+    ),
+
+    roleRequestGroupIds: activePresetGroups.map((group) =>
+      requireMappedId(
+        eventGroupIdByPresetGroupId,
+
+        group.id,
+
+        "preset group",
+      ),
+    ),
+  };
 }
 
 function isRequestRestriction(value: string): value is RequestRestriction {
