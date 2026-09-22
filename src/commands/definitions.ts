@@ -1191,6 +1191,180 @@ export const commandDefinitions = [
     ),
 
   new SlashCommandBuilder()
+    .setName("template")
+    .setDescription("Creates and manages reusable event templates.")
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("create")
+        .setDescription("Creates a reusable event template.")
+
+        /*
+         * Discord requires required options before optional options.
+         */
+        .addStringOption((option) =>
+          option
+            .setName("name")
+            .setDescription("The reusable template name.")
+            .setMinLength(1)
+            .setMaxLength(150)
+            .setRequired(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("event-type")
+            .setDescription("The configured event type.")
+            .setAutocomplete(true)
+            .setRequired(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("region")
+            .setDescription("Optional configured event audience or region.")
+            .setAutocomplete(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("timezone")
+            .setDescription(
+              "Template timezone. Defaults to the server timezone.",
+            )
+            .setAutocomplete(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("description")
+            .setDescription("Optional reusable event description.")
+            .setMaxLength(1000),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("local-time")
+            .setDescription("Normal local start time in 24-hour HH:mm format.")
+            .setMinLength(5)
+            .setMaxLength(5),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("duration-minutes")
+            .setDescription("Normal event duration. Defaults to 60 minutes.")
+            .setMinValue(30)
+            .setMaxValue(480),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("signups")
+            .setDescription(
+              "Whether generated events use attendance signups. Defaults to Yes.",
+            ),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("close-minutes-before")
+            .setDescription(
+              "When signups normally close. Defaults to 60 minutes before.",
+            )
+            .setMinValue(0)
+            .setMaxValue(1440),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("detailed-deadline")
+            .setDescription("Show the full signup deadline. Defaults to No."),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("publication-mode")
+            .setDescription(
+              "How generated events should normally be published.",
+            )
+            .addChoices(
+              {
+                name: "Manual",
+                value: "manual",
+              },
+              {
+                name: "Scheduled",
+                value: "scheduled",
+              },
+              {
+                name: "Immediate",
+                value: "immediate",
+              },
+            ),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("publish-minutes-before-start")
+            .setDescription(
+              "For scheduled publication, publish this many minutes before start.",
+            )
+            .setMinValue(1)
+            .setMaxValue(10080),
+        )
+        .addChannelOption((option) =>
+          option
+            .setName("publication-channel")
+            .setDescription(
+              "Fixed publication channel; omit to use the guild default.",
+            )
+            .addChannelTypes(
+              ChannelType.GuildText,
+              ChannelType.GuildAnnouncement,
+            ),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("role-preset-id")
+            .setDescription("Optional reusable role-request preset ID.")
+            .setMinValue(1),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("list")
+        .setDescription("Lists reusable event templates.")
+        .addBooleanOption((option) =>
+          option
+            .setName("include-inactive")
+            .setDescription("Include templates that are currently inactive."),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("show")
+        .setDescription("Shows the complete definition of one template.")
+        .addIntegerOption((option) =>
+          option
+            .setName("template-id")
+            .setDescription("Template ID shown by /template list.")
+            .setMinValue(1)
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("set-active")
+        .setDescription("Activates or deactivates a reusable event template.")
+        .addIntegerOption((option) =>
+          option
+            .setName("template-id")
+            .setDescription("Template ID shown by /template list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("active")
+            .setDescription("Whether the template may generate future events.")
+            .setRequired(true),
+        ),
+    ),
+
+  new SlashCommandBuilder()
     .setName("role-preset")
     .setDescription("Creates and manages reusable event role-request presets.")
 
