@@ -85,16 +85,20 @@ export type EventTemplatePingRole = {
   sortOrder: number;
 };
 
+export type EventTemplateOrganiserSlot = "primary" | "backup";
+
+export type EventTemplateOrganiserDefault = {
+  slot: EventTemplateOrganiserSlot;
+
+  discordUserId: string;
+
+  displayNameSnapshot: string;
+};
+
 export type EventTemplateDetail = EventTemplateRecord & {
   pingRoles: EventTemplatePingRole[];
 
-  organiserDefaults: {
-    slot: string;
-
-    discordUserId: string;
-
-    displayNameSnapshot: string;
-  }[];
+  organiserDefaults: EventTemplateOrganiserDefault[];
 
   reminders: {
     id: number;
@@ -301,6 +305,51 @@ export type ReplaceEventTemplatePingRolesResult =
         | "invalid_discord_role_id"
         | "invalid_role_name"
         | "duplicate_discord_role";
+    };
+
+export type ReplaceEventTemplateOrganiserDefaultsInput = {
+  guildDatabaseId: number;
+
+  templateId: number;
+
+  /*
+   * Complete intended collection.
+   *
+   * Valid canonical states are:
+   * - []
+   * - [primary]
+   * - [primary, backup]
+   *
+   * Input order is not significant.
+   */
+  organiserDefaults: {
+    slot: string;
+
+    discordUserId: string;
+
+    displayNameSnapshot: string;
+  }[];
+};
+
+export type ReplaceEventTemplateOrganiserDefaultsResult =
+  | {
+      kind: "updated" | "unchanged";
+
+      organiserDefaults: EventTemplateOrganiserDefault[];
+    }
+  | {
+      kind: "template_not_found";
+    }
+  | {
+      kind: "invalid_input";
+
+      reason:
+        | "invalid_slot"
+        | "invalid_discord_user_id"
+        | "invalid_display_name"
+        | "duplicate_slot"
+        | "duplicate_discord_user"
+        | "backup_requires_primary";
     };
 
 export type GetEventTemplateInput = {
@@ -1051,6 +1100,210 @@ export async function replaceEventTemplatePingRoles(
 }
 
 /**
+ * Replaces the complete reusable organiser-default collection for one
+ * template.
+ *
+ * Input order is not significant. Returned and persisted source state is
+ * canonicalised to primary followed by backup.
+ *
+ * Generation takes FOR SHARE on the template parent. This mutation takes
+ * FOR UPDATE before reading or replacing child rows so generation observes
+ * either the complete old organiser source state or the complete new state.
+ *
+ * Existing generated events are independent and are never rewritten here.
+ */
+export async function replaceEventTemplateOrganiserDefaults(
+  input: ReplaceEventTemplateOrganiserDefaultsInput,
+): Promise<ReplaceEventTemplateOrganiserDefaultsResult> {
+  const normalisedDefaults: EventTemplateOrganiserDefault[] = [];
+
+  const seenSlots = new Set<EventTemplateOrganiserSlot>();
+
+  const seenUserIds = new Set<string>();
+
+  for (const organiser of input.organiserDefaults) {
+    const slot = organiser.slot.trim();
+
+    if (!isEventTemplateOrganiserSlot(slot)) {
+      return {
+        kind: "invalid_input",
+
+        reason: "invalid_slot",
+      };
+    }
+
+    if (seenSlots.has(slot)) {
+      return {
+        kind: "invalid_input",
+
+        reason: "duplicate_slot",
+      };
+    }
+
+    seenSlots.add(slot);
+
+    const discordUserId = organiser.discordUserId.trim();
+
+    if (discordUserId.length === 0) {
+      return {
+        kind: "invalid_input",
+
+        reason: "invalid_discord_user_id",
+      };
+    }
+
+    if (seenUserIds.has(discordUserId)) {
+      return {
+        kind: "invalid_input",
+
+        reason: "duplicate_discord_user",
+      };
+    }
+
+    seenUserIds.add(discordUserId);
+
+    const displayNameSnapshot = organiser.displayNameSnapshot.trim();
+
+    if (displayNameSnapshot.length === 0 || displayNameSnapshot.length > 100) {
+      return {
+        kind: "invalid_input",
+
+        reason: "invalid_display_name",
+      };
+    }
+
+    normalisedDefaults.push({
+      slot,
+
+      discordUserId,
+
+      displayNameSnapshot,
+    });
+  }
+
+  const hasPrimary = normalisedDefaults.some(
+    (organiser) => organiser.slot === "primary",
+  );
+
+  const hasBackup = normalisedDefaults.some(
+    (organiser) => organiser.slot === "backup",
+  );
+
+  if (hasBackup && !hasPrimary) {
+    return {
+      kind: "invalid_input",
+
+      reason: "backup_requires_primary",
+    };
+  }
+
+  normalisedDefaults.sort(
+    (left, right) =>
+      organiserSlotOrder(left.slot) - organiserSlotOrder(right.slot),
+  );
+
+  return db.transaction(async (transaction) => {
+    /*
+     * Lock the reusable aggregate parent before touching child state.
+     *
+     * This is the same mutation/generation concurrency boundary used by
+     * core edits, lifecycle changes and ping-role replacement.
+     */
+    const [template] = await transaction
+      .select({
+        id: eventTemplates.id,
+      })
+      .from(eventTemplates)
+      .where(
+        and(
+          eq(eventTemplates.id, input.templateId),
+
+          eq(eventTemplates.ownerGuildId, input.guildDatabaseId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    if (!template) {
+      return {
+        kind: "template_not_found",
+      } as const;
+    }
+
+    const existingRows = await transaction
+      .select({
+        slot: eventTemplateOrganiserDefaults.slot,
+
+        discordUserId: eventTemplateOrganiserDefaults.discordUserId,
+
+        displayNameSnapshot: eventTemplateOrganiserDefaults.displayNameSnapshot,
+      })
+      .from(eventTemplateOrganiserDefaults)
+      .where(eq(eventTemplateOrganiserDefaults.templateId, template.id));
+
+    const existingDefaults: EventTemplateOrganiserDefault[] = existingRows.map(
+      (organiser) => ({
+        slot: requireEventTemplateOrganiserSlot(organiser.slot),
+
+        discordUserId: organiser.discordUserId,
+
+        displayNameSnapshot: organiser.displayNameSnapshot,
+      }),
+    );
+
+    existingDefaults.sort(
+      (left, right) =>
+        organiserSlotOrder(left.slot) - organiserSlotOrder(right.slot) ||
+        left.discordUserId.localeCompare(right.discordUserId),
+    );
+
+    if (
+      eventTemplateOrganiserDefaultsMatch(existingDefaults, normalisedDefaults)
+    ) {
+      return {
+        kind: "unchanged",
+
+        organiserDefaults: existingDefaults,
+      } as const;
+    }
+
+    await transaction
+      .delete(eventTemplateOrganiserDefaults)
+      .where(eq(eventTemplateOrganiserDefaults.templateId, template.id));
+
+    if (normalisedDefaults.length > 0) {
+      await transaction.insert(eventTemplateOrganiserDefaults).values(
+        normalisedDefaults.map((organiser) => ({
+          templateId: template.id,
+
+          slot: organiser.slot,
+
+          discordUserId: organiser.discordUserId,
+
+          displayNameSnapshot: organiser.displayNameSnapshot,
+        })),
+      );
+    }
+
+    /*
+     * Child collection changes are meaningful template mutations too.
+     */
+    await transaction
+      .update(eventTemplates)
+      .set({
+        updatedAt: new Date(),
+      })
+      .where(eq(eventTemplates.id, template.id));
+
+    return {
+      kind: "updated",
+
+      organiserDefaults: normalisedDefaults,
+    } as const;
+  });
+}
+
+/**
  * Lists every reusable template owned by one guild.
  *
  * Inactive templates remain visible because lifecycle state is reversible
@@ -1134,7 +1387,7 @@ export async function getEventTemplate(
         asc(eventTemplatePingRoles.discordRoleId),
       );
 
-    const organiserDefaults = await transaction
+    const organiserDefaultRows = await transaction
       .select({
         slot: eventTemplateOrganiserDefaults.slot,
 
@@ -1144,6 +1397,15 @@ export async function getEventTemplate(
       })
       .from(eventTemplateOrganiserDefaults)
       .where(eq(eventTemplateOrganiserDefaults.templateId, template.id));
+
+    const organiserDefaults: EventTemplateOrganiserDefault[] =
+      organiserDefaultRows.map((organiser) => ({
+        slot: requireEventTemplateOrganiserSlot(organiser.slot),
+
+        discordUserId: organiser.discordUserId,
+
+        displayNameSnapshot: organiser.displayNameSnapshot,
+      }));
 
     organiserDefaults.sort(
       (left, right) =>
@@ -1498,6 +1760,42 @@ function eventTemplatePingRolesMatch(
       role.sortOrder === other.sortOrder
     );
   });
+}
+
+function eventTemplateOrganiserDefaultsMatch(
+  left: EventTemplateOrganiserDefault[],
+  right: EventTemplateOrganiserDefault[],
+): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((organiser, index) => {
+    const other = right[index];
+
+    return (
+      other !== undefined &&
+      organiser.slot === other.slot &&
+      organiser.discordUserId === other.discordUserId &&
+      organiser.displayNameSnapshot === other.displayNameSnapshot
+    );
+  });
+}
+
+function isEventTemplateOrganiserSlot(
+  value: string,
+): value is EventTemplateOrganiserSlot {
+  return value === "primary" || value === "backup";
+}
+
+function requireEventTemplateOrganiserSlot(
+  value: string,
+): EventTemplateOrganiserSlot {
+  if (isEventTemplateOrganiserSlot(value)) {
+    return value;
+  }
+
+  throw new Error(`Unsupported event-template organiser slot "${value}".`);
 }
 
 function isValidLocalStartTime(value: string): boolean {

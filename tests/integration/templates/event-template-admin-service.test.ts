@@ -8,6 +8,7 @@ import {
   editEventTemplate,
   getEventTemplate,
   listEventTemplates,
+  replaceEventTemplateOrganiserDefaults,
   replaceEventTemplatePingRoles,
   setEventTemplateActive,
   type CreateEventTemplateInput,
@@ -33,6 +34,8 @@ const SECOND_PING_ROLE_ID = "990000000000000008";
 const THIRD_PING_ROLE_ID = "990000000000000009";
 
 const PRIMARY_ORGANISER_ID = "990000000000000006";
+
+const BACKUP_ORGANISER_ID = "990000000000000010";
 
 const REMINDER_CHANNEL_ID = "990000000000000007";
 
@@ -977,6 +980,721 @@ describe("event template administration service", () => {
         count: 0,
       },
     ]);
+  });
+
+  it("replaces, canonicalises and clears the complete template organiser-default collection", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const created = await createEventTemplate(buildCreateInput(fixture));
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected organiser fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    /*
+     * Input order is deliberately backup-first.
+     */
+    const firstReplacement = await replaceEventTemplateOrganiserDefaults({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      organiserDefaults: [
+        {
+          slot: "backup",
+
+          discordUserId: `  ${BACKUP_ORGANISER_ID}  `,
+
+          displayNameSnapshot: "  Backup Organiser  ",
+        },
+        {
+          slot: "primary",
+
+          discordUserId: PRIMARY_ORGANISER_ID,
+
+          displayNameSnapshot: "Primary Organiser",
+        },
+      ],
+    });
+
+    expect(firstReplacement).toEqual({
+      kind: "updated",
+
+      organiserDefaults: [
+        {
+          slot: "primary",
+
+          discordUserId: PRIMARY_ORGANISER_ID,
+
+          displayNameSnapshot: "Primary Organiser",
+        },
+        {
+          slot: "backup",
+
+          discordUserId: BACKUP_ORGANISER_ID,
+
+          displayNameSnapshot: "Backup Organiser",
+        },
+      ],
+    });
+
+    const shown = await getEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+    });
+
+    expect(shown.kind).toBe("found");
+
+    if (shown.kind !== "found") {
+      throw new Error(
+        "Expected template with organiser defaults to remain readable.",
+      );
+    }
+
+    expect(shown.template.organiserDefaults).toEqual([
+      {
+        slot: "primary",
+
+        discordUserId: PRIMARY_ORGANISER_ID,
+
+        displayNameSnapshot: "Primary Organiser",
+      },
+      {
+        slot: "backup",
+
+        discordUserId: BACKUP_ORGANISER_ID,
+
+        displayNameSnapshot: "Backup Organiser",
+      },
+    ]);
+
+    /*
+     * Canonical state is idempotent regardless of input order.
+     */
+    expect(
+      await replaceEventTemplateOrganiserDefaults({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        organiserDefaults: [
+          {
+            slot: "backup",
+
+            discordUserId: BACKUP_ORGANISER_ID,
+
+            displayNameSnapshot: "Backup Organiser",
+          },
+          {
+            slot: "primary",
+
+            discordUserId: PRIMARY_ORGANISER_ID,
+
+            displayNameSnapshot: "Primary Organiser",
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "unchanged",
+
+      organiserDefaults: [
+        {
+          slot: "primary",
+
+          discordUserId: PRIMARY_ORGANISER_ID,
+
+          displayNameSnapshot: "Primary Organiser",
+        },
+        {
+          slot: "backup",
+
+          discordUserId: BACKUP_ORGANISER_ID,
+
+          displayNameSnapshot: "Backup Organiser",
+        },
+      ],
+    });
+
+    /*
+     * Empty replacement explicitly clears organiser defaults.
+     */
+    expect(
+      await replaceEventTemplateOrganiserDefaults({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        organiserDefaults: [],
+      }),
+    ).toEqual({
+      kind: "updated",
+
+      organiserDefaults: [],
+    });
+
+    const cleared = await getEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+    });
+
+    expect(cleared.kind).toBe("found");
+
+    if (cleared.kind !== "found") {
+      throw new Error("Expected cleared template to remain readable.");
+    }
+
+    expect(cleared.template.organiserDefaults).toEqual([]);
+  });
+
+  it("rejects invalid template organiser defaults without changing the existing collection", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const created = await createEventTemplate(buildCreateInput(fixture));
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected organiser validation fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    const initial = await replaceEventTemplateOrganiserDefaults({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      organiserDefaults: [
+        {
+          slot: "primary",
+
+          discordUserId: PRIMARY_ORGANISER_ID,
+
+          displayNameSnapshot: "Primary Organiser",
+        },
+      ],
+    });
+
+    expect(initial.kind).toBe("updated");
+
+    // Backup without primary.
+    expect(
+      await replaceEventTemplateOrganiserDefaults({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        organiserDefaults: [
+          {
+            slot: "backup",
+
+            discordUserId: BACKUP_ORGANISER_ID,
+
+            displayNameSnapshot: "Backup Organiser",
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "backup_requires_primary",
+    });
+
+    // Runtime-invalid slot.
+    expect(
+      await replaceEventTemplateOrganiserDefaults({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        organiserDefaults: [
+          {
+            slot: "cover",
+
+            discordUserId: PRIMARY_ORGANISER_ID,
+
+            displayNameSnapshot: "Cover Organiser",
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "invalid_slot",
+    });
+
+    // Duplicate slot.
+    expect(
+      await replaceEventTemplateOrganiserDefaults({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        organiserDefaults: [
+          {
+            slot: "primary",
+
+            discordUserId: PRIMARY_ORGANISER_ID,
+
+            displayNameSnapshot: "Primary Organiser",
+          },
+          {
+            slot: "primary",
+
+            discordUserId: BACKUP_ORGANISER_ID,
+
+            displayNameSnapshot: "Another Primary",
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "duplicate_slot",
+    });
+
+    // Same Discord user in both slots.
+    expect(
+      await replaceEventTemplateOrganiserDefaults({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        organiserDefaults: [
+          {
+            slot: "primary",
+
+            discordUserId: PRIMARY_ORGANISER_ID,
+
+            displayNameSnapshot: "Primary Organiser",
+          },
+          {
+            slot: "backup",
+
+            discordUserId: PRIMARY_ORGANISER_ID,
+
+            displayNameSnapshot: "Same User",
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "duplicate_discord_user",
+    });
+
+    // Blank user ID.
+    expect(
+      await replaceEventTemplateOrganiserDefaults({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        organiserDefaults: [
+          {
+            slot: "primary",
+
+            discordUserId: "   ",
+
+            displayNameSnapshot: "Primary Organiser",
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "invalid_discord_user_id",
+    });
+
+    // Blank display snapshot.
+    expect(
+      await replaceEventTemplateOrganiserDefaults({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        organiserDefaults: [
+          {
+            slot: "primary",
+
+            discordUserId: PRIMARY_ORGANISER_ID,
+
+            displayNameSnapshot: "   ",
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "invalid_display_name",
+    });
+
+    /*
+     * All rejected calls happened before mutation.
+     */
+    const stored = await getEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+    });
+
+    expect(stored.kind).toBe("found");
+
+    if (stored.kind !== "found") {
+      throw new Error(
+        "Expected template to remain readable after rejected organiser replacements.",
+      );
+    }
+
+    expect(stored.template.organiserDefaults).toEqual([
+      {
+        slot: "primary",
+
+        discordUserId: PRIMARY_ORGANISER_ID,
+
+        displayNameSnapshot: "Primary Organiser",
+      },
+    ]);
+  });
+
+  it("treats template organiser-default replacement as guild-scoped administration", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const foreignFixture = await createSourceFixture(
+      pool,
+      OTHER_DISCORD_GUILD_ID,
+      "foreign",
+    );
+
+    const created = await createEventTemplate(buildCreateInput(fixture));
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected organiser ownership fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    // Act / Assert
+    expect(
+      await replaceEventTemplateOrganiserDefaults({
+        guildDatabaseId: foreignFixture.guildId,
+
+        templateId: created.template.id,
+
+        organiserDefaults: [
+          {
+            slot: "primary",
+
+            discordUserId: PRIMARY_ORGANISER_ID,
+
+            displayNameSnapshot: "Primary Organiser",
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "template_not_found",
+    });
+
+    const storedCount = await pool.query<{
+      count: number;
+    }>(
+      `
+          SELECT COUNT(*)::int AS "count"
+          FROM "event_template_organiser_defaults"
+          WHERE "template_id" = $1
+        `,
+      [created.template.id],
+    );
+
+    expect(storedCount.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+  });
+
+  it("serialises organiser-default replacement behind an in-flight generation snapshot", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const created = await createEventTemplate({
+      ...buildCreateInput(fixture),
+
+      audienceId: null,
+
+      roleRequestPresetId: null,
+
+      publicationMode: "manual",
+
+      publishMinutesBeforeStart: null,
+    });
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected organiser concurrency fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    const initialReplacement = await replaceEventTemplateOrganiserDefaults({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      organiserDefaults: [
+        {
+          slot: "primary",
+
+          discordUserId: PRIMARY_ORGANISER_ID,
+
+          displayNameSnapshot: "Old Primary Organiser",
+        },
+      ],
+    });
+
+    expect(initialReplacement.kind).toBe("updated");
+
+    const blockerClient = await pool.connect();
+
+    let blockerTransactionOpen = false;
+
+    let generationPromise: ReturnType<typeof generateEventFromTemplate> | null =
+      null;
+
+    let replacementPromise: ReturnType<
+      typeof replaceEventTemplateOrganiserDefaults
+    > | null = null;
+
+    try {
+      await blockerClient.query("BEGIN");
+
+      blockerTransactionOpen = true;
+
+      /*
+       * Generation locks the template parent FOR SHARE before reading the
+       * event type. Pause it there so organiser replacement attempts FOR
+       * UPDATE while that shared source lock is definitely held.
+       */
+      await blockerClient.query(`
+        LOCK TABLE "event_types"
+        IN ACCESS EXCLUSIVE MODE
+      `);
+
+      generationPromise = generateEventFromTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        startsAt: futureStart(),
+
+        generatedByUserId: ADMIN_USER_ID,
+      });
+
+      await waitForBlockedDatabaseQuery(
+        pool,
+
+        '%from "event_types"%',
+      );
+
+      let replacementResolved = false;
+
+      replacementPromise = replaceEventTemplateOrganiserDefaults({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        organiserDefaults: [
+          {
+            slot: "primary",
+
+            discordUserId: PRIMARY_ORGANISER_ID,
+
+            displayNameSnapshot: "New Primary Organiser",
+          },
+          {
+            slot: "backup",
+
+            discordUserId: BACKUP_ORGANISER_ID,
+
+            displayNameSnapshot: "New Backup Organiser",
+          },
+        ],
+      }).then((result) => {
+        replacementResolved = true;
+
+        return result;
+      });
+
+      await waitForBlockedDatabaseQuery(
+        pool,
+
+        '%from "event_templates"%for update%',
+      );
+
+      expect(replacementResolved).toBe(false);
+
+      /*
+       * Generation owns the shared source lock first and therefore snapshots
+       * the old complete organiser-default collection.
+       */
+      await blockerClient.query("COMMIT");
+
+      blockerTransactionOpen = false;
+
+      const generationResult = await generationPromise;
+
+      const replacementResult = await replacementPromise;
+
+      expect(generationResult.kind).toBe("generated");
+
+      if (generationResult.kind !== "generated") {
+        throw new Error(
+          `Expected in-flight generation to succeed, received "${generationResult.kind}".`,
+        );
+      }
+
+      expect(replacementResult.kind).toBe("updated");
+
+      const firstEventOrganisers = await pool.query<{
+        slot: string;
+
+        discord_user_id: string;
+
+        display_name_snapshot: string;
+      }>(
+        `
+            SELECT
+              "slot",
+              "discord_user_id",
+              "display_name_snapshot"
+            FROM "event_organiser_assignments"
+            WHERE "event_id" = $1
+            ORDER BY
+              CASE "slot"
+                WHEN 'primary' THEN 0
+                WHEN 'backup' THEN 1
+                ELSE 2
+              END
+          `,
+        [generationResult.event.id],
+      );
+
+      expect(firstEventOrganisers.rows).toEqual([
+        {
+          slot: "primary",
+
+          discord_user_id: PRIMARY_ORGANISER_ID,
+
+          display_name_snapshot: "Old Primary Organiser",
+        },
+      ]);
+
+      /*
+       * A later generation sees the complete replacement source.
+       */
+      const secondGeneration = await generateEventFromTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        startsAt: new Date(futureStart().getTime() + 60 * 60_000),
+
+        generatedByUserId: ADMIN_USER_ID,
+      });
+
+      expect(secondGeneration.kind).toBe("generated");
+
+      if (secondGeneration.kind !== "generated") {
+        throw new Error(
+          `Expected later generation to succeed, received "${secondGeneration.kind}".`,
+        );
+      }
+
+      const secondEventOrganisers = await pool.query<{
+        slot: string;
+
+        discord_user_id: string;
+
+        display_name_snapshot: string;
+      }>(
+        `
+            SELECT
+              "slot",
+              "discord_user_id",
+              "display_name_snapshot"
+            FROM "event_organiser_assignments"
+            WHERE "event_id" = $1
+            ORDER BY
+              CASE "slot"
+                WHEN 'primary' THEN 0
+                WHEN 'backup' THEN 1
+                ELSE 2
+              END
+          `,
+        [secondGeneration.event.id],
+      );
+
+      expect(secondEventOrganisers.rows).toEqual([
+        {
+          slot: "primary",
+
+          discord_user_id: PRIMARY_ORGANISER_ID,
+
+          display_name_snapshot: "New Primary Organiser",
+        },
+        {
+          slot: "backup",
+
+          discord_user_id: BACKUP_ORGANISER_ID,
+
+          display_name_snapshot: "New Backup Organiser",
+        },
+      ]);
+
+      /*
+       * The first event owns its old snapshot permanently.
+       */
+      const firstAfterReplacement = await pool.query<{
+        display_name_snapshot: string;
+      }>(
+        `
+            SELECT "display_name_snapshot"
+            FROM "event_organiser_assignments"
+            WHERE
+              "event_id" = $1
+              AND "slot" = 'primary'
+          `,
+        [generationResult.event.id],
+      );
+
+      expect(firstAfterReplacement.rows).toEqual([
+        {
+          display_name_snapshot: "Old Primary Organiser",
+        },
+      ]);
+    } finally {
+      if (blockerTransactionOpen) {
+        await blockerClient.query("ROLLBACK").catch(() => undefined);
+      }
+
+      const pendingOperations: Promise<unknown>[] = [];
+
+      if (generationPromise) {
+        pendingOperations.push(generationPromise);
+      }
+
+      if (replacementPromise) {
+        pendingOperations.push(replacementPromise);
+      }
+
+      await Promise.allSettled(pendingOperations);
+
+      blockerClient.release();
+    }
   });
 
   it("lists only the owning guild's templates and includes inactive templates", async () => {
