@@ -27,6 +27,12 @@ const PING_ROLE_ONE_ID = "989000000000000008";
 
 const PING_ROLE_TWO_ID = "989000000000000009";
 
+const FIXED_PUBLICATION_CHANNEL_ID = "989000000000000010";
+
+const UPDATED_DEFAULT_ATTENDANCE_CHANNEL_ID = "989000000000000011";
+
+const OTHER_DISCORD_GUILD_ID = "989000000000000099";
+
 describe("event template generation service", () => {
   let pool: Pool;
 
@@ -667,6 +673,920 @@ describe("event template generation service", () => {
       },
     ]);
   });
+
+  it("distinguishes manual and immediate publication without scheduling publish actions inside generation", async () => {
+    // Arrange
+    const fixture = await createTemplateFixture(
+      pool,
+
+      {
+        withPreset: false,
+      },
+    );
+
+    const manualStartsAt = futureStart();
+
+    await pool.query(
+      `
+        UPDATE "event_templates"
+        SET
+          "publication_mode" = 'manual',
+          "publish_minutes_before_start" = NULL
+        WHERE "id" = $1
+      `,
+      [fixture.templateId],
+    );
+
+    // Act: manual
+    const manualResult = await generateEventFromTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: fixture.templateId,
+
+      startsAt: manualStartsAt,
+
+      generatedByUserId: ADMIN_USER_ID,
+    });
+
+    // Assert: manual
+    expect(manualResult.kind).toBe("generated");
+
+    if (manualResult.kind !== "generated") {
+      throw new Error(
+        `Expected manual template generation to succeed, received "${manualResult.kind}".`,
+      );
+    }
+
+    expect(manualResult.publicationMode).toBe("manual");
+
+    expect(manualResult.requiresImmediatePublication).toBe(false);
+
+    /*
+     * Reuse the same template for an immediate occurrence.
+     *
+     * Immediate publication is deliberately a post-commit Discord side effect,
+     * so authoritative generation itself must still create an unpublished
+     * ordinary event without a publish_event scheduled action.
+     */
+    await pool.query(
+      `
+        UPDATE "event_templates"
+        SET
+          "publication_mode" = 'immediate',
+          "publish_minutes_before_start" = NULL
+        WHERE "id" = $1
+      `,
+      [fixture.templateId],
+    );
+
+    const immediateResult = await generateEventFromTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: fixture.templateId,
+
+      startsAt: addMinutes(manualStartsAt, 60),
+
+      generatedByUserId: ADMIN_USER_ID,
+    });
+
+    expect(immediateResult.kind).toBe("generated");
+
+    if (immediateResult.kind !== "generated") {
+      throw new Error(
+        `Expected immediate template generation to succeed, received "${immediateResult.kind}".`,
+      );
+    }
+
+    expect(immediateResult.publicationMode).toBe("immediate");
+
+    expect(immediateResult.requiresImmediatePublication).toBe(true);
+
+    const publicationState = await pool.query<{
+      id: number;
+
+      published_at: Date | null;
+
+      publish_minutes_before_start: number | null;
+
+      status: string;
+
+      has_publish_action: boolean;
+    }>(
+      `
+        SELECT
+          event."id",
+          event."published_at",
+          event."publish_minutes_before_start",
+          event."status",
+          EXISTS (
+            SELECT 1
+            FROM "scheduled_actions" AS action
+            WHERE
+              action."event_id" = event."id"
+              AND action."action_key" = 'publish_event'
+          ) AS "has_publish_action"
+        FROM "events" AS event
+        WHERE event."id" IN ($1, $2)
+      `,
+      [manualResult.event.id, immediateResult.event.id],
+    );
+
+    expect(publicationState.rows).toHaveLength(2);
+
+    expect(publicationState.rows).toEqual(
+      expect.arrayContaining([
+        {
+          id: manualResult.event.id,
+
+          published_at: null,
+
+          publish_minutes_before_start: null,
+
+          status: "scheduled",
+
+          has_publish_action: false,
+        },
+        {
+          id: immediateResult.event.id,
+
+          published_at: null,
+
+          publish_minutes_before_start: null,
+
+          status: "scheduled",
+
+          has_publish_action: false,
+        },
+      ]),
+    );
+  });
+
+  it("prefers a fixed template publication channel over the current guild default and snapshots it into inherited reminders", async () => {
+    // Arrange
+    const fixture = await createTemplateFixture(
+      pool,
+
+      {
+        withPreset: false,
+      },
+    );
+
+    await pool.query(
+      `
+        UPDATE "guild_settings"
+        SET "default_attendance_channel_id" = $1
+        WHERE "guild_id" = $2
+      `,
+      [UPDATED_DEFAULT_ATTENDANCE_CHANNEL_ID, fixture.guildId],
+    );
+
+    await pool.query(
+      `
+        UPDATE "event_templates"
+        SET "publication_channel_id" = $1
+        WHERE "id" = $2
+      `,
+      [FIXED_PUBLICATION_CHANNEL_ID, fixture.templateId],
+    );
+
+    // Act
+    const result = await generateEventFromTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: fixture.templateId,
+
+      startsAt: futureStart(),
+
+      generatedByUserId: ADMIN_USER_ID,
+    });
+
+    // Assert
+    expect(result.kind).toBe("generated");
+
+    if (result.kind !== "generated") {
+      throw new Error(
+        `Expected template generation to succeed, received "${result.kind}".`,
+      );
+    }
+
+    const event = await pool.query<{
+      publication_channel_id: string | null;
+    }>(
+      `
+        SELECT "publication_channel_id"
+        FROM "events"
+        WHERE "id" = $1
+      `,
+      [result.event.id],
+    );
+
+    expect(event.rows).toEqual([
+      {
+        publication_channel_id: FIXED_PUBLICATION_CHANNEL_ID,
+      },
+    ]);
+
+    const reminders = await pool.query<{
+      timing_reference: string;
+
+      channel_id: string;
+    }>(
+      `
+        SELECT
+          "timing_reference",
+          "channel_id"
+        FROM "event_reminders"
+        WHERE "event_id" = $1
+        ORDER BY "timing_reference"
+      `,
+      [result.event.id],
+    );
+
+    expect(reminders.rows).toEqual([
+      {
+        timing_reference: "event_start",
+
+        channel_id: FIXED_PUBLICATION_CHANNEL_ID,
+      },
+      {
+        timing_reference: "signup_close",
+
+        channel_id: FIXED_REMINDER_CHANNEL_ID,
+      },
+    ]);
+  });
+
+  it("treats a template belonging to another guild as not found", async () => {
+    // Arrange
+    const fixture = await createTemplateFixture(
+      pool,
+
+      {
+        withPreset: false,
+      },
+    );
+
+    const secondary = await createSecondarySourceRecords(pool);
+
+    // Act
+    const result = await generateEventFromTemplate({
+      guildDatabaseId: secondary.guildId,
+
+      templateId: fixture.templateId,
+
+      startsAt: futureStart(),
+
+      generatedByUserId: ADMIN_USER_ID,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "template_not_found",
+    });
+
+    const eventCount = await pool.query<{
+      count: number;
+    }>(
+      `
+        SELECT COUNT(*)::int AS "count"
+        FROM "events"
+      `,
+    );
+
+    expect(eventCount.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+  });
+
+  it("rejects inactive or cross-guild event-type and audience source records", async () => {
+    // Arrange
+    const fixture = await createTemplateFixture(
+      pool,
+
+      {
+        withPreset: false,
+      },
+    );
+
+    const secondary = await createSecondarySourceRecords(pool);
+
+    const startsAt = futureStart();
+
+    // Act / Assert: inactive event type
+    await pool.query(
+      `
+        UPDATE "event_types"
+        SET "active" = false
+        WHERE "id" = $1
+      `,
+      [fixture.eventTypeId],
+    );
+
+    expect(
+      await generateEventFromTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: fixture.templateId,
+
+        startsAt,
+
+        generatedByUserId: ADMIN_USER_ID,
+      }),
+    ).toEqual({
+      kind: "event_type_unavailable",
+    });
+
+    await pool.query(
+      `
+        UPDATE "event_types"
+        SET "active" = true
+        WHERE "id" = $1
+      `,
+      [fixture.eventTypeId],
+    );
+
+    // Act / Assert: event type owned by another guild
+    await pool.query(
+      `
+        UPDATE "event_templates"
+        SET "event_type_id" = $1
+        WHERE "id" = $2
+      `,
+      [secondary.eventTypeId, fixture.templateId],
+    );
+
+    expect(
+      await generateEventFromTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: fixture.templateId,
+
+        startsAt,
+
+        generatedByUserId: ADMIN_USER_ID,
+      }),
+    ).toEqual({
+      kind: "event_type_unavailable",
+    });
+
+    await pool.query(
+      `
+        UPDATE "event_templates"
+        SET "event_type_id" = $1
+        WHERE "id" = $2
+      `,
+      [fixture.eventTypeId, fixture.templateId],
+    );
+
+    // Act / Assert: inactive audience
+    await pool.query(
+      `
+        UPDATE "event_audiences"
+        SET "active" = false
+        WHERE "id" = $1
+      `,
+      [fixture.audienceId],
+    );
+
+    expect(
+      await generateEventFromTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: fixture.templateId,
+
+        startsAt,
+
+        generatedByUserId: ADMIN_USER_ID,
+      }),
+    ).toEqual({
+      kind: "audience_unavailable",
+    });
+
+    await pool.query(
+      `
+        UPDATE "event_audiences"
+        SET "active" = true
+        WHERE "id" = $1
+      `,
+      [fixture.audienceId],
+    );
+
+    // Act / Assert: audience owned by another guild
+    await pool.query(
+      `
+        UPDATE "event_templates"
+        SET "audience_id" = $1
+        WHERE "id" = $2
+      `,
+      [secondary.audienceId, fixture.templateId],
+    );
+
+    expect(
+      await generateEventFromTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: fixture.templateId,
+
+        startsAt,
+
+        generatedByUserId: ADMIN_USER_ID,
+      }),
+    ).toEqual({
+      kind: "audience_unavailable",
+    });
+
+    const eventCount = await pool.query<{
+      count: number;
+    }>(
+      `
+        SELECT COUNT(*)::int AS "count"
+        FROM "events"
+      `,
+    );
+
+    expect(eventCount.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+  });
+
+  it("keeps generated event state independent from later template, preset and guild-default edits", async () => {
+    // Arrange
+    const fixture = await createTemplateFixture(pool);
+
+    if (fixture.presetId === null) {
+      throw new Error(
+        "Expected the snapshot-independence fixture to include a preset.",
+      );
+    }
+
+    const result = await generateEventFromTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: fixture.templateId,
+
+      startsAt: futureStart(),
+
+      generatedByUserId: ADMIN_USER_ID,
+    });
+
+    expect(result.kind).toBe("generated");
+
+    if (result.kind !== "generated") {
+      throw new Error(
+        `Expected template generation to succeed, received "${result.kind}".`,
+      );
+    }
+
+    // Act: mutate every reusable source represented in the assertions below.
+    await pool.query(
+      `
+        UPDATE "event_templates"
+        SET
+          "name" = 'Edited Template Name',
+          "description" = 'Edited template description',
+          "publication_channel_id" = $1
+        WHERE "id" = $2
+      `,
+      [FIXED_PUBLICATION_CHANNEL_ID, fixture.templateId],
+    );
+
+    await pool.query(
+      `
+        UPDATE "event_template_ping_roles"
+        SET "role_name_snapshot" = 'Edited Naval Role'
+        WHERE
+          "template_id" = $1
+          AND "discord_role_id" = $2
+      `,
+      [fixture.templateId, PING_ROLE_ONE_ID],
+    );
+
+    await pool.query(
+      `
+        UPDATE "event_template_organiser_defaults"
+        SET "display_name_snapshot" = 'Edited Primary Organiser'
+        WHERE
+          "template_id" = $1
+          AND "slot" = 'primary'
+      `,
+      [fixture.templateId],
+    );
+
+    await pool.query(
+      `
+        UPDATE "event_template_reminders"
+        SET "message" = 'Edited reminder message.'
+        WHERE
+          "template_id" = $1
+          AND "timing_reference" = 'event_start'
+      `,
+      [fixture.templateId],
+    );
+
+    await pool.query(
+      `
+        UPDATE "role_request_preset_options"
+        SET "display_name" = 'Edited Captain'
+        WHERE
+          "preset_id" = $1
+          AND "key" = 'captain'
+      `,
+      [fixture.presetId],
+    );
+
+    await pool.query(
+      `
+        UPDATE "guild_settings"
+        SET "default_attendance_channel_id" = $1
+        WHERE "guild_id" = $2
+      `,
+      [UPDATED_DEFAULT_ATTENDANCE_CHANNEL_ID, fixture.guildId],
+    );
+
+    /*
+     * First prove the reusable sources really changed. Without this check the
+     * snapshot assertion could pass merely because an UPDATE matched nothing.
+     */
+    const editedSource = await pool.query<{
+      template_name: string;
+
+      ping_role_name: string;
+
+      organiser_name: string;
+
+      reminder_message: string;
+
+      preset_option_name: string;
+
+      default_attendance_channel_id: string;
+    }>(
+      `
+        SELECT
+          (
+            SELECT "name"
+            FROM "event_templates"
+            WHERE "id" = $1
+          ) AS "template_name",
+          (
+            SELECT "role_name_snapshot"
+            FROM "event_template_ping_roles"
+            WHERE
+              "template_id" = $1
+              AND "discord_role_id" = $2
+          ) AS "ping_role_name",
+          (
+            SELECT "display_name_snapshot"
+            FROM "event_template_organiser_defaults"
+            WHERE
+              "template_id" = $1
+              AND "slot" = 'primary'
+          ) AS "organiser_name",
+          (
+            SELECT "message"
+            FROM "event_template_reminders"
+            WHERE
+              "template_id" = $1
+              AND "timing_reference" = 'event_start'
+          ) AS "reminder_message",
+          (
+            SELECT "display_name"
+            FROM "role_request_preset_options"
+            WHERE
+              "preset_id" = $3
+              AND "key" = 'captain'
+          ) AS "preset_option_name",
+          (
+            SELECT "default_attendance_channel_id"
+            FROM "guild_settings"
+            WHERE "guild_id" = $4
+          ) AS "default_attendance_channel_id"
+      `,
+      [fixture.templateId, PING_ROLE_ONE_ID, fixture.presetId, fixture.guildId],
+    );
+
+    expect(editedSource.rows).toEqual([
+      {
+        template_name: "Edited Template Name",
+
+        ping_role_name: "Edited Naval Role",
+
+        organiser_name: "Edited Primary Organiser",
+
+        reminder_message: "Edited reminder message.",
+
+        preset_option_name: "Edited Captain",
+
+        default_attendance_channel_id: UPDATED_DEFAULT_ATTENDANCE_CHANNEL_ID,
+      },
+    ]);
+
+    // Assert: the generated event retains its original snapshots.
+    const generatedSnapshot = await pool.query<{
+      event_name: string;
+
+      event_description: string | null;
+
+      publication_channel_id: string | null;
+
+      ping_role_name: string;
+
+      organiser_name: string;
+
+      reminder_message: string;
+
+      reminder_channel_id: string;
+
+      role_option_name: string;
+    }>(
+      `
+        SELECT
+          event."name" AS "event_name",
+          event."description" AS "event_description",
+          event."publication_channel_id",
+          (
+            SELECT ping_role."role_name"
+            FROM "event_ping_roles" AS ping_role
+            WHERE
+              ping_role."event_id" = event."id"
+              AND ping_role."discord_role_id" = $2
+          ) AS "ping_role_name",
+          (
+            SELECT organiser."display_name_snapshot"
+            FROM "event_organiser_assignments" AS organiser
+            WHERE
+              organiser."event_id" = event."id"
+              AND organiser."slot" = 'primary'
+          ) AS "organiser_name",
+          (
+            SELECT reminder."message"
+            FROM "event_reminders" AS reminder
+            WHERE
+              reminder."event_id" = event."id"
+              AND reminder."timing_reference" = 'event_start'
+          ) AS "reminder_message",
+          (
+            SELECT reminder."channel_id"
+            FROM "event_reminders" AS reminder
+            WHERE
+              reminder."event_id" = event."id"
+              AND reminder."timing_reference" = 'event_start'
+          ) AS "reminder_channel_id",
+          (
+            SELECT role_option."display_name"
+            FROM "event_role_options" AS role_option
+            WHERE
+              role_option."event_id" = event."id"
+              AND role_option."key" = 'captain'
+          ) AS "role_option_name"
+        FROM "events" AS event
+        WHERE event."id" = $1
+      `,
+      [result.event.id, PING_ROLE_ONE_ID],
+    );
+
+    expect(generatedSnapshot.rows).toEqual([
+      {
+        event_name: "Sunday Naval",
+
+        event_description: "Reusable naval event",
+
+        publication_channel_id: DEFAULT_ATTENDANCE_CHANNEL_ID,
+
+        ping_role_name: "Naval",
+
+        organiser_name: "Primary Organiser",
+
+        reminder_message: "Event starts in thirty minutes.",
+
+        reminder_channel_id: DEFAULT_ATTENDANCE_CHANNEL_ID,
+
+        role_option_name: "Captain",
+      },
+    ]);
+  });
+
+  it("holds the template source lock until generation commits so a parent-locked edit cannot interleave with the snapshot", async () => {
+    // Arrange
+    const fixture = await createTemplateFixture(
+      pool,
+
+      {
+        withPreset: false,
+      },
+    );
+
+    const blockerClient = await pool.connect();
+
+    const editorClient = await pool.connect();
+
+    let blockerTransactionOpen = false;
+
+    let editorTransactionOpen = false;
+
+    let generationPromise: ReturnType<typeof generateEventFromTemplate> | null =
+      null;
+
+    let editorLockPromise: Promise<unknown> | null = null;
+
+    try {
+      await blockerClient.query("BEGIN");
+
+      blockerTransactionOpen = true;
+
+      /*
+       * Generation reads event_types only after taking FOR SHARE on the
+       * template parent.
+       *
+       * ACCESS EXCLUSIVE therefore pauses generation at a deterministic point
+       * while that template parent lock remains held.
+       */
+      await blockerClient.query(`
+        LOCK TABLE "event_types"
+        IN ACCESS EXCLUSIVE MODE
+      `);
+
+      generationPromise = generateEventFromTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: fixture.templateId,
+
+        startsAt: futureStart(),
+
+        generatedByUserId: ADMIN_USER_ID,
+      });
+
+      await waitForBlockedDatabaseQuery(
+        pool,
+
+        '%from "event_types"%',
+      );
+
+      await editorClient.query("BEGIN");
+
+      editorTransactionOpen = true;
+
+      let editorLockResolved = false;
+
+      /*
+       * Future template mutation services must take FOR UPDATE on this parent
+       * before mutating either parent metadata or child source collections.
+       */
+      editorLockPromise = editorClient
+        .query(
+          `
+            SELECT "id"
+            FROM "event_templates"
+            WHERE "id" = $1
+            FOR UPDATE
+          `,
+          [fixture.templateId],
+        )
+        .then((result) => {
+          editorLockResolved = true;
+
+          return result;
+        });
+
+      await waitForBlockedDatabaseQuery(
+        pool,
+
+        '%from "event_templates"%for update%',
+      );
+
+      expect(editorLockResolved).toBe(false);
+
+      /*
+       * Allow generation to continue. It must complete the old source snapshot
+       * and commit before the editor can obtain FOR UPDATE.
+       */
+      await blockerClient.query("COMMIT");
+
+      blockerTransactionOpen = false;
+
+      const generationResult = await generationPromise;
+
+      expect(generationResult.kind).toBe("generated");
+
+      if (generationResult.kind !== "generated") {
+        throw new Error(
+          `Expected template generation to succeed, received "${generationResult.kind}".`,
+        );
+      }
+
+      await editorLockPromise;
+
+      expect(editorLockResolved).toBe(true);
+
+      await editorClient.query(
+        `
+          UPDATE "event_templates"
+          SET "name" = 'Edited After Generation'
+          WHERE "id" = $1
+        `,
+        [fixture.templateId],
+      );
+
+      await editorClient.query(
+        `
+          UPDATE "event_template_ping_roles"
+          SET "role_name_snapshot" = 'Edited After Generation'
+          WHERE
+            "template_id" = $1
+            AND "discord_role_id" = $2
+        `,
+        [fixture.templateId, PING_ROLE_ONE_ID],
+      );
+
+      await editorClient.query("COMMIT");
+
+      editorTransactionOpen = false;
+
+      const generatedSnapshot = await pool.query<{
+        event_name: string;
+
+        ping_role_name: string;
+      }>(
+        `
+          SELECT
+            event."name" AS "event_name",
+            ping_role."role_name" AS "ping_role_name"
+          FROM "events" AS event
+          INNER JOIN "event_ping_roles" AS ping_role
+            ON ping_role."event_id" = event."id"
+          WHERE
+            event."id" = $1
+            AND ping_role."discord_role_id" = $2
+        `,
+        [generationResult.event.id, PING_ROLE_ONE_ID],
+      );
+
+      expect(generatedSnapshot.rows).toEqual([
+        {
+          event_name: "Sunday Naval",
+
+          ping_role_name: "Naval",
+        },
+      ]);
+
+      const editedSource = await pool.query<{
+        template_name: string;
+
+        ping_role_name: string;
+      }>(
+        `
+          SELECT
+            template."name" AS "template_name",
+            ping_role."role_name_snapshot" AS "ping_role_name"
+          FROM "event_templates" AS template
+          INNER JOIN "event_template_ping_roles" AS ping_role
+            ON ping_role."template_id" = template."id"
+          WHERE
+            template."id" = $1
+            AND ping_role."discord_role_id" = $2
+        `,
+        [fixture.templateId, PING_ROLE_ONE_ID],
+      );
+
+      expect(editedSource.rows).toEqual([
+        {
+          template_name: "Edited After Generation",
+
+          ping_role_name: "Edited After Generation",
+        },
+      ]);
+    } finally {
+      /*
+       * Always release the artificial table blocker first. Otherwise a failed
+       * assertion could leave generation waiting while the test itself waits
+       * for generation to settle.
+       */
+      if (blockerTransactionOpen) {
+        await blockerClient.query("ROLLBACK").catch(() => undefined);
+
+        blockerTransactionOpen = false;
+      }
+
+      if (generationPromise) {
+        await Promise.allSettled([generationPromise]);
+      }
+
+      if (editorLockPromise) {
+        await Promise.allSettled([editorLockPromise]);
+      }
+
+      if (editorTransactionOpen) {
+        await editorClient.query("ROLLBACK").catch(() => undefined);
+      }
+
+      blockerClient.release();
+
+      editorClient.release();
+    }
+  });
 });
 
 type FixtureOptions = {
@@ -1034,6 +1954,100 @@ async function createTemplateFixture(
   };
 }
 
+async function createSecondarySourceRecords(pool: Pool): Promise<{
+  guildId: number;
+
+  eventTypeId: number;
+
+  audienceId: number;
+}> {
+  const guildResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "discord_guilds" (
+        "discord_guild_id",
+        "name"
+      )
+      VALUES ($1, 'Other Template Test Guild')
+      RETURNING "id"
+    `,
+    [OTHER_DISCORD_GUILD_ID],
+  );
+
+  const guildId = requireReturnedId(
+    guildResult.rows[0]?.id,
+
+    "secondary guild",
+  );
+
+  const eventTypeResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "event_types" (
+        "owner_guild_id",
+        "code",
+        "name",
+        "role_requests_enabled",
+        "active"
+      )
+      VALUES (
+        $1,
+        'foreign_naval',
+        'Foreign Naval',
+        true,
+        true
+      )
+      RETURNING "id"
+    `,
+    [guildId],
+  );
+
+  const eventTypeId = requireReturnedId(
+    eventTypeResult.rows[0]?.id,
+
+    "secondary event type",
+  );
+
+  const audienceResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "event_audiences" (
+        "owner_guild_id",
+        "code",
+        "name",
+        "default_timezone",
+        "active"
+      )
+      VALUES (
+        $1,
+        'foreign_eu',
+        'Foreign EU',
+        'Europe/London',
+        true
+      )
+      RETURNING "id"
+    `,
+    [guildId],
+  );
+
+  const audienceId = requireReturnedId(
+    audienceResult.rows[0]?.id,
+
+    "secondary audience",
+  );
+
+  return {
+    guildId,
+
+    eventTypeId,
+
+    audienceId,
+  };
+}
+
 function futureStart(): Date {
   return new Date(Date.now() + 6 * 60 * 60_000);
 }
@@ -1066,4 +2080,48 @@ function requireReturnedId(
   }
 
   return value;
+}
+
+async function waitForBlockedDatabaseQuery(
+  pool: Pool,
+
+  queryPattern: string,
+): Promise<void> {
+  const timeoutAt = Date.now() + 3_000;
+
+  while (Date.now() < timeoutAt) {
+    const result = await pool.query<{
+      blocked: boolean;
+    }>(
+      `
+        SELECT EXISTS (
+          SELECT 1
+          FROM "pg_stat_activity"
+          WHERE
+            "datname" = current_database()
+            AND "state" = 'active'
+            AND "wait_event_type" = 'Lock'
+            AND "query" ILIKE $1
+        ) AS "blocked"
+      `,
+      [queryPattern],
+    );
+
+    if (result.rows[0]?.blocked) {
+      return;
+    }
+
+    /*
+     * Poll only to observe PostgreSQL's real lock state.
+     *
+     * Test correctness is not based on this delay.
+     */
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+
+  throw new Error(
+    `Timed out waiting for blocked PostgreSQL query matching ${queryPattern}.`,
+  );
 }
