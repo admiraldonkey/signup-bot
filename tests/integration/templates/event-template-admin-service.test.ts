@@ -5,6 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { pool as applicationPool } from "../../../src/db/client.js";
 import {
   createEventTemplate,
+  editEventTemplate,
   getEventTemplate,
   listEventTemplates,
   setEventTemplateActive,
@@ -280,6 +281,358 @@ describe("event template administration service", () => {
         count: 0,
       },
     ]);
+  });
+
+  it("edits core configuration with omitted-preserve and explicit-clear semantics", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const created = await createEventTemplate(buildCreateInput(fixture));
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected template fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    // Act
+    const result = await editEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      name: "  Updated Sunday Naval  ",
+
+      description: null,
+
+      audienceId: null,
+
+      roleRequestPresetId: null,
+
+      localStartTime: null,
+
+      durationMinutes: 75,
+
+      publicationMode: "manual",
+
+      publishMinutesBeforeStart: null,
+
+      publicationChannelId: null,
+    });
+
+    // Assert
+    expect(result.kind).toBe("updated");
+
+    if (result.kind !== "updated") {
+      throw new Error(
+        `Expected template edit to succeed, received "${result.kind}".`,
+      );
+    }
+
+    expect(result.template).toMatchObject({
+      id: created.template.id,
+
+      ownerGuildId: fixture.guildId,
+
+      /*
+       * Omitted fields remain unchanged.
+       */
+      eventTypeId: fixture.eventTypeId,
+
+      timezone: "Europe/London",
+
+      signupsEnabled: true,
+
+      attendanceCloseMinutesBefore: 60,
+
+      showDetailedDeadline: false,
+
+      /*
+       * Explicit values and clears are applied.
+       */
+      audienceId: null,
+
+      roleRequestPresetId: null,
+
+      name: "Updated Sunday Naval",
+
+      description: null,
+
+      localStartTime: null,
+
+      durationMinutes: 75,
+
+      publicationMode: "manual",
+
+      publishMinutesBeforeStart: null,
+
+      publicationChannelId: null,
+
+      active: true,
+    });
+
+    expect(
+      await editEventTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        name: "Updated Sunday Naval",
+      }),
+    ).toMatchObject({
+      kind: "unchanged",
+    });
+
+    expect(
+      await editEventTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "no_changes_requested",
+    });
+  });
+
+  it("rejects cross-guild source changes without modifying the template", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const foreignFixture = await createSourceFixture(
+      pool,
+      OTHER_DISCORD_GUILD_ID,
+      "foreign",
+    );
+
+    const created = await createEventTemplate(buildCreateInput(fixture));
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected template fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    // Act / Assert: event type
+    expect(
+      await editEventTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        eventTypeId: foreignFixture.eventTypeId,
+      }),
+    ).toEqual({
+      kind: "event_type_unavailable",
+    });
+
+    // Act / Assert: audience
+    expect(
+      await editEventTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        audienceId: foreignFixture.audienceId,
+      }),
+    ).toEqual({
+      kind: "audience_unavailable",
+    });
+
+    // Act / Assert: preset
+    expect(
+      await editEventTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        roleRequestPresetId: foreignFixture.presetId,
+      }),
+    ).toEqual({
+      kind: "preset_unavailable",
+    });
+
+    const stored = await getEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+    });
+
+    expect(stored.kind).toBe("found");
+
+    if (stored.kind !== "found") {
+      throw new Error("Expected the original template to remain readable.");
+    }
+
+    expect(stored.template).toMatchObject({
+      eventTypeId: fixture.eventTypeId,
+
+      audienceId: fixture.audienceId,
+
+      roleRequestPresetId: fixture.presetId,
+    });
+  });
+
+  it("allows unrelated edits when existing referenced sources were later deactivated", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const created = await createEventTemplate(buildCreateInput(fixture));
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected template fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    await pool.query(
+      `
+        UPDATE "event_types"
+        SET "active" = false
+        WHERE "id" = $1
+      `,
+      [fixture.eventTypeId],
+    );
+
+    await pool.query(
+      `
+        UPDATE "event_audiences"
+        SET "active" = false
+        WHERE "id" = $1
+      `,
+      [fixture.audienceId],
+    );
+
+    await pool.query(
+      `
+        UPDATE "role_request_presets"
+        SET "active" = false
+        WHERE "id" = $1
+      `,
+      [fixture.presetId],
+    );
+
+    // Act
+    const result = await editEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      name: "Renamed While Sources Are Inactive",
+    });
+
+    // Assert
+    expect(result.kind).toBe("updated");
+
+    if (result.kind !== "updated") {
+      throw new Error(
+        `Expected unrelated edit to remain possible, received "${result.kind}".`,
+      );
+    }
+
+    expect(result.template.name).toBe("Renamed While Sources Are Inactive");
+
+    /*
+     * Explicitly re-selecting one of those inactive sources is a real source
+     * mutation and must still be rejected.
+     */
+    expect(
+      await editEventTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        audienceId: fixture.audienceId,
+      }),
+    ).toEqual({
+      kind: "audience_unavailable",
+    });
+  });
+
+  it("prevents a retained preset from being paired with an event type that disables role requests", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const created = await createEventTemplate(buildCreateInput(fixture));
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected template fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    const disabledTypeResult = await pool.query<{
+      id: number;
+    }>(
+      `
+          INSERT INTO "event_types" (
+            "owner_guild_id",
+            "code",
+            "name",
+            "role_requests_enabled",
+            "active"
+          )
+          VALUES (
+            $1,
+            'no_roles',
+            'No Role Requests',
+            false,
+            true
+          )
+          RETURNING "id"
+        `,
+      [fixture.guildId],
+    );
+
+    const disabledTypeId = requireReturnedId(
+      disabledTypeResult.rows[0]?.id,
+
+      "role-request-disabled event type",
+    );
+
+    // Act / Assert
+    expect(
+      await editEventTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        eventTypeId: disabledTypeId,
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "preset_requires_role_requests",
+    });
+
+    /*
+     * Explicitly clearing the preset in the same edit makes the new event
+     * type valid.
+     */
+    const cleared = await editEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      eventTypeId: disabledTypeId,
+
+      roleRequestPresetId: null,
+    });
+
+    expect(cleared.kind).toBe("updated");
+
+    if (cleared.kind !== "updated") {
+      throw new Error(
+        `Expected preset-clearing edit to succeed, received "${cleared.kind}".`,
+      );
+    }
+
+    expect(cleared.template).toMatchObject({
+      eventTypeId: disabledTypeId,
+
+      roleRequestPresetId: null,
+    });
   });
 
   it("lists only the owning guild's templates and includes inactive templates", async () => {
@@ -771,6 +1124,187 @@ describe("event template administration service", () => {
 
       if (lifecyclePromise) {
         pendingOperations.push(lifecyclePromise);
+      }
+
+      await Promise.allSettled(pendingOperations);
+
+      blockerClient.release();
+    }
+  });
+
+  it("serialises core editing behind an in-flight generation snapshot", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const created = await createEventTemplate({
+      ...buildCreateInput(fixture),
+
+      audienceId: null,
+
+      roleRequestPresetId: null,
+
+      publicationMode: "manual",
+
+      publishMinutesBeforeStart: null,
+    });
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected edit-concurrency fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    const blockerClient = await pool.connect();
+
+    let blockerTransactionOpen = false;
+
+    let generationPromise: ReturnType<typeof generateEventFromTemplate> | null =
+      null;
+
+    let editPromise: ReturnType<typeof editEventTemplate> | null = null;
+
+    try {
+      await blockerClient.query("BEGIN");
+
+      blockerTransactionOpen = true;
+
+      /*
+       * Generation locks the template FOR SHARE before it reaches event_types.
+       * Pause it there so the edit attempts FOR UPDATE while generation's
+       * shared template lock is definitely still held.
+       */
+      await blockerClient.query(`
+        LOCK TABLE "event_types"
+        IN ACCESS EXCLUSIVE MODE
+      `);
+
+      generationPromise = generateEventFromTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        startsAt: futureStart(),
+
+        generatedByUserId: ADMIN_USER_ID,
+      });
+
+      await waitForBlockedDatabaseQuery(
+        pool,
+
+        '%from "event_types"%',
+      );
+
+      let editResolved = false;
+
+      editPromise = editEventTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        name: "Edited After Generation",
+      }).then((result) => {
+        editResolved = true;
+
+        return result;
+      });
+
+      await waitForBlockedDatabaseQuery(
+        pool,
+
+        '%from "event_templates"%for update%',
+      );
+
+      expect(editResolved).toBe(false);
+
+      await blockerClient.query("COMMIT");
+
+      blockerTransactionOpen = false;
+
+      const generationResult = await generationPromise;
+
+      const editResult = await editPromise;
+
+      expect(generationResult.kind).toBe("generated");
+
+      if (generationResult.kind !== "generated") {
+        throw new Error(
+          `Expected in-flight generation to succeed, received "${generationResult.kind}".`,
+        );
+      }
+
+      expect(editResult.kind).toBe("updated");
+
+      /*
+       * Generation acquired the shared source lock first, so this occurrence
+       * owns the old snapshot.
+       */
+      const firstEvent = await pool.query<{
+        name: string;
+      }>(
+        `
+            SELECT "name"
+            FROM "events"
+            WHERE "id" = $1
+          `,
+        [generationResult.event.id],
+      );
+
+      expect(firstEvent.rows).toEqual([
+        {
+          name: "Sunday Naval",
+        },
+      ]);
+
+      /*
+       * A later occurrence sees the newly committed template source.
+       */
+      const secondGeneration = await generateEventFromTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        startsAt: new Date(futureStart().getTime() + 60 * 60_000),
+
+        generatedByUserId: ADMIN_USER_ID,
+      });
+
+      expect(secondGeneration.kind).toBe("generated");
+
+      if (secondGeneration.kind !== "generated") {
+        throw new Error(
+          `Expected later generation to succeed, received "${secondGeneration.kind}".`,
+        );
+      }
+
+      const secondEvent = await pool.query<{
+        name: string;
+      }>(
+        `
+            SELECT "name"
+            FROM "events"
+            WHERE "id" = $1
+          `,
+        [secondGeneration.event.id],
+      );
+
+      expect(secondEvent.rows).toEqual([
+        {
+          name: "Edited After Generation",
+        },
+      ]);
+    } finally {
+      if (blockerTransactionOpen) {
+        await blockerClient.query("ROLLBACK").catch(() => undefined);
+      }
+
+      const pendingOperations: Promise<unknown>[] = [];
+
+      if (generationPromise) {
+        pendingOperations.push(generationPromise);
+      }
+
+      if (editPromise) {
+        pendingOperations.push(editPromise);
       }
 
       await Promise.allSettled(pendingOperations);

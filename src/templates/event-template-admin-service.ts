@@ -143,6 +143,17 @@ export type CreateEventTemplateInput = {
   createdByUserId: string;
 };
 
+export type EventTemplateConfigurationInvalidReason =
+  | "invalid_name"
+  | "invalid_timezone"
+  | "invalid_local_start_time"
+  | "invalid_duration"
+  | "invalid_attendance_close_offset"
+  | "invalid_publication_mode"
+  | "invalid_publication_offset"
+  | "publication_not_before_signup_close"
+  | "invalid_publication_channel";
+
 export type CreateEventTemplateResult =
   | {
       kind: "created";
@@ -165,16 +176,93 @@ export type CreateEventTemplateResult =
       kind: "invalid_input";
 
       reason:
-        | "invalid_name"
-        | "invalid_timezone"
-        | "invalid_local_start_time"
-        | "invalid_duration"
-        | "invalid_attendance_close_offset"
-        | "invalid_publication_mode"
-        | "invalid_publication_offset"
-        | "publication_not_before_signup_close"
-        | "invalid_publication_channel"
+        | EventTemplateConfigurationInvalidReason
         | "preset_requires_role_requests";
+    };
+
+export type EditEventTemplateInput = {
+  guildDatabaseId: number;
+
+  templateId: number;
+
+  eventTypeId?: number;
+
+  /*
+   * undefined -> preserve
+   * null      -> clear
+   */
+  audienceId?: number | null;
+
+  /*
+   * undefined -> preserve
+   * null      -> clear
+   */
+  roleRequestPresetId?: number | null;
+
+  name?: string;
+
+  /*
+   * undefined -> preserve
+   * null or blank -> clear
+   */
+  description?: string | null;
+
+  timezone?: string;
+
+  /*
+   * undefined -> preserve
+   * null      -> clear
+   */
+  localStartTime?: string | null;
+
+  durationMinutes?: number;
+
+  signupsEnabled?: boolean;
+
+  attendanceCloseMinutesBefore?: number;
+
+  showDetailedDeadline?: boolean;
+
+  publicationMode?: string;
+
+  /*
+   * undefined -> preserve
+   * null      -> clear
+   */
+  publishMinutesBeforeStart?: number | null;
+
+  /*
+   * undefined -> preserve
+   * null      -> clear
+   */
+  publicationChannelId?: string | null;
+};
+
+export type EditEventTemplateResult =
+  | {
+      kind: "updated" | "unchanged";
+
+      template: EventTemplateRecord;
+    }
+  | {
+      kind: "template_not_found";
+    }
+  | {
+      kind: "event_type_unavailable";
+    }
+  | {
+      kind: "audience_unavailable";
+    }
+  | {
+      kind: "preset_unavailable";
+    }
+  | {
+      kind: "invalid_input";
+
+      reason:
+        | EventTemplateConfigurationInvalidReason
+        | "preset_requires_role_requests"
+        | "no_changes_requested";
     };
 
 export type GetEventTemplateInput = {
@@ -269,118 +357,39 @@ const eventTemplateSelection = {
 export async function createEventTemplate(
   input: CreateEventTemplateInput,
 ): Promise<CreateEventTemplateResult> {
-  const name = input.name.trim();
+  const configurationResult = normaliseEventTemplateConfiguration({
+    name: input.name,
 
-  if (name.length === 0 || name.length > 150) {
+    description: input.description,
+
+    timezone: input.timezone,
+
+    localStartTime: input.localStartTime,
+
+    durationMinutes: input.durationMinutes,
+
+    signupsEnabled: input.signupsEnabled,
+
+    attendanceCloseMinutesBefore: input.attendanceCloseMinutesBefore,
+
+    showDetailedDeadline: input.showDetailedDeadline,
+
+    publicationMode: input.publicationMode,
+
+    publishMinutesBeforeStart: input.publishMinutesBeforeStart,
+
+    publicationChannelId: input.publicationChannelId,
+  });
+
+  if (!configurationResult.ok) {
     return {
       kind: "invalid_input",
 
-      reason: "invalid_name",
+      reason: configurationResult.reason,
     };
   }
 
-  const timezone = input.timezone.trim();
-
-  if (
-    timezone.length === 0 ||
-    timezone.length > 64 ||
-    !isValidEventTimezone(timezone)
-  ) {
-    return {
-      kind: "invalid_input",
-
-      reason: "invalid_timezone",
-    };
-  }
-
-  const localStartTime =
-    input.localStartTime === null ? null : input.localStartTime.trim();
-
-  if (localStartTime !== null && !isValidLocalStartTime(localStartTime)) {
-    return {
-      kind: "invalid_input",
-
-      reason: "invalid_local_start_time",
-    };
-  }
-
-  if (!isPostgresPositiveInteger(input.durationMinutes)) {
-    return {
-      kind: "invalid_input",
-
-      reason: "invalid_duration",
-    };
-  }
-
-  if (!isPostgresNonNegativeInteger(input.attendanceCloseMinutesBefore)) {
-    return {
-      kind: "invalid_input",
-
-      reason: "invalid_attendance_close_offset",
-    };
-  }
-
-  if (!isTemplatePublicationMode(input.publicationMode)) {
-    return {
-      kind: "invalid_input",
-
-      reason: "invalid_publication_mode",
-    };
-  }
-
-  const publicationMode = input.publicationMode;
-
-  if (
-    publicationMode === "scheduled" &&
-    (input.publishMinutesBeforeStart === null ||
-      !isPostgresPositiveInteger(input.publishMinutesBeforeStart))
-  ) {
-    return {
-      kind: "invalid_input",
-
-      reason: "invalid_publication_offset",
-    };
-  }
-
-  if (
-    publicationMode !== "scheduled" &&
-    input.publishMinutesBeforeStart !== null
-  ) {
-    return {
-      kind: "invalid_input",
-
-      reason: "invalid_publication_offset",
-    };
-  }
-
-  if (
-    input.signupsEnabled &&
-    publicationMode === "scheduled" &&
-    input.publishMinutesBeforeStart !== null &&
-    input.publishMinutesBeforeStart <= input.attendanceCloseMinutesBefore
-  ) {
-    return {
-      kind: "invalid_input",
-
-      reason: "publication_not_before_signup_close",
-    };
-  }
-
-  let publicationChannelId: string | null = null;
-
-  if (input.publicationChannelId !== null) {
-    publicationChannelId = input.publicationChannelId.trim();
-
-    if (publicationChannelId.length === 0) {
-      return {
-        kind: "invalid_input",
-
-        reason: "invalid_publication_channel",
-      };
-    }
-  }
-
-  const description = normaliseOptionalText(input.description);
+  const configuration = configurationResult.configuration;
 
   return db.transaction(async (transaction) => {
     /*
@@ -502,27 +511,28 @@ export async function createEventTemplate(
 
         roleRequestPresetId: input.roleRequestPresetId,
 
-        name,
+        name: configuration.name,
 
-        description,
+        description: configuration.description,
 
-        timezone,
+        timezone: configuration.timezone,
 
-        localStartTime,
+        localStartTime: configuration.localStartTime,
 
-        durationMinutes: input.durationMinutes,
+        durationMinutes: configuration.durationMinutes,
 
-        signupsEnabled: input.signupsEnabled,
+        signupsEnabled: configuration.signupsEnabled,
 
-        attendanceCloseMinutesBefore: input.attendanceCloseMinutesBefore,
+        attendanceCloseMinutesBefore:
+          configuration.attendanceCloseMinutesBefore,
 
-        showDetailedDeadline: input.showDetailedDeadline,
+        showDetailedDeadline: configuration.showDetailedDeadline,
 
-        publicationMode,
+        publicationMode: configuration.publicationMode,
 
-        publishMinutesBeforeStart: input.publishMinutesBeforeStart,
+        publishMinutesBeforeStart: configuration.publishMinutesBeforeStart,
 
-        publicationChannelId,
+        publicationChannelId: configuration.publicationChannelId,
 
         active: true,
 
@@ -538,6 +548,318 @@ export async function createEventTemplate(
       kind: "created",
 
       template,
+    } as const;
+  });
+}
+
+/**
+ * Edits the reusable parent configuration for one template.
+ *
+ * Omitted fields preserve their current values. Nullable fields use explicit
+ * null to clear the stored value.
+ *
+ * Generation takes FOR SHARE on this parent. Editing takes FOR UPDATE so one
+ * generation observes either the complete configuration before this mutation
+ * or the complete configuration after it.
+ *
+ * Child collections are deliberately not changed here.
+ */
+export async function editEventTemplate(
+  input: EditEventTemplateInput,
+): Promise<EditEventTemplateResult> {
+  if (
+    input.eventTypeId === undefined &&
+    input.audienceId === undefined &&
+    input.roleRequestPresetId === undefined &&
+    input.name === undefined &&
+    input.description === undefined &&
+    input.timezone === undefined &&
+    input.localStartTime === undefined &&
+    input.durationMinutes === undefined &&
+    input.signupsEnabled === undefined &&
+    input.attendanceCloseMinutesBefore === undefined &&
+    input.showDetailedDeadline === undefined &&
+    input.publicationMode === undefined &&
+    input.publishMinutesBeforeStart === undefined &&
+    input.publicationChannelId === undefined
+  ) {
+    return {
+      kind: "invalid_input",
+
+      reason: "no_changes_requested",
+    };
+  }
+
+  return db.transaction(async (transaction) => {
+    /*
+     * This is both the authoritative ownership check and the
+     * mutation/generation concurrency boundary.
+     *
+     * Inactive templates deliberately remain editable.
+     */
+    const [template] = await transaction
+      .select(eventTemplateSelection)
+      .from(eventTemplates)
+      .where(
+        and(
+          eq(eventTemplates.id, input.templateId),
+
+          eq(eventTemplates.ownerGuildId, input.guildDatabaseId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    if (!template) {
+      return {
+        kind: "template_not_found",
+      } as const;
+    }
+
+    const eventTypeId = input.eventTypeId ?? template.eventTypeId;
+
+    const audienceId =
+      input.audienceId === undefined ? template.audienceId : input.audienceId;
+
+    const roleRequestPresetId =
+      input.roleRequestPresetId === undefined
+        ? template.roleRequestPresetId
+        : input.roleRequestPresetId;
+
+    const configurationResult = normaliseEventTemplateConfiguration({
+      name: input.name ?? template.name,
+
+      description:
+        input.description === undefined
+          ? template.description
+          : input.description,
+
+      timezone: input.timezone ?? template.timezone,
+
+      localStartTime:
+        input.localStartTime === undefined
+          ? template.localStartTime
+          : input.localStartTime,
+
+      durationMinutes: input.durationMinutes ?? template.durationMinutes,
+
+      signupsEnabled: input.signupsEnabled ?? template.signupsEnabled,
+
+      attendanceCloseMinutesBefore:
+        input.attendanceCloseMinutesBefore ??
+        template.attendanceCloseMinutesBefore,
+
+      showDetailedDeadline:
+        input.showDetailedDeadline ?? template.showDetailedDeadline,
+
+      publicationMode: input.publicationMode ?? template.publicationMode,
+
+      publishMinutesBeforeStart:
+        input.publishMinutesBeforeStart === undefined
+          ? template.publishMinutesBeforeStart
+          : input.publishMinutesBeforeStart,
+
+      publicationChannelId:
+        input.publicationChannelId === undefined
+          ? template.publicationChannelId
+          : input.publicationChannelId,
+    });
+
+    if (!configurationResult.ok) {
+      return {
+        kind: "invalid_input",
+
+        reason: configurationResult.reason,
+      } as const;
+    }
+
+    const configuration = configurationResult.configuration;
+
+    /*
+     * Only newly-requested reusable relationships require their active-state
+     * validation here.
+     *
+     * An unrelated edit remains possible when an existing referenced source
+     * was later deactivated, which lets administrators repair stale templates
+     * incrementally instead of trapping them behind that stale reference.
+     */
+    let eventTypeRoleRequestsEnabled: boolean | undefined;
+
+    const needsEventTypeRelationshipCheck =
+      input.eventTypeId !== undefined ||
+      (input.roleRequestPresetId !== undefined && roleRequestPresetId !== null);
+
+    if (needsEventTypeRelationshipCheck) {
+      const eventTypeCondition =
+        input.eventTypeId === undefined
+          ? and(
+              eq(eventTypes.id, eventTypeId),
+
+              eq(eventTypes.ownerGuildId, input.guildDatabaseId),
+            )
+          : and(
+              eq(eventTypes.id, eventTypeId),
+
+              eq(eventTypes.ownerGuildId, input.guildDatabaseId),
+
+              eq(eventTypes.active, true),
+            );
+
+      const [eventType] = await transaction
+        .select({
+          id: eventTypes.id,
+
+          roleRequestsEnabled: eventTypes.roleRequestsEnabled,
+        })
+        .from(eventTypes)
+        .where(eventTypeCondition)
+        .limit(1)
+        .for("share");
+
+      if (!eventType) {
+        return {
+          kind: "event_type_unavailable",
+        } as const;
+      }
+
+      eventTypeRoleRequestsEnabled = eventType.roleRequestsEnabled;
+    }
+
+    if (input.audienceId !== undefined && audienceId !== null) {
+      const [audience] = await transaction
+        .select({
+          id: eventAudiences.id,
+        })
+        .from(eventAudiences)
+        .where(
+          and(
+            eq(eventAudiences.id, audienceId),
+
+            eq(eventAudiences.ownerGuildId, input.guildDatabaseId),
+
+            eq(eventAudiences.active, true),
+          ),
+        )
+        .limit(1)
+        .for("share");
+
+      if (!audience) {
+        return {
+          kind: "audience_unavailable",
+        } as const;
+      }
+    }
+
+    if (
+      input.roleRequestPresetId !== undefined &&
+      roleRequestPresetId !== null
+    ) {
+      const [preset] = await transaction
+        .select({
+          id: roleRequestPresets.id,
+        })
+        .from(roleRequestPresets)
+        .where(
+          and(
+            eq(roleRequestPresets.id, roleRequestPresetId),
+
+            eq(roleRequestPresets.ownerGuildId, input.guildDatabaseId),
+
+            eq(roleRequestPresets.active, true),
+          ),
+        )
+        .limit(1)
+        .for("share");
+
+      if (!preset) {
+        return {
+          kind: "preset_unavailable",
+        } as const;
+      }
+    }
+
+    if (
+      (input.eventTypeId !== undefined ||
+        input.roleRequestPresetId !== undefined) &&
+      roleRequestPresetId !== null &&
+      eventTypeRoleRequestsEnabled === false
+    ) {
+      return {
+        kind: "invalid_input",
+
+        reason: "preset_requires_role_requests",
+      } as const;
+    }
+
+    if (
+      eventTemplateConfigurationMatches(
+        template,
+        configuration,
+        eventTypeId,
+        audienceId,
+        roleRequestPresetId,
+      )
+    ) {
+      return {
+        kind: "unchanged",
+
+        template,
+      } as const;
+    }
+
+    const [updatedTemplate] = await transaction
+      .update(eventTemplates)
+      .set({
+        eventTypeId,
+
+        audienceId,
+
+        roleRequestPresetId,
+
+        name: configuration.name,
+
+        description: configuration.description,
+
+        timezone: configuration.timezone,
+
+        localStartTime: configuration.localStartTime,
+
+        durationMinutes: configuration.durationMinutes,
+
+        signupsEnabled: configuration.signupsEnabled,
+
+        attendanceCloseMinutesBefore:
+          configuration.attendanceCloseMinutesBefore,
+
+        showDetailedDeadline: configuration.showDetailedDeadline,
+
+        publicationMode: configuration.publicationMode,
+
+        publishMinutesBeforeStart: configuration.publishMinutesBeforeStart,
+
+        publicationChannelId: configuration.publicationChannelId,
+
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(eventTemplates.id, template.id),
+
+          eq(eventTemplates.ownerGuildId, input.guildDatabaseId),
+        ),
+      )
+      .returning(eventTemplateSelection);
+
+    if (!updatedTemplate) {
+      throw new Error(
+        `Event template #${template.id} disappeared while its configuration was being edited.`,
+      );
+    }
+
+    return {
+      kind: "updated",
+
+      template: updatedTemplate,
     } as const;
   });
 }
@@ -751,6 +1073,219 @@ export async function setEventTemplateActive(
       template: updatedTemplate,
     } as const;
   });
+}
+
+type EventTemplateConfigurationInput = {
+  name: string;
+
+  description: string | null;
+
+  timezone: string;
+
+  localStartTime: string | null;
+
+  durationMinutes: number;
+
+  signupsEnabled: boolean;
+
+  attendanceCloseMinutesBefore: number;
+
+  showDetailedDeadline: boolean;
+
+  publicationMode: string;
+
+  publishMinutesBeforeStart: number | null;
+
+  publicationChannelId: string | null;
+};
+
+type NormalisedEventTemplateConfiguration = Omit<
+  EventTemplateConfigurationInput,
+  "publicationMode"
+> & {
+  publicationMode: EventTemplatePublicationMode;
+};
+
+type NormaliseEventTemplateConfigurationResult =
+  | {
+      ok: true;
+
+      configuration: NormalisedEventTemplateConfiguration;
+    }
+  | {
+      ok: false;
+
+      reason: EventTemplateConfigurationInvalidReason;
+    };
+
+function normaliseEventTemplateConfiguration(
+  input: EventTemplateConfigurationInput,
+): NormaliseEventTemplateConfigurationResult {
+  const name = input.name.trim();
+
+  if (name.length === 0 || name.length > 150) {
+    return {
+      ok: false,
+
+      reason: "invalid_name",
+    };
+  }
+
+  const timezone = input.timezone.trim();
+
+  if (
+    timezone.length === 0 ||
+    timezone.length > 64 ||
+    !isValidEventTimezone(timezone)
+  ) {
+    return {
+      ok: false,
+
+      reason: "invalid_timezone",
+    };
+  }
+
+  const localStartTime =
+    input.localStartTime === null ? null : input.localStartTime.trim();
+
+  if (localStartTime !== null && !isValidLocalStartTime(localStartTime)) {
+    return {
+      ok: false,
+
+      reason: "invalid_local_start_time",
+    };
+  }
+
+  if (!isPostgresPositiveInteger(input.durationMinutes)) {
+    return {
+      ok: false,
+
+      reason: "invalid_duration",
+    };
+  }
+
+  if (!isPostgresNonNegativeInteger(input.attendanceCloseMinutesBefore)) {
+    return {
+      ok: false,
+
+      reason: "invalid_attendance_close_offset",
+    };
+  }
+
+  if (!isTemplatePublicationMode(input.publicationMode)) {
+    return {
+      ok: false,
+
+      reason: "invalid_publication_mode",
+    };
+  }
+
+  const publicationMode = input.publicationMode;
+
+  if (
+    publicationMode === "scheduled" &&
+    (input.publishMinutesBeforeStart === null ||
+      !isPostgresPositiveInteger(input.publishMinutesBeforeStart))
+  ) {
+    return {
+      ok: false,
+
+      reason: "invalid_publication_offset",
+    };
+  }
+
+  if (
+    publicationMode !== "scheduled" &&
+    input.publishMinutesBeforeStart !== null
+  ) {
+    return {
+      ok: false,
+
+      reason: "invalid_publication_offset",
+    };
+  }
+
+  if (
+    input.signupsEnabled &&
+    publicationMode === "scheduled" &&
+    input.publishMinutesBeforeStart !== null &&
+    input.publishMinutesBeforeStart <= input.attendanceCloseMinutesBefore
+  ) {
+    return {
+      ok: false,
+
+      reason: "publication_not_before_signup_close",
+    };
+  }
+
+  let publicationChannelId: string | null = null;
+
+  if (input.publicationChannelId !== null) {
+    publicationChannelId = input.publicationChannelId.trim();
+
+    if (publicationChannelId.length === 0) {
+      return {
+        ok: false,
+
+        reason: "invalid_publication_channel",
+      };
+    }
+  }
+
+  return {
+    ok: true,
+
+    configuration: {
+      name,
+
+      description: normaliseOptionalText(input.description),
+
+      timezone,
+
+      localStartTime,
+
+      durationMinutes: input.durationMinutes,
+
+      signupsEnabled: input.signupsEnabled,
+
+      attendanceCloseMinutesBefore: input.attendanceCloseMinutesBefore,
+
+      showDetailedDeadline: input.showDetailedDeadline,
+
+      publicationMode,
+
+      publishMinutesBeforeStart: input.publishMinutesBeforeStart,
+
+      publicationChannelId,
+    },
+  };
+}
+
+function eventTemplateConfigurationMatches(
+  template: EventTemplateRecord,
+  configuration: NormalisedEventTemplateConfiguration,
+  eventTypeId: number,
+  audienceId: number | null,
+  roleRequestPresetId: number | null,
+): boolean {
+  return (
+    template.eventTypeId === eventTypeId &&
+    template.audienceId === audienceId &&
+    template.roleRequestPresetId === roleRequestPresetId &&
+    template.name === configuration.name &&
+    template.description === configuration.description &&
+    template.timezone === configuration.timezone &&
+    template.localStartTime === configuration.localStartTime &&
+    template.durationMinutes === configuration.durationMinutes &&
+    template.signupsEnabled === configuration.signupsEnabled &&
+    template.attendanceCloseMinutesBefore ===
+      configuration.attendanceCloseMinutesBefore &&
+    template.showDetailedDeadline === configuration.showDetailedDeadline &&
+    template.publicationMode === configuration.publicationMode &&
+    template.publishMinutesBeforeStart ===
+      configuration.publishMinutesBeforeStart &&
+    template.publicationChannelId === configuration.publicationChannelId
+  );
 }
 
 function isTemplatePublicationMode(
