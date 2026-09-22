@@ -77,14 +77,16 @@ export type EventTemplateSummary = {
   updatedAt: Date;
 };
 
+export type EventTemplatePingRole = {
+  discordRoleId: string;
+
+  roleNameSnapshot: string;
+
+  sortOrder: number;
+};
+
 export type EventTemplateDetail = EventTemplateRecord & {
-  pingRoles: {
-    discordRoleId: string;
-
-    roleNameSnapshot: string;
-
-    sortOrder: number;
-  }[];
+  pingRoles: EventTemplatePingRole[];
 
   organiserDefaults: {
     slot: string;
@@ -263,6 +265,42 @@ export type EditEventTemplateResult =
         | EventTemplateConfigurationInvalidReason
         | "preset_requires_role_requests"
         | "no_changes_requested";
+    };
+
+export type ReplaceEventTemplatePingRolesInput = {
+  guildDatabaseId: number;
+
+  templateId: number;
+
+  /*
+   * Complete intended collection.
+   *
+   * Array order becomes the authoritative reusable role order.
+   * An empty array explicitly clears all template ping roles.
+   */
+  pingRoles: {
+    discordRoleId: string;
+
+    roleNameSnapshot: string;
+  }[];
+};
+
+export type ReplaceEventTemplatePingRolesResult =
+  | {
+      kind: "updated" | "unchanged";
+
+      pingRoles: EventTemplatePingRole[];
+    }
+  | {
+      kind: "template_not_found";
+    }
+  | {
+      kind: "invalid_input";
+
+      reason:
+        | "invalid_discord_role_id"
+        | "invalid_role_name"
+        | "duplicate_discord_role";
     };
 
 export type GetEventTemplateInput = {
@@ -865,6 +903,154 @@ export async function editEventTemplate(
 }
 
 /**
+ * Replaces the complete reusable ping-role collection for one template.
+ *
+ * Array order is authoritative and is persisted as contiguous sortOrder
+ * values beginning at zero.
+ *
+ * Generation takes FOR SHARE on the template parent. This mutation takes
+ * FOR UPDATE before reading or replacing child rows so generation observes
+ * either the complete old collection or the complete new collection.
+ *
+ * Existing generated events are independent and are never rewritten here.
+ */
+export async function replaceEventTemplatePingRoles(
+  input: ReplaceEventTemplatePingRolesInput,
+): Promise<ReplaceEventTemplatePingRolesResult> {
+  const normalisedRoles: EventTemplatePingRole[] = [];
+
+  const seenRoleIds = new Set<string>();
+
+  for (const [index, role] of input.pingRoles.entries()) {
+    const discordRoleId = role.discordRoleId.trim();
+
+    if (discordRoleId.length === 0) {
+      return {
+        kind: "invalid_input",
+
+        reason: "invalid_discord_role_id",
+      };
+    }
+
+    if (seenRoleIds.has(discordRoleId)) {
+      return {
+        kind: "invalid_input",
+
+        reason: "duplicate_discord_role",
+      };
+    }
+
+    seenRoleIds.add(discordRoleId);
+
+    const roleNameSnapshot = role.roleNameSnapshot.trim();
+
+    if (roleNameSnapshot.length === 0 || roleNameSnapshot.length > 100) {
+      return {
+        kind: "invalid_input",
+
+        reason: "invalid_role_name",
+      };
+    }
+
+    normalisedRoles.push({
+      discordRoleId,
+
+      roleNameSnapshot,
+
+      sortOrder: index,
+    });
+  }
+
+  return db.transaction(async (transaction) => {
+    /*
+     * Lock the reusable aggregate parent before touching child state.
+     *
+     * This is the same mutation/generation concurrency boundary used by core
+     * edits and lifecycle changes.
+     */
+    const [template] = await transaction
+      .select({
+        id: eventTemplates.id,
+      })
+      .from(eventTemplates)
+      .where(
+        and(
+          eq(eventTemplates.id, input.templateId),
+
+          eq(eventTemplates.ownerGuildId, input.guildDatabaseId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    if (!template) {
+      return {
+        kind: "template_not_found",
+      } as const;
+    }
+
+    const existingRoles = await transaction
+      .select({
+        discordRoleId: eventTemplatePingRoles.discordRoleId,
+
+        roleNameSnapshot: eventTemplatePingRoles.roleNameSnapshot,
+
+        sortOrder: eventTemplatePingRoles.sortOrder,
+      })
+      .from(eventTemplatePingRoles)
+      .where(eq(eventTemplatePingRoles.templateId, template.id))
+      .orderBy(
+        asc(eventTemplatePingRoles.sortOrder),
+
+        asc(eventTemplatePingRoles.discordRoleId),
+      );
+
+    if (eventTemplatePingRolesMatch(existingRoles, normalisedRoles)) {
+      return {
+        kind: "unchanged",
+
+        pingRoles: existingRoles,
+      } as const;
+    }
+
+    await transaction
+      .delete(eventTemplatePingRoles)
+      .where(eq(eventTemplatePingRoles.templateId, template.id));
+
+    if (normalisedRoles.length > 0) {
+      await transaction.insert(eventTemplatePingRoles).values(
+        normalisedRoles.map((role) => ({
+          templateId: template.id,
+
+          discordRoleId: role.discordRoleId,
+
+          roleNameSnapshot: role.roleNameSnapshot,
+
+          sortOrder: role.sortOrder,
+        })),
+      );
+    }
+
+    /*
+     * Child collection changes are meaningful template mutations too.
+     * Keep the parent timestamp useful for administration/list views.
+     */
+    await transaction
+      .update(eventTemplates)
+      .set({
+        updatedAt: new Date(),
+      })
+      .where(eq(eventTemplates.id, template.id));
+
+    return {
+      kind: "updated",
+
+      pingRoles: normalisedRoles,
+    } as const;
+  });
+}
+
+/**
  * Lists every reusable template owned by one guild.
  *
  * Inactive templates remain visible because lifecycle state is reversible
@@ -1292,6 +1478,26 @@ function isTemplatePublicationMode(
   value: string,
 ): value is EventTemplatePublicationMode {
   return value === "manual" || value === "scheduled" || value === "immediate";
+}
+
+function eventTemplatePingRolesMatch(
+  left: EventTemplatePingRole[],
+  right: EventTemplatePingRole[],
+): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((role, index) => {
+    const other = right[index];
+
+    return (
+      other !== undefined &&
+      role.discordRoleId === other.discordRoleId &&
+      role.roleNameSnapshot === other.roleNameSnapshot &&
+      role.sortOrder === other.sortOrder
+    );
+  });
 }
 
 function isValidLocalStartTime(value: string): boolean {

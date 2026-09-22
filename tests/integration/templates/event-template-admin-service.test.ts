@@ -8,6 +8,7 @@ import {
   editEventTemplate,
   getEventTemplate,
   listEventTemplates,
+  replaceEventTemplatePingRoles,
   setEventTemplateActive,
   type CreateEventTemplateInput,
 } from "../../../src/templates/event-template-admin-service.js";
@@ -26,6 +27,10 @@ const ADMIN_USER_ID = "990000000000000003";
 const PUBLICATION_CHANNEL_ID = "990000000000000004";
 
 const PING_ROLE_ID = "990000000000000005";
+
+const SECOND_PING_ROLE_ID = "990000000000000008";
+
+const THIRD_PING_ROLE_ID = "990000000000000009";
 
 const PRIMARY_ORGANISER_ID = "990000000000000006";
 
@@ -633,6 +638,345 @@ describe("event template administration service", () => {
 
       roleRequestPresetId: null,
     });
+  });
+
+  it("replaces, orders and clears the complete template ping-role collection", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const created = await createEventTemplate(buildCreateInput(fixture));
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected ping-role fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    // Act: initial replacement
+    const firstReplacement = await replaceEventTemplatePingRoles({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      pingRoles: [
+        {
+          discordRoleId: `  ${SECOND_PING_ROLE_ID}  `,
+
+          roleNameSnapshot: "  Events  ",
+        },
+        {
+          discordRoleId: PING_ROLE_ID,
+
+          roleNameSnapshot: "Naval",
+        },
+      ],
+    });
+
+    // Assert
+    expect(firstReplacement).toEqual({
+      kind: "updated",
+
+      pingRoles: [
+        {
+          discordRoleId: SECOND_PING_ROLE_ID,
+
+          roleNameSnapshot: "Events",
+
+          sortOrder: 0,
+        },
+        {
+          discordRoleId: PING_ROLE_ID,
+
+          roleNameSnapshot: "Naval",
+
+          sortOrder: 1,
+        },
+      ],
+    });
+
+    const shown = await getEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+    });
+
+    expect(shown.kind).toBe("found");
+
+    if (shown.kind !== "found") {
+      throw new Error(
+        "Expected template with replaced ping roles to remain readable.",
+      );
+    }
+
+    expect(shown.template.pingRoles).toEqual([
+      {
+        discordRoleId: SECOND_PING_ROLE_ID,
+
+        roleNameSnapshot: "Events",
+
+        sortOrder: 0,
+      },
+      {
+        discordRoleId: PING_ROLE_ID,
+
+        roleNameSnapshot: "Naval",
+
+        sortOrder: 1,
+      },
+    ]);
+
+    /*
+     * Repeating the same canonical collection is idempotent.
+     */
+    expect(
+      await replaceEventTemplatePingRoles({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        pingRoles: [
+          {
+            discordRoleId: SECOND_PING_ROLE_ID,
+
+            roleNameSnapshot: "Events",
+          },
+          {
+            discordRoleId: PING_ROLE_ID,
+
+            roleNameSnapshot: "Naval",
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "unchanged",
+
+      pingRoles: [
+        {
+          discordRoleId: SECOND_PING_ROLE_ID,
+
+          roleNameSnapshot: "Events",
+
+          sortOrder: 0,
+        },
+        {
+          discordRoleId: PING_ROLE_ID,
+
+          roleNameSnapshot: "Naval",
+
+          sortOrder: 1,
+        },
+      ],
+    });
+
+    /*
+     * An empty replacement explicitly clears the collection.
+     */
+    expect(
+      await replaceEventTemplatePingRoles({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        pingRoles: [],
+      }),
+    ).toEqual({
+      kind: "updated",
+
+      pingRoles: [],
+    });
+
+    const cleared = await getEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+    });
+
+    expect(cleared.kind).toBe("found");
+
+    if (cleared.kind !== "found") {
+      throw new Error("Expected cleared template to remain readable.");
+    }
+
+    expect(cleared.template.pingRoles).toEqual([]);
+  });
+
+  it("rejects invalid or duplicate template ping roles without changing the existing collection", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const created = await createEventTemplate(buildCreateInput(fixture));
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected ping-role validation fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    const initial = await replaceEventTemplatePingRoles({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      pingRoles: [
+        {
+          discordRoleId: PING_ROLE_ID,
+
+          roleNameSnapshot: "Naval",
+        },
+      ],
+    });
+
+    expect(initial.kind).toBe("updated");
+
+    // Act / Assert: duplicate ID after normalisation
+    expect(
+      await replaceEventTemplatePingRoles({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        pingRoles: [
+          {
+            discordRoleId: PING_ROLE_ID,
+
+            roleNameSnapshot: "Naval",
+          },
+          {
+            discordRoleId: ` ${PING_ROLE_ID} `,
+
+            roleNameSnapshot: "Duplicate",
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "duplicate_discord_role",
+    });
+
+    // Act / Assert: blank Discord role ID
+    expect(
+      await replaceEventTemplatePingRoles({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        pingRoles: [
+          {
+            discordRoleId: "   ",
+
+            roleNameSnapshot: "Naval",
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "invalid_discord_role_id",
+    });
+
+    // Act / Assert: invalid readable snapshot
+    expect(
+      await replaceEventTemplatePingRoles({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        pingRoles: [
+          {
+            discordRoleId: SECOND_PING_ROLE_ID,
+
+            roleNameSnapshot: "   ",
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "invalid_role_name",
+    });
+
+    /*
+     * None of the failed replacements touched the existing collection.
+     */
+    const stored = await getEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+    });
+
+    expect(stored.kind).toBe("found");
+
+    if (stored.kind !== "found") {
+      throw new Error(
+        "Expected template to remain readable after rejected ping-role replacements.",
+      );
+    }
+
+    expect(stored.template.pingRoles).toEqual([
+      {
+        discordRoleId: PING_ROLE_ID,
+
+        roleNameSnapshot: "Naval",
+
+        sortOrder: 0,
+      },
+    ]);
+  });
+
+  it("treats template ping-role replacement as guild-scoped administration", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const foreignFixture = await createSourceFixture(
+      pool,
+      OTHER_DISCORD_GUILD_ID,
+      "foreign",
+    );
+
+    const created = await createEventTemplate(buildCreateInput(fixture));
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected ping-role ownership fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    // Act / Assert
+    expect(
+      await replaceEventTemplatePingRoles({
+        guildDatabaseId: foreignFixture.guildId,
+
+        templateId: created.template.id,
+
+        pingRoles: [
+          {
+            discordRoleId: PING_ROLE_ID,
+
+            roleNameSnapshot: "Naval",
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "template_not_found",
+    });
+
+    const storedCount = await pool.query<{
+      count: number;
+    }>(
+      `
+          SELECT COUNT(*)::int AS "count"
+          FROM "event_template_ping_roles"
+          WHERE "template_id" = $1
+        `,
+      [created.template.id],
+    );
+
+    expect(storedCount.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
   });
 
   it("lists only the owning guild's templates and includes inactive templates", async () => {
@@ -1305,6 +1649,276 @@ describe("event template administration service", () => {
 
       if (editPromise) {
         pendingOperations.push(editPromise);
+      }
+
+      await Promise.allSettled(pendingOperations);
+
+      blockerClient.release();
+    }
+  });
+
+  it("serialises ping-role replacement behind an in-flight generation snapshot", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const created = await createEventTemplate({
+      ...buildCreateInput(fixture),
+
+      audienceId: null,
+
+      roleRequestPresetId: null,
+
+      publicationMode: "manual",
+
+      publishMinutesBeforeStart: null,
+    });
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected ping-role concurrency fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    const initialReplacement = await replaceEventTemplatePingRoles({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      pingRoles: [
+        {
+          discordRoleId: PING_ROLE_ID,
+
+          roleNameSnapshot: "Old Naval Role",
+        },
+      ],
+    });
+
+    expect(initialReplacement.kind).toBe("updated");
+
+    const blockerClient = await pool.connect();
+
+    let blockerTransactionOpen = false;
+
+    let generationPromise: ReturnType<typeof generateEventFromTemplate> | null =
+      null;
+
+    let replacementPromise: ReturnType<
+      typeof replaceEventTemplatePingRoles
+    > | null = null;
+
+    try {
+      await blockerClient.query("BEGIN");
+
+      blockerTransactionOpen = true;
+
+      /*
+       * Generation takes the template parent FOR SHARE before reading
+       * event_types. Pause it there while the source lock is definitely held.
+       */
+      await blockerClient.query(`
+        LOCK TABLE "event_types"
+        IN ACCESS EXCLUSIVE MODE
+      `);
+
+      generationPromise = generateEventFromTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        startsAt: futureStart(),
+
+        generatedByUserId: ADMIN_USER_ID,
+      });
+
+      await waitForBlockedDatabaseQuery(
+        pool,
+
+        '%from "event_types"%',
+      );
+
+      let replacementResolved = false;
+
+      replacementPromise = replaceEventTemplatePingRoles({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        pingRoles: [
+          {
+            discordRoleId: SECOND_PING_ROLE_ID,
+
+            roleNameSnapshot: "New Events Role",
+          },
+          {
+            discordRoleId: THIRD_PING_ROLE_ID,
+
+            roleNameSnapshot: "New Naval Role",
+          },
+        ],
+      }).then((result) => {
+        replacementResolved = true;
+
+        return result;
+      });
+
+      await waitForBlockedDatabaseQuery(
+        pool,
+
+        '%from "event_templates"%for update%',
+      );
+
+      expect(replacementResolved).toBe(false);
+
+      /*
+       * Generation acquired the shared source lock first, so it must snapshot
+       * the old complete collection before replacement can commit.
+       */
+      await blockerClient.query("COMMIT");
+
+      blockerTransactionOpen = false;
+
+      const generationResult = await generationPromise;
+
+      const replacementResult = await replacementPromise;
+
+      expect(generationResult.kind).toBe("generated");
+
+      if (generationResult.kind !== "generated") {
+        throw new Error(
+          `Expected in-flight generation to succeed, received "${generationResult.kind}".`,
+        );
+      }
+
+      expect(replacementResult.kind).toBe("updated");
+
+      const firstEventRoles = await pool.query<{
+        discord_role_id: string;
+
+        role_name: string;
+
+        sort_order: number;
+      }>(
+        `
+            SELECT
+              "discord_role_id",
+              "role_name",
+              "sort_order"
+            FROM "event_ping_roles"
+            WHERE "event_id" = $1
+            ORDER BY
+              "sort_order",
+              "discord_role_id"
+          `,
+        [generationResult.event.id],
+      );
+
+      expect(firstEventRoles.rows).toEqual([
+        {
+          discord_role_id: PING_ROLE_ID,
+
+          role_name: "Old Naval Role",
+
+          sort_order: 0,
+        },
+      ]);
+
+      /*
+       * A later occurrence sees the complete replacement collection.
+       */
+      const secondGeneration = await generateEventFromTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        startsAt: new Date(futureStart().getTime() + 60 * 60_000),
+
+        generatedByUserId: ADMIN_USER_ID,
+      });
+
+      expect(secondGeneration.kind).toBe("generated");
+
+      if (secondGeneration.kind !== "generated") {
+        throw new Error(
+          `Expected later generation to succeed, received "${secondGeneration.kind}".`,
+        );
+      }
+
+      const secondEventRoles = await pool.query<{
+        discord_role_id: string;
+
+        role_name: string;
+
+        sort_order: number;
+      }>(
+        `
+            SELECT
+              "discord_role_id",
+              "role_name",
+              "sort_order"
+            FROM "event_ping_roles"
+            WHERE "event_id" = $1
+            ORDER BY
+              "sort_order",
+              "discord_role_id"
+          `,
+        [secondGeneration.event.id],
+      );
+
+      expect(secondEventRoles.rows).toEqual([
+        {
+          discord_role_id: SECOND_PING_ROLE_ID,
+
+          role_name: "New Events Role",
+
+          sort_order: 0,
+        },
+        {
+          discord_role_id: THIRD_PING_ROLE_ID,
+
+          role_name: "New Naval Role",
+
+          sort_order: 1,
+        },
+      ]);
+
+      /*
+       * The first generated event remains independent after the source edit.
+       */
+      const firstEventRolesAfterEdit = await pool.query<{
+        discord_role_id: string;
+
+        role_name: string;
+
+        sort_order: number;
+      }>(
+        `
+            SELECT
+              "discord_role_id",
+              "role_name",
+              "sort_order"
+            FROM "event_ping_roles"
+            WHERE "event_id" = $1
+            ORDER BY
+              "sort_order",
+              "discord_role_id"
+          `,
+        [generationResult.event.id],
+      );
+
+      expect(firstEventRolesAfterEdit.rows).toEqual(firstEventRoles.rows);
+    } finally {
+      if (blockerTransactionOpen) {
+        await blockerClient.query("ROLLBACK").catch(() => undefined);
+      }
+
+      const pendingOperations: Promise<unknown>[] = [];
+
+      if (generationPromise) {
+        pendingOperations.push(generationPromise);
+      }
+
+      if (replacementPromise) {
+        pendingOperations.push(replacementPromise);
       }
 
       await Promise.allSettled(pendingOperations);
