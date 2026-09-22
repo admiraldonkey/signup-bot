@@ -10,6 +10,7 @@ import {
   listEventTemplates,
   replaceEventTemplateOrganiserDefaults,
   replaceEventTemplatePingRoles,
+  replaceEventTemplateReminders,
   setEventTemplateActive,
   type CreateEventTemplateInput,
 } from "../../../src/templates/event-template-admin-service.js";
@@ -38,6 +39,8 @@ const PRIMARY_ORGANISER_ID = "990000000000000006";
 const BACKUP_ORGANISER_ID = "990000000000000010";
 
 const REMINDER_CHANNEL_ID = "990000000000000007";
+
+const SECOND_REMINDER_CHANNEL_ID = "990000000000000011";
 
 describe("event template administration service", () => {
   let pool: Pool;
@@ -1674,6 +1677,866 @@ describe("event template administration service", () => {
       expect(firstAfterReplacement.rows).toEqual([
         {
           display_name_snapshot: "Old Primary Organiser",
+        },
+      ]);
+    } finally {
+      if (blockerTransactionOpen) {
+        await blockerClient.query("ROLLBACK").catch(() => undefined);
+      }
+
+      const pendingOperations: Promise<unknown>[] = [];
+
+      if (generationPromise) {
+        pendingOperations.push(generationPromise);
+      }
+
+      if (replacementPromise) {
+        pendingOperations.push(replacementPromise);
+      }
+
+      await Promise.allSettled(pendingOperations);
+
+      blockerClient.release();
+    }
+  });
+
+  it("replaces, canonicalises and clears the complete template reminder collection", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const created = await createEventTemplate(buildCreateInput(fixture));
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected reminder fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    /*
+     * Input order is deliberately signup-close first.
+     */
+    const firstReplacement = await replaceEventTemplateReminders({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      reminders: [
+        {
+          timingReference: "  signup_close  ",
+
+          minutesBefore: 15,
+
+          message: "  Signups close soon.  ",
+
+          channelId: `  ${SECOND_REMINDER_CHANNEL_ID}  `,
+
+          pingEventRoles: false,
+        },
+        {
+          timingReference: "event_start",
+
+          minutesBefore: 30,
+
+          message: "  Event starts soon.  ",
+
+          channelId: null,
+
+          pingEventRoles: true,
+        },
+      ],
+    });
+
+    expect(firstReplacement.kind).toBe("updated");
+
+    if (firstReplacement.kind !== "updated") {
+      throw new Error(
+        `Expected reminder replacement to succeed, received "${firstReplacement.kind}".`,
+      );
+    }
+
+    expect(
+      firstReplacement.reminders.map((reminder) => ({
+        timingReference: reminder.timingReference,
+
+        minutesBefore: reminder.minutesBefore,
+
+        message: reminder.message,
+
+        channelId: reminder.channelId,
+
+        pingEventRoles: reminder.pingEventRoles,
+      })),
+    ).toEqual([
+      {
+        timingReference: "event_start",
+
+        minutesBefore: 30,
+
+        message: "Event starts soon.",
+
+        channelId: null,
+
+        pingEventRoles: true,
+      },
+      {
+        timingReference: "signup_close",
+
+        minutesBefore: 15,
+
+        message: "Signups close soon.",
+
+        channelId: SECOND_REMINDER_CHANNEL_ID,
+
+        pingEventRoles: false,
+      },
+    ]);
+
+    expect(
+      firstReplacement.reminders.every((reminder) => reminder.id > 0),
+    ).toBe(true);
+
+    /*
+     * Reordering the same logical definitions remains idempotent.
+     */
+    const unchanged = await replaceEventTemplateReminders({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      reminders: [
+        {
+          timingReference: "signup_close",
+
+          minutesBefore: 15,
+
+          message: "Signups close soon.",
+
+          channelId: SECOND_REMINDER_CHANNEL_ID,
+
+          pingEventRoles: false,
+        },
+        {
+          timingReference: "event_start",
+
+          minutesBefore: 30,
+
+          message: "Event starts soon.",
+
+          channelId: null,
+
+          pingEventRoles: true,
+        },
+      ],
+    });
+
+    expect(unchanged).toEqual({
+      kind: "unchanged",
+
+      reminders: firstReplacement.reminders,
+    });
+
+    /*
+     * Empty replacement explicitly clears reminder definitions.
+     */
+    expect(
+      await replaceEventTemplateReminders({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        reminders: [],
+      }),
+    ).toEqual({
+      kind: "updated",
+
+      reminders: [],
+    });
+
+    const cleared = await getEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+    });
+
+    expect(cleared.kind).toBe("found");
+
+    if (cleared.kind !== "found") {
+      throw new Error("Expected cleared template to remain readable.");
+    }
+
+    expect(cleared.template.reminders).toEqual([]);
+  });
+
+  it("rejects invalid template reminder definitions without changing the existing collection", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const created = await createEventTemplate(buildCreateInput(fixture));
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected reminder validation fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    const initial = await replaceEventTemplateReminders({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      reminders: [
+        {
+          timingReference: "event_start",
+
+          minutesBefore: 30,
+
+          message: "Existing reminder.",
+
+          channelId: REMINDER_CHANNEL_ID,
+
+          pingEventRoles: true,
+        },
+      ],
+    });
+
+    expect(initial.kind).toBe("updated");
+
+    // Unsupported timing language.
+    expect(
+      await replaceEventTemplateReminders({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        reminders: [
+          {
+            timingReference: "role_requests_open",
+
+            minutesBefore: 10,
+
+            message: "Invalid timing.",
+
+            channelId: null,
+
+            pingEventRoles: true,
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "invalid_timing_reference",
+    });
+
+    // Negative offset.
+    expect(
+      await replaceEventTemplateReminders({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        reminders: [
+          {
+            timingReference: "event_start",
+
+            minutesBefore: -1,
+
+            message: "Invalid offset.",
+
+            channelId: null,
+
+            pingEventRoles: true,
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "invalid_minutes_before",
+    });
+
+    // Blank message.
+    expect(
+      await replaceEventTemplateReminders({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        reminders: [
+          {
+            timingReference: "event_start",
+
+            minutesBefore: 10,
+
+            message: "   ",
+
+            channelId: null,
+
+            pingEventRoles: true,
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "invalid_message",
+    });
+
+    // Explicit fixed destination cannot be blank.
+    expect(
+      await replaceEventTemplateReminders({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        reminders: [
+          {
+            timingReference: "event_start",
+
+            minutesBefore: 10,
+
+            message: "Reminder.",
+
+            channelId: "   ",
+
+            pingEventRoles: true,
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "invalid_channel_id",
+    });
+
+    /*
+     * Disable signups while keeping the existing event-start reminder.
+     */
+    const disabled = await editEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      signupsEnabled: false,
+    });
+
+    expect(disabled.kind).toBe("updated");
+
+    // Signup-close now has no valid reference point.
+    expect(
+      await replaceEventTemplateReminders({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        reminders: [
+          {
+            timingReference: "signup_close",
+
+            minutesBefore: 10,
+
+            message: "Signups close soon.",
+
+            channelId: null,
+
+            pingEventRoles: false,
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "signup_close_requires_signups",
+    });
+
+    /*
+     * Rejected replacements never changed the existing event-start reminder.
+     */
+    const stored = await getEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+    });
+
+    expect(stored.kind).toBe("found");
+
+    if (stored.kind !== "found") {
+      throw new Error(
+        "Expected template to remain readable after rejected reminder replacements.",
+      );
+    }
+
+    expect(
+      stored.template.reminders.map((reminder) => ({
+        timingReference: reminder.timingReference,
+
+        minutesBefore: reminder.minutesBefore,
+
+        message: reminder.message,
+
+        channelId: reminder.channelId,
+
+        pingEventRoles: reminder.pingEventRoles,
+      })),
+    ).toEqual([
+      {
+        timingReference: "event_start",
+
+        minutesBefore: 30,
+
+        message: "Existing reminder.",
+
+        channelId: REMINDER_CHANNEL_ID,
+
+        pingEventRoles: true,
+      },
+    ]);
+  });
+
+  it("prevents disabling signups while signup-close template reminders still exist", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const created = await createEventTemplate(buildCreateInput(fixture));
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected signup-reminder fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    const reminderReplacement = await replaceEventTemplateReminders({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      reminders: [
+        {
+          timingReference: "signup_close",
+
+          minutesBefore: 15,
+
+          message: "Signups close soon.",
+
+          channelId: null,
+
+          pingEventRoles: false,
+        },
+      ],
+    });
+
+    expect(reminderReplacement.kind).toBe("updated");
+
+    // Act / Assert
+    expect(
+      await editEventTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        signupsEnabled: false,
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "signup_close_requires_signups",
+    });
+
+    const beforeRepair = await getEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+    });
+
+    expect(beforeRepair.kind).toBe("found");
+
+    if (beforeRepair.kind !== "found") {
+      throw new Error(
+        "Expected template to remain readable after rejected signup disable.",
+      );
+    }
+
+    expect(beforeRepair.template.signupsEnabled).toBe(true);
+
+    expect(beforeRepair.template.reminders).toHaveLength(1);
+
+    /*
+     * Repair the dependent source first, then the core edit becomes valid.
+     */
+    expect(
+      await replaceEventTemplateReminders({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        reminders: [],
+      }),
+    ).toEqual({
+      kind: "updated",
+
+      reminders: [],
+    });
+
+    const disabled = await editEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      signupsEnabled: false,
+    });
+
+    expect(disabled.kind).toBe("updated");
+
+    if (disabled.kind !== "updated") {
+      throw new Error(
+        `Expected signups to be disabled after clearing signup-close reminders, received "${disabled.kind}".`,
+      );
+    }
+
+    expect(disabled.template.signupsEnabled).toBe(false);
+  });
+
+  it("treats template reminder replacement as guild-scoped administration", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const foreignFixture = await createSourceFixture(
+      pool,
+      OTHER_DISCORD_GUILD_ID,
+      "foreign",
+    );
+
+    const created = await createEventTemplate(buildCreateInput(fixture));
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected reminder ownership fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    // Act / Assert
+    expect(
+      await replaceEventTemplateReminders({
+        guildDatabaseId: foreignFixture.guildId,
+
+        templateId: created.template.id,
+
+        reminders: [
+          {
+            timingReference: "event_start",
+
+            minutesBefore: 30,
+
+            message: "Reminder.",
+
+            channelId: null,
+
+            pingEventRoles: true,
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "template_not_found",
+    });
+
+    const storedCount = await pool.query<{
+      count: number;
+    }>(
+      `
+          SELECT COUNT(*)::int AS "count"
+          FROM "event_template_reminders"
+          WHERE "template_id" = $1
+        `,
+      [created.template.id],
+    );
+
+    expect(storedCount.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+  });
+
+  it("serialises reminder replacement behind an in-flight generation snapshot", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const created = await createEventTemplate({
+      ...buildCreateInput(fixture),
+
+      audienceId: null,
+
+      roleRequestPresetId: null,
+
+      publicationMode: "manual",
+
+      publishMinutesBeforeStart: null,
+    });
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected reminder concurrency fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    const initialReplacement = await replaceEventTemplateReminders({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      reminders: [
+        {
+          timingReference: "event_start",
+
+          minutesBefore: 30,
+
+          message: "Old reminder.",
+
+          channelId: REMINDER_CHANNEL_ID,
+
+          pingEventRoles: true,
+        },
+      ],
+    });
+
+    expect(initialReplacement.kind).toBe("updated");
+
+    const blockerClient = await pool.connect();
+
+    let blockerTransactionOpen = false;
+
+    let generationPromise: ReturnType<typeof generateEventFromTemplate> | null =
+      null;
+
+    let replacementPromise: ReturnType<
+      typeof replaceEventTemplateReminders
+    > | null = null;
+
+    try {
+      await blockerClient.query("BEGIN");
+
+      blockerTransactionOpen = true;
+
+      /*
+       * Generation locks the template parent FOR SHARE before reading the
+       * event type. Pause it there while the shared source lock is held.
+       */
+      await blockerClient.query(`
+        LOCK TABLE "event_types"
+        IN ACCESS EXCLUSIVE MODE
+      `);
+
+      generationPromise = generateEventFromTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        startsAt: futureStart(),
+
+        generatedByUserId: ADMIN_USER_ID,
+      });
+
+      await waitForBlockedDatabaseQuery(
+        pool,
+
+        '%from "event_types"%',
+      );
+
+      let replacementResolved = false;
+
+      replacementPromise = replaceEventTemplateReminders({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        reminders: [
+          {
+            timingReference: "event_start",
+
+            minutesBefore: 10,
+
+            message: "New start reminder.",
+
+            channelId: null,
+
+            pingEventRoles: true,
+          },
+          {
+            timingReference: "signup_close",
+
+            minutesBefore: 15,
+
+            message: "New signup reminder.",
+
+            channelId: REMINDER_CHANNEL_ID,
+
+            pingEventRoles: false,
+          },
+        ],
+      }).then((result) => {
+        replacementResolved = true;
+
+        return result;
+      });
+
+      await waitForBlockedDatabaseQuery(
+        pool,
+
+        '%from "event_templates"%for update%',
+      );
+
+      expect(replacementResolved).toBe(false);
+
+      /*
+       * The in-flight generation owns the old complete reminder source graph.
+       */
+      await blockerClient.query("COMMIT");
+
+      blockerTransactionOpen = false;
+
+      const generationResult = await generationPromise;
+
+      const replacementResult = await replacementPromise;
+
+      expect(generationResult.kind).toBe("generated");
+
+      if (generationResult.kind !== "generated") {
+        throw new Error(
+          `Expected in-flight generation to succeed, received "${generationResult.kind}".`,
+        );
+      }
+
+      expect(replacementResult.kind).toBe("updated");
+
+      const firstEventReminders = await pool.query<{
+        timing_reference: string;
+
+        minutes_before: number;
+
+        message: string;
+
+        channel_id: string;
+
+        ping_event_roles: boolean;
+      }>(
+        `
+            SELECT
+              "timing_reference",
+              "minutes_before",
+              "message",
+              "channel_id",
+              "ping_event_roles"
+            FROM "event_reminders"
+            WHERE "event_id" = $1
+            ORDER BY "id"
+          `,
+        [generationResult.event.id],
+      );
+
+      expect(firstEventReminders.rows).toEqual([
+        {
+          timing_reference: "event_start",
+
+          minutes_before: 30,
+
+          message: "Old reminder.",
+
+          channel_id: REMINDER_CHANNEL_ID,
+
+          ping_event_roles: true,
+        },
+      ]);
+
+      /*
+       * A later occurrence sees the complete replacement definition set.
+       */
+      const secondGeneration = await generateEventFromTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        startsAt: new Date(futureStart().getTime() + 60 * 60_000),
+
+        generatedByUserId: ADMIN_USER_ID,
+      });
+
+      expect(secondGeneration.kind).toBe("generated");
+
+      if (secondGeneration.kind !== "generated") {
+        throw new Error(
+          `Expected later generation to succeed, received "${secondGeneration.kind}".`,
+        );
+      }
+
+      const secondEventReminders = await pool.query<{
+        timing_reference: string;
+
+        minutes_before: number;
+
+        message: string;
+
+        channel_id: string;
+
+        ping_event_roles: boolean;
+      }>(
+        `
+            SELECT
+              "timing_reference",
+              "minutes_before",
+              "message",
+              "channel_id",
+              "ping_event_roles"
+            FROM "event_reminders"
+            WHERE "event_id" = $1
+            ORDER BY
+              "timing_reference",
+              "minutes_before"
+          `,
+        [secondGeneration.event.id],
+      );
+
+      expect(secondEventReminders.rows).toEqual([
+        {
+          timing_reference: "event_start",
+
+          minutes_before: 10,
+
+          message: "New start reminder.",
+
+          channel_id: PUBLICATION_CHANNEL_ID,
+
+          ping_event_roles: true,
+        },
+        {
+          timing_reference: "signup_close",
+
+          minutes_before: 15,
+
+          message: "New signup reminder.",
+
+          channel_id: REMINDER_CHANNEL_ID,
+
+          ping_event_roles: false,
+        },
+      ]);
+
+      /*
+       * The first occurrence permanently retains its old reminder snapshot.
+       */
+      const firstAfterReplacement = await pool.query<{
+        message: string;
+      }>(
+        `
+            SELECT "message"
+            FROM "event_reminders"
+            WHERE "event_id" = $1
+          `,
+        [generationResult.event.id],
+      );
+
+      expect(firstAfterReplacement.rows).toEqual([
+        {
+          message: "Old reminder.",
         },
       ]);
     } finally {

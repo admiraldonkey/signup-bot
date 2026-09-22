@@ -11,6 +11,7 @@ import {
   eventTypes,
   roleRequestPresets,
 } from "../db/schema.js";
+import type { ReminderTimingReference } from "../reminders/reminder-scheduling.js";
 import { isValidEventTimezone } from "../time/timezones.js";
 
 export type EventTemplatePublicationMode = "manual" | "scheduled" | "immediate";
@@ -95,24 +96,49 @@ export type EventTemplateOrganiserDefault = {
   displayNameSnapshot: string;
 };
 
+export type EventTemplateReminderDefinition = {
+  id: number;
+
+  timingReference: ReminderTimingReference;
+
+  minutesBefore: number;
+
+  message: string;
+
+  channelId: string | null;
+
+  pingEventRoles: boolean;
+};
+
+export type EventTemplateReminderInput = {
+  timingReference: string;
+
+  minutesBefore: number;
+
+  message: string;
+
+  /*
+   * null means inherit the generated event's resolved publication
+   * destination when an occurrence is generated.
+   */
+  channelId: string | null;
+
+  pingEventRoles: boolean;
+};
+
+export type EventTemplateReminderInvalidReason =
+  | "invalid_timing_reference"
+  | "invalid_minutes_before"
+  | "invalid_message"
+  | "invalid_channel_id"
+  | "signup_close_requires_signups";
+
 export type EventTemplateDetail = EventTemplateRecord & {
   pingRoles: EventTemplatePingRole[];
 
   organiserDefaults: EventTemplateOrganiserDefault[];
 
-  reminders: {
-    id: number;
-
-    timingReference: string;
-
-    minutesBefore: number;
-
-    message: string;
-
-    channelId: string | null;
-
-    pingEventRoles: boolean;
-  }[];
+  reminders: EventTemplateReminderDefinition[];
 };
 
 export type CreateEventTemplateInput = {
@@ -268,6 +294,7 @@ export type EditEventTemplateResult =
       reason:
         | EventTemplateConfigurationInvalidReason
         | "preset_requires_role_requests"
+        | "signup_close_requires_signups"
         | "no_changes_requested";
     };
 
@@ -350,6 +377,35 @@ export type ReplaceEventTemplateOrganiserDefaultsResult =
         | "duplicate_slot"
         | "duplicate_discord_user"
         | "backup_requires_primary";
+    };
+
+export type ReplaceEventTemplateRemindersInput = {
+  guildDatabaseId: number;
+
+  templateId: number;
+
+  /*
+   * Complete intended reminder collection.
+   *
+   * Input order is not semantically significant.
+   * An empty array explicitly clears all reusable reminder definitions.
+   */
+  reminders: EventTemplateReminderInput[];
+};
+
+export type ReplaceEventTemplateRemindersResult =
+  | {
+      kind: "updated" | "unchanged";
+
+      reminders: EventTemplateReminderDefinition[];
+    }
+  | {
+      kind: "template_not_found";
+    }
+  | {
+      kind: "invalid_input";
+
+      reason: EventTemplateReminderInvalidReason;
     };
 
 export type GetEventTemplateInput = {
@@ -437,9 +493,9 @@ const eventTemplateSelection = {
 /**
  * Creates one reusable template parent.
  *
- * Child collections remain separate authoritative mutations. This keeps
- * template creation usable before ping-role, organiser and reminder editing
- * services are introduced.
+ * Child collections remain separate authoritative mutations so parent
+ * creation does not couple core template configuration to collection-editing
+ * workflows.
  */
 export async function createEventTemplate(
   input: CreateEventTemplateInput,
@@ -761,6 +817,40 @@ export async function editEventTemplate(
     }
 
     const configuration = configurationResult.configuration;
+
+    /*
+     * A signup-close reminder requires a signup-close reference point.
+     *
+     * Do not allow a core edit to disable signups while such reusable reminder
+     * definitions still exist. The administrator can clear or replace those
+     * reminders first, then disable signups in a subsequent edit.
+     *
+     * The template parent is already FOR UPDATE, so a correctly implemented
+     * reminder replacement cannot interleave with this check.
+     */
+    if (input.signupsEnabled !== undefined && !configuration.signupsEnabled) {
+      const [signupCloseReminder] = await transaction
+        .select({
+          id: eventTemplateReminders.id,
+        })
+        .from(eventTemplateReminders)
+        .where(
+          and(
+            eq(eventTemplateReminders.templateId, template.id),
+
+            eq(eventTemplateReminders.timingReference, "signup_close"),
+          ),
+        )
+        .limit(1);
+
+      if (signupCloseReminder) {
+        return {
+          kind: "invalid_input",
+
+          reason: "signup_close_requires_signups",
+        } as const;
+      }
+    }
 
     /*
      * Only newly-requested reusable relationships require their active-state
@@ -1304,6 +1394,212 @@ export async function replaceEventTemplateOrganiserDefaults(
 }
 
 /**
+ * Replaces the complete reusable reminder-definition collection for one
+ * template.
+ *
+ * Input order is not semantically significant. Definitions are canonicalised
+ * before comparison and persistence so logically identical replacement
+ * requests are idempotent.
+ *
+ * Generation takes FOR SHARE on the template parent. This mutation takes
+ * FOR UPDATE before reading or replacing child rows so generation observes
+ * either the complete old reminder source state or the complete new state.
+ *
+ * Existing generated event reminders are independent and are never rewritten
+ * here.
+ */
+export async function replaceEventTemplateReminders(
+  input: ReplaceEventTemplateRemindersInput,
+): Promise<ReplaceEventTemplateRemindersResult> {
+  const normalisedReminders: NormalisedEventTemplateReminder[] = [];
+
+  for (const reminder of input.reminders) {
+    const timingReference = reminder.timingReference.trim();
+
+    if (!isEventTemplateReminderTimingReference(timingReference)) {
+      return {
+        kind: "invalid_input",
+
+        reason: "invalid_timing_reference",
+      };
+    }
+
+    if (!isPostgresNonNegativeInteger(reminder.minutesBefore)) {
+      return {
+        kind: "invalid_input",
+
+        reason: "invalid_minutes_before",
+      };
+    }
+
+    const message = reminder.message.trim();
+
+    if (message.length === 0) {
+      return {
+        kind: "invalid_input",
+
+        reason: "invalid_message",
+      };
+    }
+
+    let channelId: string | null = null;
+
+    if (reminder.channelId !== null) {
+      channelId = reminder.channelId.trim();
+
+      if (channelId.length === 0) {
+        return {
+          kind: "invalid_input",
+
+          reason: "invalid_channel_id",
+        };
+      }
+    }
+
+    normalisedReminders.push({
+      timingReference,
+
+      minutesBefore: reminder.minutesBefore,
+
+      message,
+
+      channelId,
+
+      pingEventRoles: reminder.pingEventRoles,
+    });
+  }
+
+  normalisedReminders.sort(compareEventTemplateReminders);
+
+  return db.transaction(async (transaction) => {
+    /*
+     * Lock the reusable aggregate parent before validating compatibility or
+     * changing child reminder definitions.
+     */
+    const [template] = await transaction
+      .select({
+        id: eventTemplates.id,
+
+        signupsEnabled: eventTemplates.signupsEnabled,
+      })
+      .from(eventTemplates)
+      .where(
+        and(
+          eq(eventTemplates.id, input.templateId),
+
+          eq(eventTemplates.ownerGuildId, input.guildDatabaseId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    if (!template) {
+      return {
+        kind: "template_not_found",
+      } as const;
+    }
+
+    if (
+      !template.signupsEnabled &&
+      normalisedReminders.some(
+        (reminder) => reminder.timingReference === "signup_close",
+      )
+    ) {
+      return {
+        kind: "invalid_input",
+
+        reason: "signup_close_requires_signups",
+      } as const;
+    }
+
+    const existingRows = await transaction
+      .select({
+        id: eventTemplateReminders.id,
+
+        timingReference: eventTemplateReminders.timingReference,
+
+        minutesBefore: eventTemplateReminders.minutesBefore,
+
+        message: eventTemplateReminders.message,
+
+        channelId: eventTemplateReminders.channelId,
+
+        pingEventRoles: eventTemplateReminders.pingEventRoles,
+      })
+      .from(eventTemplateReminders)
+      .where(eq(eventTemplateReminders.templateId, template.id))
+      .orderBy(asc(eventTemplateReminders.id));
+
+    const existingReminders: EventTemplateReminderDefinition[] =
+      existingRows.map(eventTemplateReminderFromRow);
+
+    if (eventTemplateRemindersMatch(existingReminders, normalisedReminders)) {
+      return {
+        kind: "unchanged",
+
+        reminders: existingReminders,
+      } as const;
+    }
+
+    await transaction
+      .delete(eventTemplateReminders)
+      .where(eq(eventTemplateReminders.templateId, template.id));
+
+    if (normalisedReminders.length > 0) {
+      await transaction.insert(eventTemplateReminders).values(
+        normalisedReminders.map((reminder) => ({
+          templateId: template.id,
+
+          timingReference: reminder.timingReference,
+
+          minutesBefore: reminder.minutesBefore,
+
+          message: reminder.message,
+
+          channelId: reminder.channelId,
+
+          pingEventRoles: reminder.pingEventRoles,
+        })),
+      );
+    }
+
+    const persistedRows = await transaction
+      .select({
+        id: eventTemplateReminders.id,
+
+        timingReference: eventTemplateReminders.timingReference,
+
+        minutesBefore: eventTemplateReminders.minutesBefore,
+
+        message: eventTemplateReminders.message,
+
+        channelId: eventTemplateReminders.channelId,
+
+        pingEventRoles: eventTemplateReminders.pingEventRoles,
+      })
+      .from(eventTemplateReminders)
+      .where(eq(eventTemplateReminders.templateId, template.id))
+      .orderBy(asc(eventTemplateReminders.id));
+
+    const persistedReminders: EventTemplateReminderDefinition[] =
+      persistedRows.map(eventTemplateReminderFromRow);
+
+    await transaction
+      .update(eventTemplates)
+      .set({
+        updatedAt: new Date(),
+      })
+      .where(eq(eventTemplates.id, template.id));
+
+    return {
+      kind: "updated",
+
+      reminders: persistedReminders,
+    } as const;
+  });
+}
+
+/**
  * Lists every reusable template owned by one guild.
  *
  * Inactive templates remain visible because lifecycle state is reversible
@@ -1344,9 +1640,9 @@ export async function listEventTemplates(
 /**
  * Reads one complete reusable template source graph.
  *
- * The parent FOR SHARE lock pairs with the FOR UPDATE mutation contract.
- * Future child editing services must lock this parent before changing child
- * rows, so inspection observes one coherent source graph.
+ * The parent FOR SHARE lock pairs with the FOR UPDATE mutation contract used
+ * by core and child editing services, so inspection observes one coherent
+ * source graph.
  */
 export async function getEventTemplate(
   input: GetEventTemplateInput,
@@ -1413,7 +1709,7 @@ export async function getEventTemplate(
         left.discordUserId.localeCompare(right.discordUserId),
     );
 
-    const reminders = await transaction
+    const reminderRows = await transaction
       .select({
         id: eventTemplateReminders.id,
 
@@ -1430,6 +1726,10 @@ export async function getEventTemplate(
       .from(eventTemplateReminders)
       .where(eq(eventTemplateReminders.templateId, template.id))
       .orderBy(asc(eventTemplateReminders.id));
+
+    const reminders: EventTemplateReminderDefinition[] = reminderRows.map(
+      eventTemplateReminderFromRow,
+    );
 
     return {
       kind: "found",
@@ -1733,6 +2033,144 @@ function eventTemplateConfigurationMatches(
     template.publishMinutesBeforeStart ===
       configuration.publishMinutesBeforeStart &&
     template.publicationChannelId === configuration.publicationChannelId
+  );
+}
+
+type NormalisedEventTemplateReminder = Omit<
+  EventTemplateReminderDefinition,
+  "id"
+>;
+
+function eventTemplateReminderFromRow(reminder: {
+  id: number;
+
+  timingReference: string;
+
+  minutesBefore: number;
+
+  message: string;
+
+  channelId: string | null;
+
+  pingEventRoles: boolean;
+}): EventTemplateReminderDefinition {
+  return {
+    id: reminder.id,
+
+    timingReference: requireEventTemplateReminderTimingReference(
+      reminder.timingReference,
+    ),
+
+    minutesBefore: reminder.minutesBefore,
+
+    message: reminder.message,
+
+    channelId: reminder.channelId,
+
+    pingEventRoles: reminder.pingEventRoles,
+  };
+}
+
+function eventTemplateRemindersMatch(
+  existing: EventTemplateReminderDefinition[],
+  intended: NormalisedEventTemplateReminder[],
+): boolean {
+  if (existing.length !== intended.length) {
+    return false;
+  }
+
+  const existingCanonical = existing
+    .map(
+      (reminder): NormalisedEventTemplateReminder => ({
+        timingReference: reminder.timingReference,
+
+        minutesBefore: reminder.minutesBefore,
+
+        message: reminder.message,
+
+        channelId: reminder.channelId,
+
+        pingEventRoles: reminder.pingEventRoles,
+      }),
+    )
+    .sort(compareEventTemplateReminders);
+
+  const intendedCanonical = [...intended].sort(compareEventTemplateReminders);
+
+  return existingCanonical.every((reminder, index) => {
+    const other = intendedCanonical[index];
+
+    return (
+      other !== undefined &&
+      reminder.timingReference === other.timingReference &&
+      reminder.minutesBefore === other.minutesBefore &&
+      reminder.message === other.message &&
+      reminder.channelId === other.channelId &&
+      reminder.pingEventRoles === other.pingEventRoles
+    );
+  });
+}
+
+function compareEventTemplateReminders(
+  left: NormalisedEventTemplateReminder,
+  right: NormalisedEventTemplateReminder,
+): number {
+  const timingDifference =
+    eventTemplateReminderTimingOrder(left.timingReference) -
+    eventTemplateReminderTimingOrder(right.timingReference);
+
+  if (timingDifference !== 0) {
+    return timingDifference;
+  }
+
+  if (left.minutesBefore !== right.minutesBefore) {
+    return left.minutesBefore - right.minutesBefore;
+  }
+
+  const channelDifference = (left.channelId ?? "").localeCompare(
+    right.channelId ?? "",
+  );
+
+  if (channelDifference !== 0) {
+    return channelDifference;
+  }
+
+  const messageDifference = left.message.localeCompare(right.message);
+
+  if (messageDifference !== 0) {
+    return messageDifference;
+  }
+
+  return Number(left.pingEventRoles) - Number(right.pingEventRoles);
+}
+
+function eventTemplateReminderTimingOrder(
+  value: ReminderTimingReference,
+): number {
+  switch (value) {
+    case "event_start":
+      return 0;
+
+    case "signup_close":
+      return 1;
+  }
+}
+
+function isEventTemplateReminderTimingReference(
+  value: string,
+): value is ReminderTimingReference {
+  return value === "event_start" || value === "signup_close";
+}
+
+function requireEventTemplateReminderTimingReference(
+  value: string,
+): ReminderTimingReference {
+  if (isEventTemplateReminderTimingReference(value)) {
+    return value;
+  }
+
+  throw new Error(
+    `Unsupported event-template reminder timing reference "${value}".`,
   );
 }
 
