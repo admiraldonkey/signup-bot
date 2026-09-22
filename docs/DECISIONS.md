@@ -2699,41 +2699,45 @@ Do not assume the public branch contains a local uncommitted fix.
 
 These decisions describe the durable architectural direction for P1 templates and later recurrence.
 
-P1.1 schema reconciliation is complete.
+The template source schema and one-off generation service are implemented.
 
-It established the reusable template source model and removed obsolete pre-preset scaffolding, but it did **not** implement template generation, administrator-facing template commands, or recurrence.
+Administrator-facing template creation/editing/lifecycle commands and recurrence remain future work.
 
-D120 records why the original scaffolding could be revised rather than preserved.
+D120 records why the original template scaffolding could be revised rather than preserved.
 
-D134 records the current template source/runtime boundary established by P1.1.
+D134 records the current reusable-source versus generated-event ownership boundary.
 
-Decisions below that remain marked **Planned** describe behaviour that is still to be implemented.
-
-The durable principles are:
+The current durable principles are:
 
 ```text
 template = reusable source
 
 generated event = ordinary independent event
 
+one-off generation = atomic PostgreSQL transaction
+
 organiser defaults = optional event organiser snapshots
 
-reminder defaults = event reminder snapshots
+reminder defaults = ordinary event reminder snapshots
 
 role-request configuration = established preset snapshot model
 
 template edits = future generation by default
+
+generation source lock = parent FOR SHARE
+
+template mutation lock = parent FOR UPDATE
 
 recurrence identity != mutable event start time
 ```
 
 ---
 
-## D113 - Templates should generate ordinary persistent events
+## D113 - Templates generate ordinary persistent events
 
-**Status: Planned**
+**Status: Current**
 
-Future event templates should produce normal event rows.
+One-off template generation produces normal event rows through the existing event domain.
 
 Conceptually:
 
@@ -2747,130 +2751,152 @@ Generate occurrence
 ordinary persistent event
 ```
 
-A generated occurrence should then participate in the same event services as a manually-created event.
+Generated events use the same event services and runtime architecture as manually-created events.
 
 ### Reason
 
-Templates should reuse the event domain rather than create a second class of runtime event.
+Templates reuse the event domain rather than creating a second class of runtime event.
 
 ---
 
-## D114 - Template-generated events should normally exist before public publication
+## D114 - Template-generated events may exist before public publication
 
-**Status: Planned**
+**Status: Current**
 
-Future occurrence generation should support a preparation period:
+Generation creates a persistent event before Discord publication.
+
+Scheduled generation can therefore establish:
 
 ```text
-generate occurrence internally
+generated event
         |
-        +---- assign dormant organisers
-        |
-        +---- create reminders
-        |
-        +---- snapshot role-request configuration
-        |
-        +---- allow administrator edits
+        +---- dormant organisers
+        +---- reminders
+        +---- role-request snapshots
+        +---- durable future work
         |
         v
-scheduled public publication
+later public publication
 ```
+
+Manual generation also creates a real unpublished event.
+
+Immediate generation still commits authoritative database state before the external Discord publication side effect.
 
 ### Reason
 
-Recurring event administration often begins before members should receive the event announcement.
+Event preparation and authoritative state must not depend on the Discord publication moment.
 
 ---
 
 ## D115 - Generated occurrences become independent after generation
 
-**Status: Planned**
+**Status: Current**
 
-Once an event is generated from a template, it should behave as an ordinary event.
+Once generated from a template, an event owns its runtime state.
 
-Administrators should be able to edit that occurrence independently without changing:
+Later changes to reusable source state do not rewrite the generated event.
 
-- the template
-- earlier occurrences
-- later already-generated occurrences
+PostgreSQL integration coverage verifies independence from later changes to:
+
+- template core fields
+- template ping roles
+- template organiser defaults
+- template reminders
+- referenced preset options
+- guild default publication destination
+
+Administrators may therefore treat the generated event as an ordinary independently-editable event.
 
 ### Reason
 
-One week's event may need a different:
-
-- start time
-- organiser
-- description
-- reminder
-- role-request configuration
-
-without redefining the recurring series.
+One occurrence may require different configuration without redefining reusable source state or rewriting neighbouring events.
 
 ---
 
-## D116 - Template edits should affect newly-generated occurrences by default
+## D116 - Template edits affect future generation by default
 
-**Status: Planned**
+**Status: Current generation contract; administration pending**
 
-Changing a template should normally affect occurrences generated afterwards.
+Generation reads the current reusable template source when each event is created.
 
-It should not automatically rewrite already-generated events.
+Already-generated event state is not rewritten when the source later changes.
 
-A future explicit propagation feature could be designed separately.
+Future administrator mutation services must preserve this contract.
+
+An explicit propagation feature, if ever useful, must be designed separately.
 
 ### Reason
 
-Existing occurrences may already have manual customisations or published state.
+Existing generated events may already contain manual customisation, published state, signups, requests, reminders, or organiser history.
 
 Implicit propagation would be destructive and difficult to reason about.
 
 ---
 
-## D117 - Template organiser defaults should snapshot into dormant event assignments
+## D117 - Template organiser defaults snapshot into dormant event assignments
 
-**Status: Planned**
+**Status: Current**
 
-A template may eventually provide primary and backup organiser defaults.
-
-When an occurrence is generated, those defaults should become ordinary dormant event organiser assignments.
-
-The template itself should not become runtime organiser ownership.
-
----
-
-## D118 - Template reminder definitions should snapshot into ordinary event reminders
-
-**Status: Planned**
-
-A template may define reminders such as:
+Template primary and backup organiser defaults become ordinary dormant:
 
 ```text
-10 minutes before signup close
-10 minutes before event start
+event_organiser_assignments
 ```
 
-Generated occurrences should receive normal event-level reminder rows and normal durable scheduler actions.
+during generation when organiser functionality is enabled.
 
-Later template changes should not rewrite those reminder instances automatically.
+The template itself does not become runtime organiser ownership.
+
+If organisers are disabled for the guild, template generation still succeeds and organiser assignments are omitted.
 
 ---
 
-## D119 - Template role-request configuration should reuse the established snapshot model
+## D118 - Template reminder definitions snapshot into ordinary event reminders
 
-**Status: Planned**
+**Status: Current**
 
-Future templates should not create an incompatible second reusable role-request architecture.
+Template reminder definitions become normal:
 
-The preferred direction is to reuse:
+```text
+event_reminders
+```
 
-- role-request presets
-- event-level role options
-- event-level request groups
-- existing application/snapshot services
+plus their ordinary durable scheduled actions during generation.
+
+Fixed reminder destinations remain fixed.
+
+Null reminder destinations resolve once through the generated event publication destination.
+
+Later template reminder changes do not rewrite existing event reminders.
+
+---
+
+## D119 - Template role-request configuration reuses the established snapshot model
+
+**Status: Current**
+
+Templates do not own a second reusable role-request architecture.
+
+A template may reference zero or one reusable role-request preset.
+
+During generation, the existing preset application service snapshots that source into ordinary event-owned:
+
+- role options
+- qualification roles
+- request groups
+- group-option mappings
+- notification roles
+- durable group actions
+- preset provenance
+
+Preset application occurs inside the same authoritative generation transaction.
+
+A preset failure aborts generation rather than committing a partially-generated event.
 
 ### Reason
 
-The preset subsystem already solves qualification, groups, channels, scheduling, mappings, and independent event ownership.
+The preset subsystem already solves qualification, groups, channels, scheduling, mappings, locking, and independent event ownership.
 
 ---
 
@@ -3490,7 +3516,7 @@ Treating confirmed Discord deletion separately from unexpected transport failure
 
 ## D134 - Template source state is separate from generated event-owned state
 
-**Status: Current schema contract**
+**Status: Current**
 
 P1 templates are reusable source configuration.
 
@@ -3505,7 +3531,7 @@ event_templates
     +---- optional role_request_preset_id
 ```
 
-Generation must copy or resolve that reusable state into ordinary event-owned state.
+Generation copies or resolves that reusable state into ordinary event-owned state inside one authoritative PostgreSQL transaction.
 
 The generated event must not continuously consult the current template definition.
 

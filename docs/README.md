@@ -221,13 +221,25 @@ Current major development phase:
 P1 — Event Templates
 ```
 
+Implemented P1 foundations now include:
+
+```text
+template schema reconciliation
+transaction-aware snapshot services
+atomic one-off template generation
+generation snapshot independence
+template source-lock concurrency contract
+```
+
 Immediate task:
 
 ```text
-P1 — establish transaction-aware service boundaries for atomic one-off template generation
+P1 — establish template administration and lifecycle services
 ```
 
-The P1.1 template-schema reconciliation is complete. Administrator-facing template commands and generation behaviour are not yet implemented.
+The next implementation should remain service-first.
+
+Build the reusable persistence/domain boundary for template creation, inspection, listing, active/inactive lifecycle, and mutation locking before adding Discord command adapters.
 
 See:
 

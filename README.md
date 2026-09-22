@@ -678,6 +678,7 @@ The migration chain is exercised through PostgreSQL-backed integration testing.
 │   ├── reminders/
 │   ├── role-requests/
 │   ├── scheduler/
+│   ├── templates/
 │   ├── time/
 │   └── index.ts
 ├── tests/
@@ -738,55 +739,91 @@ The current major feature area is:
 Event Templates
 ```
 
-The P1.1 template-schema reconciliation is complete.
+The P1 template persistence and one-off generation foundations are now implemented.
 
-The repository now has the persistent source model required for future template behaviour, including:
+Current template infrastructure includes:
 
 - reusable template event defaults
-- ordered template ping roles
+- ordered template ping-role source state
 - optional primary/backup organiser defaults
 - reusable reminder definitions
 - an optional reusable role-request preset reference
-- explicit template publication intent
+- explicit manual, scheduled, and immediate publication intent
 - source-template provenance on generated events
+- atomic one-off generation into ordinary persistent events
+- PostgreSQL-backed snapshot independence
+- deterministic source-lock concurrency coverage
 
-Template administrator commands and generation behaviour are not yet implemented.
+One-off generation is implemented in:
 
-The immediate implementation focus is establishing reusable transaction-aware service boundaries so one-off template generation can create an ordinary event and all required snapshot state atomically.
+```text
+src/templates/event-template-generation-service.ts
+```
 
-After one-off template generation is stable, planned work moves into recurring event generation.
+Generation creates ordinary event-owned state for:
 
-See [docs/ROADMAP.md](docs/ROADMAP.md).
+```text
+core event
+publication state
+ping roles
+organiser assignments where enabled
+reminders
+role-request preset snapshots
+durable scheduled actions
+```
+
+inside one authoritative PostgreSQL transaction.
+
+Immediate Discord publication remains a post-commit external side effect.
+
+Template administrator commands are not yet implemented.
+
+The immediate implementation focus is now the reusable template administration/lifecycle service layer, beginning with persistent creation, inspection, listing, active/inactive lifecycle, and the parent-lock mutation contract required by later template editing.
+
+See [docs/CURRENT-WORK.md](docs/CURRENT-WORK.md) and [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ---
 
-# Planned template model
+# Implemented template generation model
 
-The intended high-level shape is:
+The current high-level shape is:
 
 ```text
 template
     |
-    | generate
+    | atomic generation
     v
 ordinary persistent event
 ```
 
-Generated events will receive event-owned snapshots and become independently editable.
+Generation snapshots reusable source configuration into ordinary event-owned state.
 
-The reconciled source model integrates with existing:
+After commit:
 
-- event creation
-- organiser assignments
-- ping-role snapshots
-- reminders
-- publication scheduling
-- role-request presets
-- durable scheduler actions
+```text
+template
+    -> reusable source / provenance
 
-The template remains reusable source configuration and provenance.
+generated event
+    -> authoritative runtime state
+```
 
-It does not become a live runtime configuration dependency for generated events.
+Generated events do not continuously consult their source template.
+
+Later changes to:
+
+```text
+template defaults
+template ping roles
+template organiser defaults
+template reminders
+referenced role-request presets
+guild default channels
+```
+
+do not rewrite state already snapshotted into an existing generated event.
+
+Generation uses the established event, organiser, reminder, role-request, publication, and durable scheduler architectures rather than creating template-specific runtime equivalents.
 
 Recurrence remains a later concern and should generate bounded ordinary occurrences rather than maintaining one mutable special event row.
 

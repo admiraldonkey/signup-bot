@@ -65,272 +65,109 @@ New work should preserve existing concurrency, snapshot, scheduler, recovery, an
 
 ## Objective
 
-Add reusable event templates that define defaults for creating ordinary persistent events.
+Make the implemented reusable template source model and one-off generation service usable and maintainable through administrator-facing workflows.
 
-The core model is:
+The underlying generation architecture is established:
 
 ```text
 template
     |
-    | generate
+    | atomic generation
     v
-ordinary event
+ordinary independent event
 ```
 
-A generated event must become normal event-level state.
-
-The source template provides reusable configuration at generation time. It must not become a live configuration object that existing events continuously consult.
-
-After generation:
-
-- the event owns its runtime state
-- normal event commands operate on the event
-- later template edits do not rewrite the event
-- the event can be edited independently
-- historical behaviour does not depend on the current template definition
+Remaining P1 template work is primarily administration and editing.
 
 ---
 
-## P1.2 — Template identity and lifecycle
+## P1.2 — Template administration and lifecycle
 
-Templates will need persistent identity and ownership.
-
-Likely core fields include:
-
-- guild owner
-- template name
-- optional description
-- active/inactive state
-- creator
-- created timestamp
-- updated timestamp
-
-Expected administration will likely include:
+Build reusable service boundaries for:
 
 ```text
 create
 list
 show
-edit
 set-active
 ```
 
-Prefer reversible lifecycle state over destructive deletion where generated-event provenance may refer back to the template.
+before adding Discord command adapters.
 
-If deletion is ever introduced, define what happens to historical provenance first.
+Requirements:
 
----
+- explicit guild ownership
+- active/inactive lifecycle
+- inactive templates remain inspectable
+- inactive templates remain editable where intended
+- inactive templates cannot generate
+- unchanged lifecycle mutation is idempotent
+- deactivation does not modify generated events
+- provenance remains intact
+- hard deletion is not required for the first implementation
 
-## P1.3 — Reusable event defaults
-
-Templates should provide practical defaults for event creation.
-
-Candidate configuration includes:
-
-- event type
-- region or audience context
-- timezone
-- name
-- description
-- normal local start time
-- duration
-- signup enabled/disabled
-- signup-close timing
-- detailed-response timing where applicable
-- publication timing
-- publication destination/default behaviour
-- ping roles
-- organiser defaults
-- role-request configuration
-- reminder definitions
-
-The first implementation does not need every conceivable field.
-
-Prefer a coherent usable template workflow over a giant configuration surface delivered all at once.
-
----
-
-## P1.4 — Event duration
-
-The current normal default duration for manually-created events is approximately:
+Template mutation services must take:
 
 ```text
-60 minutes
+event_templates parent FOR UPDATE
 ```
 
-Template behaviour should preserve explicitly configured duration.
+before changing parent or child reusable source state.
 
-Do not reintroduce older assumptions that a normal regiment event lasts two hours.
-
----
-
-## P1.5 — Template organiser defaults
-
-Templates should support reusable primary and backup organiser defaults.
-
-Generation should create:
+This must serialise correctly against generation's:
 
 ```text
-template organiser defaults
-        |
-        v
-ordinary dormant event organiser assignments
+event_templates parent FOR SHARE
 ```
 
-The generated event then owns those assignments.
+lock.
 
-They must participate in the normal organiser lifecycle:
-
-- activation
-- confirmation
-- decline
-- warning
-- timeout
-- backup escalation
-- general cover
-- safety deadline
-- missing-organiser-at-start handling
-- cover claiming
-- cancellation/completion reconciliation
-
-Do not create a separate template-specific runtime organiser workflow.
-
-Organiser defaults are optional.
-
-If organiser functionality is disabled for the guild, template generation must still succeed without creating organiser assignments.
+Use deterministic PostgreSQL integration tests for the mutation/generation race.
 
 ---
 
-## P1.6 — Template role-request defaults
+## P1.11 — Template editing
 
-Templates must build on the existing reusable role-request preset subsystem rather than introducing a second reusable role graph.
+Implement reusable editing services for template source state.
 
-A likely model is:
-
-```text
-template
-    |
-    | references reusable role-request configuration
-    v
-generation
-    |
-    v
-event-level role-request snapshot
-```
-
-The reconciled P1 schema supports zero or one reusable role-request preset reference per template.
-
-Generation must validate guild ownership and source usability before snapshotting that preset into event-owned state.
-
-Required outcomes:
-
-- generated events receive ordinary event-level role options/groups
-- runtime behaviour does not depend on the source preset
-- generated events remain independently editable
-- later preset changes do not rewrite generated events
-- the normal preset validation and snapshot guarantees remain authoritative
-
-The relationship between template lifecycle and referenced preset lifecycle must also be defined.
-
----
-
-## P1.7 — Template reminder defaults
-
-Templates should support reusable reminder definitions.
-
-Example:
-
-```text
-10 minutes before signup close
-    -> remind members to sign up
-
-10 minutes before event start
-    -> ask members to begin joining
-```
-
-Generation should produce:
-
-```text
-template reminder definition
-        |
-        v
-event_reminders
-        |
-        v
-ordinary durable scheduled action
-```
-
-Each generated event owns its reminder rows and scheduled actions.
-
-Later template edits should not rewrite reminders already snapshotted into existing events.
-
----
-
-## P1.9 — Ping-role snapshots
-
-Templates may reference Discord roles used to notify the event audience.
-
-When generating an event:
-
-- resolve the configured role
-- snapshot its Discord role ID
-- snapshot a readable role name where appropriate
-- create ordinary event-level ping-role rows
-
-Changing template audience configuration later must not alter already-generated events.
-
-Deleted or changed Discord roles must follow the normal event snapshot and degraded-presentation principles rather than turning templates into live role lookups.
-
----
-
-## P1.10 — Generated events remain independently editable
-
-Once generated, an event must behave like a normal event.
-
-Administrators should be able to change an occurrence's:
-
-- date/time
-- duration
-- description
-- publication schedule
-- organisers
-- reminders
-- role requests
-- audience
-- signup behaviour
-
-without changing:
-
-- the source template
-- earlier generated events
-- other already-generated events
-- the recurring series definition
-
-This is a central template invariant.
-
----
-
-## P1.11 — Template edits affect future generation by default
-
-Normal template editing should mean:
+Normal editing means:
 
 ```text
 edit template
     |
     v
 future generated events use new configuration
+
+existing generated events remain unchanged
 ```
 
-It should not automatically propagate into events that already exist.
+Editing should cover the source configuration required for practical administration, including:
 
-If bulk propagation is ever useful, design it as a separate explicit operation with:
+```text
+core event defaults
+publication configuration
+ping-role collection
+organiser defaults
+reminder definitions
+optional role-request preset
+```
 
-- clear scope
-- preview
-- conflict handling
-- protection for individually-customised occurrences
+Mutation APIs should distinguish deliberately between:
 
-Do not make propagation implicit.
+```text
+omitted
+    -> preserve
+
+explicit clear
+    -> remove nullable state
+
+replacement collection
+    -> replace complete intended set
+```
+
+Child collection mutation must use the template parent lock rather than independently locking only child rows.
+
+Do not introduce implicit propagation to existing generated events.
 
 ---
 
@@ -341,7 +178,7 @@ Consider an administrator preview before activation or generation.
 Useful preview information may include:
 
 - event type
-- region
+- audience
 - normal start time
 - timezone
 - duration
@@ -352,39 +189,31 @@ Useful preview information may include:
 - reminder schedule
 - ping audience
 
-A preview can catch configuration mistakes before recurrence creates multiple events from the same source.
-
-This is useful but should not block the minimum viable template domain unless implementation naturally supports it.
+This is useful but should not block the minimum viable administrator workflow if implementation does not naturally require it.
 
 ---
 
-## P1.13 — Template provenance
+## P1.13 — Administrator-facing one-off generation
 
-Generated events should retain source-template provenance.
+Expose the implemented one-off generation service through an administrator-facing workflow.
 
-Provenance is useful for:
+The adapter must:
 
-- administration
-- debugging
-- recurrence identity
-- reporting
-- future template/series management
+- resolve the requested occurrence date/time into an absolute `startsAt`
+- preserve the template timezone/local-time semantics
+- authorise the administrator
+- validate Discord-specific role/channel inputs where relevant
+- call the reusable generation service
+- handle service results clearly
+- audit successful generation
+- perform immediate publication only after the generation transaction commits
+- avoid reproducing generation persistence logic in the command handler
 
-Provenance must not create a live dependency.
+Command-adapter tests should verify Discord parsing/result handling.
 
-Conceptually:
+PostgreSQL integration tests remain authoritative for generation correctness.
 
-```text
-generated event
-    |
-    +---- template_id
-    |
-    +---- event-owned snapshot state
-```
-
-The reconciled schema retains this provenance through `events.template_id` and prevents hard template deletion while generated events still reference it.
-
-An existing event must continue functioning if its source template is later edited or deactivated.
+Update `ADMIN-GUIDE.md` when this administrator-facing workflow is introduced.
 
 ---
 

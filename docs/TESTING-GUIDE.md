@@ -1,6 +1,6 @@
 # Testing Guide
 
-**Last reconciled:** 19 September 2026
+**Last reconciled:** 22 September 2026
 
 ## Purpose
 
@@ -3615,35 +3615,43 @@ Where templates receive active/inactive state, test:
 
 ## Generated event creation
 
-A generation service should receive direct PostgreSQL-backed coverage.
+One-off generation has direct PostgreSQL-backed coverage in:
 
-Verify that generation creates one coherent event containing the intended:
+```text
+tests/integration/templates/event-template-generation-service.test.ts
+```
+
+The generation suite verifies coherent creation of:
 
 - core event fields
 - publication state
 - ping-role snapshots
-- dormant organiser assignments
+- dormant organiser assignments where enabled
 - reminders
 - role-request snapshots
 - scheduled actions
 - template provenance
 
-Do not rely on a slash command test to prove those database guarantees.
+Do not rely on a slash-command test to prove those database guarantees.
 
 ## Generated event independence
 
-After generation, mutate the source template.
+The generation integration suite verifies that reusable source mutation does not rewrite an existing generated event.
 
-Verify that the existing event retains its previously snapshotted:
+Current coverage mutates:
 
-- event fields
-- ping roles
-- organisers
-- reminders
-- role-request configuration
-- publication schedule
+```text
+template core fields
+template ping roles
+template organiser defaults
+template reminders
+role-request preset options
+guild default publication destination
+```
 
-Then generate another event and verify future generation uses the new template state where intended.
+and verifies the existing event retains its original snapshots.
+
+Future template-administration tests should additionally prove that generation performed **after** a committed template edit observes the new source state.
 
 ## Organiser snapshots
 
@@ -3689,18 +3697,20 @@ Test:
 
 ## Long-lived unpublished generated events
 
-Add a regression for a generated event that remains:
+The prerequisite reminder regression is implemented.
+
+Coverage protects an event that remains:
 
 ```text
 scheduled
 publishedAt = null
 ```
 
-for a substantial period.
+while its future signup-close reminder is still legitimate.
 
-A legitimate future signup-close-relative reminder must not be marked missed or cancelled solely because the event has not yet been publicly published.
+The reminder must not be marked missed or cancelled merely because public publication has not happened yet.
 
-This regression should exist before template generation relies on the current reminder-validity path.
+A genuinely closed event still invalidates the signup-close reminder.
 
 ## Publication scheduling
 
@@ -3737,19 +3747,37 @@ The operation must not create duplicate generated state merely because the first
 
 ## Concurrency
 
-Any generation path that may race should use deterministic PostgreSQL tests.
-
-Relevant cases may include:
+One-off template generation uses the established source-lock contract:
 
 ```text
-two generators target same occurrence
+generation
+    -> event_templates parent FOR SHARE
 
-template edit races generation
-
-template deactivation races generation
+template mutation
+    -> event_templates parent FOR UPDATE
 ```
 
-The exact lock contract should be tested once P1 establishes it.
+The generation integration suite deterministically proves that a correctly parent-locked editor cannot interleave with an in-flight generation snapshot.
+
+Future template mutation services must preserve that contract.
+
+For child-state editing, taking only child-row locks is insufficient.
+
+The template parent must be locked first so generation sees either:
+
+```text
+complete old source graph
+```
+
+or:
+
+```text
+complete new source graph
+```
+
+never a partial mixture.
+
+Recurrence will require additional duplicate/idempotency concurrency coverage once occurrence identity exists.
 
 ## Discord adapters
 

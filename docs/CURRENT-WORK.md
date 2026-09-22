@@ -1,10 +1,12 @@
 # Current Development State
 
-**Last reconciled:** 21 September 2026
+**Last reconciled:** 22 September 2026
 
 This document is the short-form handoff for the active development checkpoint.
 
-It is not a changelog. Durable project context belongs in:
+It is not a changelog.
+
+Durable project context belongs in:
 
 - [`../README.md`](../README.md)
 - [`README.md`](./README.md)
@@ -20,65 +22,46 @@ It is not a changelog. Durable project context belongs in:
 
 The P0 foundation and reliability phase is complete.
 
-Established implementations include:
-
-- persistent event creation and lifecycle
-- immediate, manual, and scheduled publication
-- attendance signups and actual-attendance recording
-- organiser nomination, escalation, cover, and safety workflows
-- organiser feature controls
-- persistent reminders
-- event-level role requests
-- reusable role-request presets
-- preset editing and lifecycle management
-- preset application using event-owned snapshot semantics
-- scheduled role-request opening and closing
-- durable PostgreSQL-backed scheduled work
-- PostgreSQL-backed audit logging
-- Discord presentation recovery for key message types
-- regression-first reliability coverage
-- deterministic PostgreSQL concurrency testing
-
-The current major development phase is:
+The current major phase is:
 
 ```text
 P1
 Event Templates
 ```
 
-P1.1 schema reconciliation is complete.
-
-Migration:
+The following P1 foundations are implemented:
 
 ```text
-0021_reconcile-event-template-schema
+P1.1 schema reconciliation
+transaction-aware event creation
+transaction-aware reminder creation
+transaction-aware role-request preset application
+atomic one-off template generation
+generation snapshot independence
+deterministic template source-lock concurrency coverage
 ```
 
-established the template source model and removed the obsolete pre-preset template scaffolding.
+Template administrator commands are not yet implemented.
 
-Template administrator commands and generation behaviour are **not yet implemented**.
+Recurrence is not yet implemented.
 
 ---
 
-# Completed P1.1 Data Model
+# Implemented Template Source Model
 
-A template is reusable source configuration for creating an ordinary persistent event.
-
-The authoritative source aggregate is:
+Reusable template source state lives in:
 
 ```text
 event_templates
-```
 
-with reusable child state in:
-
-```text
 event_template_ping_roles
+
 event_template_organiser_defaults
+
 event_template_reminders
 ```
 
-The template may reference:
+A template may reference:
 
 ```text
 zero or one role_request_preset
@@ -90,133 +73,6 @@ through:
 event_templates.role_request_preset_id
 ```
 
-The old:
-
-```text
-template_role_options
-```
-
-graph has been removed.
-
-Templates do not own a second reusable role-request architecture.
-
----
-
-# Template Source Fields
-
-The reconciled template source model contains reusable defaults for:
-
-- owning guild
-- event type
-- optional audience
-- optional role-request preset
-- name
-- description
-- timezone
-- optional local start time
-- duration
-- signup enabled/disabled
-- signup-close offset
-- detailed-deadline presentation
-- publication intent
-- optional scheduled-publication offset
-- optional fixed publication channel
-- active/inactive lifecycle
-- creator
-- timestamps
-
-The normal template duration default is:
-
-```text
-60 minutes
-```
-
-Do not reintroduce the historical two-hour assumption.
-
----
-
-# Publication Source Intent
-
-Templates store explicit source-level publication intent:
-
-```text
-manual
-scheduled
-immediate
-```
-
-Rules:
-
-```text
-scheduled
-    -> publish_minutes_before_start required
-
-manual
-    -> publish_minutes_before_start null
-
-immediate
-    -> publish_minutes_before_start null
-```
-
-This source intent must map into the existing event publication architecture.
-
-Generated events must continue to use ordinary:
-
-```text
-publicationChannelId
-publishMinutesBeforeStart
-publish_event scheduled action
-publishStoredEvent(...)
-```
-
-or deliberately evolved equivalents.
-
-Do not introduce a second runtime publication model for templates.
-
-Immediate publication remains an external Discord side effect and therefore cannot occur inside the authoritative PostgreSQL generation transaction.
-
----
-
-# Generated Event Snapshot Boundary
-
-Generation must produce an ordinary event which owns its runtime state.
-
-Conceptually:
-
-```text
-template
-    |
-    | generate
-    v
-ordinary event
-    |
-    +---- event defaults
-    +---- publication state
-    +---- ping-role snapshots
-    +---- organiser assignments where applicable
-    +---- event_reminders
-    +---- role-request snapshots
-    +---- scheduled_actions
-```
-
-After commit:
-
-```text
-template
-    -> source/provenance
-
-event
-    -> authoritative runtime state
-```
-
-Later template edits must not rewrite existing generated events.
-
-Later preset edits must not rewrite existing event-level role-request snapshots.
-
----
-
-# Template Provenance
-
 Generated events retain:
 
 ```text
@@ -225,236 +81,50 @@ events.template_id
 
 as source provenance.
 
-The foreign key now uses:
-
-```text
-ON DELETE RESTRICT
-```
-
-rather than clearing the relationship automatically.
-
-Template lifecycle should therefore normally use reversible:
-
-```text
-active / inactive
-```
-
-state rather than hard deletion.
-
-A generated event must never consult its current template definition for ordinary runtime behaviour merely because `template_id` exists.
+The old template-specific reusable role-option architecture has been removed.
 
 ---
 
-# Ping Roles
+# Implemented One-Off Generation
 
-Reusable template ping roles live in:
-
-```text
-event_template_ping_roles
-```
-
-with:
-
-- Discord role ID
-- readable role-name snapshot
-- explicit ordering
-
-Generation must copy them into ordinary:
+Generation is implemented in:
 
 ```text
-event_ping_roles
+src/templates/event-template-generation-service.ts
 ```
 
-The generated event then owns that collection independently.
+Primary public boundary:
+
+```text
+generateEventFromTemplate(...)
+```
+
+The caller supplies an already-resolved absolute:
+
+```text
+startsAt: Date
+```
+
+The generation service does not interpret template `local_start_time`.
+
+Local wall-clock/date resolution belongs to the future administrator or recurrence adapter.
 
 ---
 
-# Organiser Defaults
+# Atomic Generation Boundary
 
-Reusable organiser defaults live in:
+Authoritative generation occurs in one PostgreSQL transaction.
 
-```text
-event_template_organiser_defaults
-```
-
-Supported source slots are:
+Conceptually:
 
 ```text
-primary
-backup
-```
-
-`cover` is runtime recovery state and does not belong in reusable template configuration.
-
-A template may contain **zero organiser defaults**.
-
-This is important because organiser functionality is optional at guild level.
-
-Generation requirements:
-
-```text
-organisers enabled
-    + template organiser defaults
-        -> create ordinary dormant event_organiser_assignments
-
-organisers disabled
-        -> generation must still succeed
-        -> do not create organiser assignments
-```
-
-Disabling organiser functionality must never make templates generally unusable.
-
-If organiser defaults exist, a backup must not be allowed to become an independent organiser workflow outside the established primary/backup lifecycle.
-
----
-
-# Role Requests
-
-Templates reuse the established role-request preset system.
-
-P1 currently supports:
-
-```text
-template
-    -> zero or one role_request_preset
-```
-
-Generation must snapshot the referenced preset through the existing preset application architecture.
-
-It must produce ordinary event-owned:
-
-```text
-event_role_options
-event_role_option_qualification_roles
-role_request_groups
-role_request_group_options
-role_request_group_notification_roles
-event_role_request_preset_applications
-scheduled_actions
-```
-
-as applicable.
-
-Do not recreate template-specific role-option tables or runtime behaviour.
-
-Guild ownership of the referenced preset must be validated before generation.
-
-Inactive or otherwise unusable preset graphs must fail validation rather than create partial generated state.
-
----
-
-# Template Reminders
-
-Reusable reminder definitions live in:
-
-```text
-event_template_reminders
-```
-
-Supported timing references initially match ordinary event reminders:
-
-```text
-event_start
-signup_close
-```
-
-Generation must create ordinary:
-
-```text
-event_reminders
-```
-
-and their normal durable scheduled actions.
-
-Template reminder `channel_id` semantics are:
-
-```text
-non-null
-    -> fixed reusable template destination
-
-null
-    -> resolve generated event publication destination
-    -> snapshot that resolved channel into event_reminders.channel_id
-```
-
-Runtime reminder execution must never need to read the template again.
-
----
-
-# Reminder Prerequisite Completed
-
-The pre-generation reminder review identified a real defect.
-
-Previously, signup-close reminders were considered invalid whenever:
-
-```text
-event.status != open
-```
-
-which incorrectly cancelled legitimate reminders for:
-
-```text
-status = scheduled
-publishedAt = null
-```
-
-A PostgreSQL integration regression now protects this case.
-
-Current intended behaviour includes:
-
-```text
-scheduled
-+ signups enabled
-+ future signup close
-    -> future signup-close reminder remains valid
-
-closed
-    -> signup-close reminder is cancelled
-```
-
-Template generation may now rely on long-lived unpublished scheduled events without that particular reminder lifecycle defect.
-
----
-
-# Recurrence Remains Separate
-
-Recurrence is deliberately not part of the reconciled template schema.
-
-One-off template generation must become stable first.
-
-Future recurrence should conceptually remain:
-
-```text
-template
-    |
-    +---- recurrence definition
-              |
-              v
-       bounded generator
-              |
-              v
-       ordinary event occurrences
-```
-
-Likely future direction remains an RFC 5545-compatible recurrence representation and a bounded rolling horizon.
-
-Occurrence identity must remain distinct from mutable event start time.
-
----
-
-# Immediate Objective
-
-The next implementation task is to establish the transaction-aware service boundaries required for **atomic one-off template generation**.
-
-Do not add template slash commands yet.
-
-The required authoritative transaction is conceptually:
-
-```text
-lock / validate template source
+template FOR SHARE
         |
         v
-resolve source defaults
+validate guild/source ownership
+        |
+        v
+resolve reusable source defaults
         |
         v
 create ordinary event
@@ -466,141 +136,434 @@ create ordinary event
         +---- core event scheduled actions
         |
         v
-commit everything together
+commit atomically
 ```
 
-A failure during authoritative generation must not leave behind:
+A failure during generation must not leave partial:
 
-- an event without its required snapshots
-- partial organiser assignments
-- partial reminders
-- partial preset application
-- partial role-request groups
-- partial scheduled actions
+```text
+events
+event_ping_roles
+event_organiser_assignments
+event_reminders
+preset applications
+role-request state
+scheduled_actions
+```
 
-Discord side effects happen after commit through the existing publication/revalidation principles.
+Preset-application domain failures that occur after generation has begun abort the entire transaction before being converted into a normal generation result.
 
 ---
 
-# Required Service-Boundary Work
+# Transaction-Aware Reusable Services
 
-Current public services own transactions independently.
-
-Template generation therefore must not simply call several independently committing services in sequence.
-
-The next work should inspect and deliberately evolve:
+Generation composes:
 
 ```text
-createStoredEvent()
+createStoredEventInTransaction(...)
 
-applyRoleRequestPresetToEvent(...)
+createEventReminderInTransaction(...)
 
-reminder creation / scheduled-action creation
+applyRoleRequestPresetToEventInTransaction(...)
 ```
 
-towards transaction-aware reusable boundaries.
+Their existing public wrappers continue to own independent transactions for ordinary callers.
 
-Expected shape:
-
-```text
-public operation
-    -> db.transaction(tx =>
-         internal transaction-aware operation(tx, ...)
-       )
-
-template generation
-    -> db.transaction(tx => {
-         internal event creation
-         reminder snapshot creation
-         preset snapshot application
-         other generated state
-       })
-```
-
-Names are not predetermined.
-
-Prefer clear reusable boundaries over abstractions created merely for symmetry.
-
-Existing public behaviour must remain unchanged during the refactor.
+This keeps existing behaviour unchanged while allowing one larger authoritative generation transaction.
 
 ---
 
-# Locking and Concurrency Direction
+# Publication Semantics
 
-Template generation should use the same source-snapshot principle already established for presets.
-
-Expected direction:
+Template publication source intent supports:
 
 ```text
-template generation
-    -> template parent FOR SHARE
-
-template mutation
-    -> template parent FOR UPDATE
+manual
+scheduled
+immediate
 ```
 
-Generation should therefore observe either:
+Scheduled generation:
 
 ```text
-complete old template graph
+creates ordinary unpublished event
+creates publish_event durable action
 ```
 
-or:
+Manual generation:
 
 ```text
-complete new template graph
+creates ordinary unpublished event
+does not create publish_event action
 ```
 
-never a mixture.
+Immediate generation:
 
-Referenced role-request presets retain their established locking contract.
+```text
+creates ordinary unpublished event
+does not publish to Discord inside transaction
+returns requiresImmediatePublication = true
+```
 
-Use deterministic PostgreSQL barriers/locks for concurrency tests rather than timing sleeps.
+The calling adapter must perform immediate publication only after the generation transaction commits.
+
+Discord publication remains an external side effect.
+
+---
+
+# Publication Destination Snapshot
+
+A template may store a fixed:
+
+```text
+publication_channel_id
+```
+
+If non-null:
+
+```text
+use template destination
+```
+
+If null:
+
+```text
+resolve current guild default attendance/publication channel
+```
+
+The resolved destination is copied into the generated event.
+
+Template reminders with:
+
+```text
+channel_id = null
+```
+
+inherit that resolved publication destination once at generation time.
+
+Later guild-default or template changes do not move an existing generated event or reminder.
+
+---
+
+# Generated Event Independence
+
+Generated events are ordinary event-owned state.
+
+PostgreSQL integration coverage verifies that later changes to reusable source state do not rewrite the generated event.
+
+Covered source changes include:
+
+```text
+template core fields
+template ping roles
+template organiser defaults
+template reminders
+referenced preset options
+guild default attendance channel
+```
+
+The generated event retains its original snapshots.
+
+---
+
+# Template Ping Roles
+
+Generation copies:
+
+```text
+event_template_ping_roles
+```
+
+into ordinary:
+
+```text
+event_ping_roles
+```
+
+including readable role-name snapshots.
+
+Runtime publication uses the event-owned collection.
+
+---
+
+# Template Organiser Defaults
+
+Supported reusable slots are:
+
+```text
+primary
+backup
+```
+
+`cover` remains runtime recovery state.
+
+When organisers are enabled:
+
+```text
+template defaults
+    -> ordinary dormant event_organiser_assignments
+```
+
+When organisers are disabled at guild level:
+
+```text
+template generation still succeeds
+no organiser assignments are created
+```
+
+Organiser feature disablement must never make templates generally unusable.
+
+---
+
+# Template Reminders
+
+Generation copies reusable reminder definitions into:
+
+```text
+event_reminders
+```
+
+plus their normal durable:
+
+```text
+event_reminder:<id>
+```
+
+scheduled actions.
+
+Supported template timing references currently match ordinary reminder behaviour:
+
+```text
+event_start
+signup_close
+```
+
+Fixed reminder destinations remain fixed.
+
+Null template reminder destinations resolve once through the generated event publication destination.
+
+---
+
+# Template Role Requests
+
+Templates reuse the existing role-request preset architecture.
+
+Generation validates and snapshots the configured preset through:
+
+```text
+applyRoleRequestPresetToEventInTransaction(...)
+```
+
+Generated state may include:
+
+```text
+event_role_options
+event_role_option_qualification_roles
+role_request_groups
+role_request_group_options
+role_request_group_notification_roles
+event_role_request_preset_applications
+scheduled_actions
+```
+
+Later preset edits do not rewrite generated event state.
+
+No second template-specific reusable role-request graph should be introduced.
 
 ---
 
 # Guild Ownership
 
-Reusable source relationships must remain explicitly guild-scoped.
+Generation treats reusable IDs as untrusted until ownership is validated.
 
-Before generation, validate that relevant reusable records belong to the same guild as the template, including:
+Current generation validates:
 
-- event type
-- audience
-- role-request preset
-- template child records through their parent
+```text
+template owner guild
+event type owner guild + active state
+audience owner guild + active state
+role-request preset ownership/usability through preset application
+```
 
-Do not trust foreign IDs merely because the database relationship exists.
+A template from another guild is treated as unavailable to the caller.
 
 ---
 
-# Schema and Migration Rules
+# Template Lock Contract
 
-Schema source:
-
-```text
-src/db/schema.ts
-```
-
-Current template reconciliation migration:
+Generation takes:
 
 ```text
-drizzle/0021_reconcile-event-template-schema.sql
+event_templates parent
+    -> FOR SHARE
 ```
 
-Do not edit migrations that may already have been applied.
+Template mutation must take:
 
-For future schema work:
-
-```bash
-npm run db:generate
+```text
+event_templates parent
+    -> FOR UPDATE
 ```
 
-Review generated SQL manually.
+before mutating either parent metadata or child reusable source state.
 
-Use concise explicit database identifiers where generated foreign-key, constraint, or index names risk approaching PostgreSQL's 63-byte identifier limit.
+This provides the source-snapshot contract:
 
-Relevant migration behaviour should receive PostgreSQL-backed migration-chain coverage.
+```text
+generation sees complete old graph
+or
+generation sees complete new graph
+```
+
+never a partially-edited mixture.
+
+A deterministic PostgreSQL integration test verifies that a correctly parent-locked editor cannot interleave with an in-flight generation snapshot.
+
+Do not replace this contract with unlocked child-table mutations.
+
+---
+
+# Reminder Prerequisite
+
+Signup-close reminders remain valid for long-lived unpublished scheduled events.
+
+Current protected behaviour includes:
+
+```text
+scheduled
++ unpublished
++ signups enabled
++ future signup close
+    -> future signup-close reminder remains valid
+
+closed
+    -> signup-close reminder is invalid
+```
+
+This regression was completed before template generation began relying on reminder scheduling.
+
+---
+
+# Immediate Objective
+
+The next implementation area is:
+
+```text
+template administration and lifecycle services
+```
+
+Do not begin with Discord command handlers.
+
+Establish reusable service boundaries first.
+
+The initial administration layer should cover:
+
+```text
+create template
+
+inspect one template
+
+list templates for a guild
+
+active / inactive lifecycle
+
+parent FOR UPDATE mutation contract
+```
+
+Template editing of reusable source fields and child collections should build on that parent-lock contract rather than writing child tables independently.
+
+Administrator-facing Discord commands can then become thin adapters over those services.
+
+---
+
+# Template Lifecycle Direction
+
+Templates already persist:
+
+```text
+active
+```
+
+and generated-event provenance uses:
+
+```text
+events.template_id
+    ON DELETE RESTRICT
+```
+
+Therefore normal lifecycle should remain reversible:
+
+```text
+active
+inactive
+```
+
+rather than destructive deletion.
+
+Deactivation must:
+
+```text
+stop future generation
+preserve the template
+preserve provenance
+preserve already-generated events
+```
+
+Inactive templates should remain inspectable and editable where intended.
+
+---
+
+# Template Editing Direction
+
+Normal template editing should mean:
+
+```text
+edit reusable source
+        |
+        v
+future generation uses new source
+
+existing generated events remain unchanged
+```
+
+Mutation services must lock the template parent:
+
+```text
+FOR UPDATE
+```
+
+before changing parent or child source state.
+
+For optional and collection state, keep mutation semantics explicit:
+
+```text
+omitted
+    -> preserve
+
+explicit clear
+    -> remove nullable value
+
+replacement collection
+    -> replace complete intended collection
+```
+
+Do not introduce implicit propagation into existing generated events.
+
+---
+
+# Recurrence Remains Separate
+
+Recurrence remains future work.
+
+One-off generation is now established and should become administrator-usable before recurrence becomes authoritative.
+
+Future recurrence should still produce ordinary events through the established generation architecture rather than creating a second runtime occurrence model.
+
+Occurrence identity must remain separate from mutable:
+
+```text
+events.starts_at
+```
 
 ---
 
@@ -609,14 +572,15 @@ Relevant migration behaviour should receive PostgreSQL-backed migration-chain co
 For each implementation slice:
 
 1. inspect the current pushed branch
-2. inspect the exact services being changed
-3. add regression-first coverage for defects
-4. add direct service/integration coverage for new behaviour
-5. use deterministic PostgreSQL locking for concurrency-sensitive behaviour
-6. run targeted tests first
-7. run the affected broader suite
-8. run typechecks
+2. change the service/domain layer first
+3. add PostgreSQL integration coverage for persistence and locking
+4. use regression-first development for defects
+5. use deterministic PostgreSQL barriers for concurrency behaviour
+6. run targeted tests
+7. expand to affected subsystem tests
+8. run production and test typechecks
 9. run the full verification gate at meaningful commit/PR boundaries
+10. update documentation only when behaviour or durable decisions change
 
 Normal full gate:
 
@@ -629,7 +593,7 @@ npm run typecheck:test
 git diff --check
 ```
 
-Manual Discord smoke testing is only warranted when behaviour materially reaches Discord commands, components, permissions, selectors, mentions, DMs, or presentation.
+Manual Discord smoke testing becomes relevant once template administrator commands or other real Discord presentation behaviour are added.
 
 ---
 
@@ -637,11 +601,11 @@ Manual Discord smoke testing is only warranted when behaviour materially reaches
 
 As P1 advances:
 
-- update `ARCHITECTURE.md` when implemented boundaries change
-- update `DECISIONS.md` for durable choices
-- keep `ROADMAP.md` focused on remaining work
-- rewrite this handoff when the checkpoint changes
-- update `ADMIN-GUIDE.md` only when administrator-facing behaviour changes
-- update `TESTING-GUIDE.md` only when a genuinely new testing pattern becomes established
+- `ARCHITECTURE.md` describes implemented subsystem boundaries
+- `DECISIONS.md` records durable choices and reasons
+- `ROADMAP.md` contains future work only
+- this document tracks the exact current checkpoint
+- `ADMIN-GUIDE.md` changes when administrator-facing template behaviour exists
+- `TESTING-GUIDE.md` should reflect established template testing contracts rather than temporary plans
 
-The next code change should remain below the Discord command layer.
+The next code change should establish the template administration service boundary below the Discord command layer.
