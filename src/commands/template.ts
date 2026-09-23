@@ -31,6 +31,18 @@ import {
   type ReplaceEventTemplateOrganiserDefaultsResult,
   type ReplaceEventTemplatePingRolesResult,
 } from "../templates/event-template-admin-service.js";
+import {
+  publishStoredEvent,
+  type EventPublicationFailureReason,
+} from "../events/event-publication.js";
+
+import {
+  generateEventFromTemplate,
+  type InvalidEventTemplateReason,
+  type InvalidTemplateOccurrenceReason,
+} from "../templates/event-template-generation-service.js";
+
+import { parseEventDateTime } from "../time/event-date-time.js";
 
 type CachedCommandInteraction = ChatInputCommandInteraction<"cached">;
 
@@ -97,6 +109,11 @@ export async function handleTemplateCommand(
   switch (subcommand) {
     case "create":
       await createTemplate(interaction, configuration);
+
+      return;
+
+    case "generate":
+      await generateTemplateOccurrence(interaction, configuration);
 
       return;
 
@@ -502,6 +519,279 @@ async function createTemplate(
 
       return;
   }
+}
+
+async function generateTemplateOccurrence(
+  interaction: CachedCommandInteraction,
+  configuration: GuildConfiguration,
+): Promise<void> {
+  const templateId = interaction.options.getInteger("template-id", true);
+
+  const dateText = interaction.options.getString("date", true).trim();
+
+  const timeOverride = interaction.options.getString("time")?.trim() || null;
+
+  /*
+   * We need the reusable local-time metadata before entering the generator.
+   *
+   * The inspected updatedAt revision is passed into generation so a concurrent
+   * template mutation cannot silently combine old occurrence timing with a new
+   * source snapshot.
+   */
+  const templateResult = await getEventTemplate({
+    guildDatabaseId: configuration.guildId,
+
+    templateId,
+  });
+
+  if (templateResult.kind === "template_not_found") {
+    await replyTemplateNotFound(interaction, templateId);
+
+    return;
+  }
+
+  const template = templateResult.template;
+
+  if (!template.active) {
+    await interaction.editReply({
+      content: `Event template **${template.name}** (#${template.id}) is inactive and cannot generate events.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const timeText = timeOverride ?? template.localStartTime;
+
+  if (!timeText) {
+    await interaction.editReply({
+      content: [
+        `Event template **${template.name}** (#${template.id}) has no default local start time.`,
+        "",
+        "Supply the `time` option for this occurrence or configure `local-time` with `/template edit`.",
+      ].join("\n"),
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const parsedStart = parseEventDateTime(dateText, timeText, template.timezone);
+
+  if (!parsedStart.ok) {
+    await interaction.editReply({
+      content: `The occurrence date or time is invalid: ${parsedStart.error}`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const generationResult = await generateEventFromTemplate({
+    guildDatabaseId: configuration.guildId,
+
+    templateId: template.id,
+
+    startsAt: parsedStart.value.toJSDate(),
+
+    generatedByUserId: interaction.user.id,
+
+    expectedTemplateUpdatedAt: template.updatedAt,
+  });
+
+  if (generationResult.kind !== "generated") {
+    await interaction.editReply({
+      content: formatTemplateGenerationFailure(generationResult),
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  let publication: {
+    eventId: number;
+
+    eventName: string;
+
+    messageUrl: string;
+
+    primaryOrganiserNotification: "dm" | "admin_channel" | "failed" | null;
+  } | null = null;
+
+  let publicationFailure: string | null = null;
+
+  /*
+   * The generation transaction has already committed before this block.
+   *
+   * Discord publication must therefore remain a post-commit side effect.
+   * If it fails, retain the generated event as an unpublished draft rather
+   * than deleting authoritative state behind the administrator's back.
+   */
+  if (generationResult.requiresImmediatePublication) {
+    try {
+      const result = await publishStoredEvent(
+        interaction.guild,
+        generationResult.event.id,
+      );
+
+      if (result.ok) {
+        publication = result;
+      } else {
+        publicationFailure = formatImmediatePublicationFailure(result.reason);
+      }
+    } catch (error) {
+      publicationFailure =
+        error instanceof Error
+          ? error.message
+          : "The generated event could not be published.";
+    }
+  }
+
+  const startsUnix = Math.floor(
+    generationResult.event.startsAt.getTime() / 1000,
+  );
+
+  const scheduledPublicationAt =
+    generationResult.publicationMode === "scheduled" &&
+    template.publishMinutesBeforeStart !== null
+      ? parsedStart.value
+          .minus({
+            minutes: template.publishMinutesBeforeStart,
+          })
+          .toJSDate()
+      : null;
+
+  const lines = [
+    generationResult.requiresImmediatePublication && publication
+      ? `✅ Generated and published **${generationResult.event.name}** from template **${template.name}** (#${template.id}).`
+      : `✅ Generated **${generationResult.event.name}** from template **${template.name}** (#${template.id}).`,
+
+    "",
+
+    `**Event ID:** ${generationResult.event.id}`,
+
+    `**Event type:** ${template.eventTypeName ?? `#${template.eventTypeId}`}`,
+
+    `**Region:** ${
+      template.audienceId === null
+        ? "None"
+        : (template.audienceName ?? `#${template.audienceId}`)
+    }`,
+
+    `**Scheduled as:** ${parsedStart.value.toFormat(
+      "dd LLL yyyy, HH:mm ZZZZ",
+    )}`,
+
+    `**Timezone:** \`${template.timezone}\``,
+
+    `**Your local time:** <t:${startsUnix}:F>`,
+  ];
+
+  if (generationResult.event.signupsEnabled) {
+    const closesAt = generationResult.event.attendanceClosesAt;
+
+    if (!closesAt) {
+      throw new Error(
+        "Generated signup event did not return its attendance closing time.",
+      );
+    }
+
+    const closesUnix = Math.floor(closesAt.getTime() / 1000);
+
+    lines.push(
+      "**Signups:** Enabled",
+
+      `**Attendance closes:** <t:${closesUnix}:F> (<t:${closesUnix}:R>)`,
+    );
+  } else {
+    lines.push("**Signups:** Disabled");
+  }
+
+  if (publication) {
+    lines.push(
+      "**Publication:** Published immediately",
+
+      `**Event message:** ${publication.messageUrl}`,
+    );
+  } else if (publicationFailure) {
+    lines.push(
+      "",
+      `⚠️ **Immediate publication failed:** ${publicationFailure}`,
+      "",
+      "The generated event remains stored as an unpublished event.",
+      `Retry publication with \`/event publish event-id:${generationResult.event.id}\`.`,
+    );
+  } else if (scheduledPublicationAt) {
+    const publicationUnix = Math.floor(scheduledPublicationAt.getTime() / 1000);
+
+    lines.push(
+      `**Publication:** <t:${publicationUnix}:F> (<t:${publicationUnix}:R>)`,
+
+      `**Manual override:** \`/event publish event-id:${generationResult.event.id}\` can publish it earlier.`,
+    );
+  } else {
+    lines.push(
+      "**Publication:** Manual",
+
+      `**Publish:** \`/event publish event-id:${generationResult.event.id}\``,
+    );
+  }
+
+  await interaction.editReply({
+    content: lines.join("\n"),
+
+    allowedMentions: {
+      parse: [],
+    },
+  });
+
+  await writeAuditLog({
+    guildId: configuration.guildId,
+
+    guild: interaction.guild,
+
+    actorUserId: interaction.user.id,
+
+    action: "event_template.generate",
+
+    outcome: "success",
+
+    summary: `Generated event "${generationResult.event.name}" (#${generationResult.event.id}) from template "${template.name}" (#${template.id}).`,
+
+    targetType: "event",
+
+    targetId: String(generationResult.event.id),
+
+    details: {
+      templateId: template.id,
+
+      startsAt: generationResult.event.startsAt.toISOString(),
+
+      publicationMode: generationResult.publicationMode,
+
+      immediatePublication: generationResult.requiresImmediatePublication
+        ? publication
+          ? "published"
+          : "failed"
+        : null,
+
+      publicationFailure,
+
+      messageUrl: publication?.messageUrl ?? null,
+    },
+  });
 }
 
 async function editTemplate(
@@ -2077,6 +2367,146 @@ function formatNamedSource(
   id: number,
 ): string {
   return name ? `${name} (#${id})` : `#${id}`;
+}
+
+function formatTemplateGenerationFailure(
+  result: Exclude<
+    Awaited<ReturnType<typeof generateEventFromTemplate>>,
+    {
+      kind: "generated";
+    }
+  >,
+): string {
+  switch (result.kind) {
+    case "template_not_found":
+      return "That event template was not found in this server.";
+
+    case "template_inactive":
+      return "That event template is inactive and cannot generate events.";
+
+    case "template_changed":
+      return [
+        "The template changed while this occurrence was being prepared.",
+        "",
+        "Run `/template generate` again so the occurrence uses one consistent template revision.",
+      ].join("\n");
+
+    case "guild_not_configured":
+      return "This server no longer has the configuration required to generate events.";
+
+    case "event_type_unavailable":
+      return "The template's configured event type is no longer available.";
+
+    case "audience_unavailable":
+      return "The template's configured region or audience is no longer available.";
+
+    case "missing_publication_channel":
+      return "The template does not currently resolve to a usable event publication channel.";
+
+    case "invalid_template":
+      return formatInvalidTemplateGenerationReason(
+        result.reason,
+        result.reminderId,
+      );
+
+    case "invalid_occurrence":
+      return formatInvalidTemplateOccurrenceReason(result.reason);
+
+    case "preset_application_failed":
+      return [
+        "The configured role-request preset could not be applied.",
+        "",
+        `Reason: \`${result.result.kind}\``,
+        "",
+        "No event was created because template generation was rolled back.",
+      ].join("\n");
+  }
+}
+
+function formatInvalidTemplateGenerationReason(
+  reason: InvalidEventTemplateReason,
+  reminderId?: number,
+): string {
+  switch (reason) {
+    case "invalid_timezone":
+      return "The template has an invalid timezone. Edit the template before generating an event.";
+
+    case "invalid_duration":
+      return "The template has an invalid event duration.";
+
+    case "invalid_attendance_close_offset":
+      return "The template has an invalid attendance-close offset.";
+
+    case "invalid_publication_mode":
+      return "The template has an invalid publication mode.";
+
+    case "invalid_publication_offset":
+      return "The template has an invalid scheduled-publication offset.";
+
+    case "publication_not_before_signup_close":
+      return "The template would publish the event at or after its signup deadline.";
+
+    case "backup_without_primary":
+      return "The template has a backup organiser without a primary organiser.";
+
+    case "invalid_organiser_slot":
+      return "The template contains an invalid organiser-default slot.";
+
+    case "invalid_reminder_timing_reference":
+      return reminderId
+        ? `Template reminder #${reminderId} has an invalid timing reference.`
+        : "The template contains a reminder with an invalid timing reference.";
+
+    case "signup_close_reminder_without_signups":
+      return reminderId
+        ? `Template reminder #${reminderId} is relative to signup close, but the template does not use signups.`
+        : "The template contains a signup-close reminder but does not use signups.";
+
+    case "empty_reminder_message":
+      return reminderId
+        ? `Template reminder #${reminderId} has an empty message.`
+        : "The template contains a reminder with an empty message.";
+  }
+}
+
+function formatInvalidTemplateOccurrenceReason(
+  reason: InvalidTemplateOccurrenceReason,
+): string {
+  switch (reason) {
+    case "invalid_start":
+      return "The resolved occurrence start time is invalid.";
+
+    case "start_not_future":
+      return "The generated event must start in the future.";
+
+    case "signup_close_not_future":
+      return [
+        "The generated event's signup deadline would already have passed.",
+        "",
+        "Choose a later occurrence or reduce the template's attendance-close offset.",
+      ].join("\n");
+  }
+}
+
+function formatImmediatePublicationFailure(
+  reason: EventPublicationFailureReason,
+): string {
+  switch (reason) {
+    case "not-found":
+      return "the newly-generated event could not be found for publication";
+
+    case "already-published":
+      return "the event is already published";
+
+    case "inactive":
+      return "the generated event is no longer active";
+
+    case "event-started":
+      return "the generated event has already started";
+
+    case "signup-closed":
+      return "the generated event's signup deadline has already passed";
+  }
 }
 
 function formatCreateValidationError(

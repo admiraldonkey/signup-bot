@@ -1323,6 +1323,38 @@ export const commandDefinitions = [
 
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("generate")
+        .setDescription(
+          "Generates one event occurrence from a reusable template.",
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("template-id")
+            .setDescription("Template ID shown by /template list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("date")
+            .setDescription("Occurrence date in YYYY-MM-DD format.")
+            .setMinLength(10)
+            .setMaxLength(10)
+            .setRequired(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("time")
+            .setDescription(
+              "Optional HH:mm start-time override; defaults to the template local time.",
+            )
+            .setMinLength(5)
+            .setMaxLength(5),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("edit")
         .setDescription("Edits the reusable core configuration of a template.")
 

@@ -71,6 +71,16 @@ export type GenerateEventFromTemplateInput = {
    */
   startsAt: Date;
 
+  /*
+   * Optional optimistic source revision.
+   *
+   * Discord generation first reads the template to resolve its local
+   * occurrence date/time. Passing that inspected revision prevents a
+   * concurrent template edit from changing the source between that read and
+   * this transaction's FOR SHARE lock.
+   */
+  expectedTemplateUpdatedAt?: Date;
+
   generatedByUserId: string;
 };
 
@@ -98,6 +108,9 @@ export type GenerateEventFromTemplateResult =
     }
   | {
       kind: "template_inactive";
+    }
+  | {
+      kind: "template_changed";
     }
   | {
       kind: "guild_not_configured";
@@ -220,6 +233,8 @@ async function generateEventFromTemplateInTransaction(
       publicationChannelId: eventTemplates.publicationChannelId,
 
       active: eventTemplates.active,
+
+      updatedAt: eventTemplates.updatedAt,
     })
     .from(eventTemplates)
     .where(
@@ -235,6 +250,15 @@ async function generateEventFromTemplateInTransaction(
   if (!template) {
     return {
       kind: "template_not_found",
+    };
+  }
+
+  if (
+    input.expectedTemplateUpdatedAt &&
+    template.updatedAt.getTime() !== input.expectedTemplateUpdatedAt.getTime()
+  ) {
+    return {
+      kind: "template_changed",
     };
   }
 

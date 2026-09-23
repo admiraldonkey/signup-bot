@@ -37,6 +37,14 @@ const templateServiceMocks = vi.hoisted(() => ({
   setEventTemplateActive: vi.fn(),
 }));
 
+const generationMocks = vi.hoisted(() => ({
+  generateEventFromTemplate: vi.fn(),
+}));
+
+const publicationMocks = vi.hoisted(() => ({
+  publishStoredEvent: vi.fn(),
+}));
+
 const auditMocks = vi.hoisted(() => ({
   writeAuditLog: vi.fn(),
 }));
@@ -47,6 +55,13 @@ vi.mock(
   "../../../src/templates/event-template-admin-service.js",
   () => templateServiceMocks,
 );
+
+vi.mock(
+  "../../../src/templates/event-template-generation-service.js",
+  () => generationMocks,
+);
+
+vi.mock("../../../src/events/event-publication.js", () => publicationMocks);
 
 vi.mock("../../../src/audit/audit-log.js", () => auditMocks);
 
@@ -115,6 +130,7 @@ describe("/template command", () => {
 
     expect(definition?.options?.map((option) => option.name)).toEqual([
       "create",
+      "generate",
       "edit",
       "set-ping-roles",
       "set-organisers",
@@ -158,6 +174,28 @@ describe("/template command", () => {
       "publish-minutes-before-start",
       "publication-channel",
       "role-preset-id",
+    ]);
+
+    const generateDefinition = definition?.options?.find(
+      (option) => option.name === "generate",
+    );
+
+    expect(generateDefinition).toBeDefined();
+
+    if (
+      !generateDefinition ||
+      !("options" in generateDefinition) ||
+      !generateDefinition.options
+    ) {
+      throw new Error(
+        "Expected /template generate to be a subcommand with options.",
+      );
+    }
+
+    expect(generateDefinition.options.map((option) => option.name)).toEqual([
+      "template-id",
+      "date",
+      "time",
     ]);
 
     const editDefinition = definition?.options?.find(
@@ -1400,7 +1438,332 @@ describe("/template command", () => {
       "either a replacement reminder channel",
     );
   });
+
+  it("generates an occurrence using the template local time and inspected revision", async () => {
+    const template = createGenerationTemplate();
+
+    templateServiceMocks.getEventTemplate.mockResolvedValue({
+      kind: "found",
+
+      template,
+    });
+
+    generationMocks.generateEventFromTemplate.mockResolvedValue({
+      kind: "generated",
+
+      templateId: 7,
+
+      event: {
+        id: 119,
+
+        timezone: "Europe/London",
+
+        showDetailedDeadline: false,
+
+        name: "Sunday Naval",
+
+        startsAt: new Date("2026-09-24T19:00:00.000Z"),
+
+        signupsEnabled: true,
+
+        attendanceClosesAt: new Date("2026-09-24T18:00:00.000Z"),
+      },
+
+      publicationMode: "manual",
+
+      requiresImmediatePublication: false,
+    });
+
+    const interaction = createInteraction({
+      subcommand: "generate",
+
+      strings: {
+        date: "2026-09-24",
+      },
+
+      integers: {
+        "template-id": 7,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(generationMocks.generateEventFromTemplate).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      templateId: 7,
+
+      startsAt: new Date("2026-09-24T19:00:00.000Z"),
+
+      generatedByUserId: ADMIN_USER_ID,
+
+      expectedTemplateUpdatedAt: template.updatedAt,
+    });
+
+    expect(readFirstReplyContent(interaction.editReply)).toContain(
+      "Generated **Sunday Naval**",
+    );
+
+    expect(publicationMocks.publishStoredEvent).not.toHaveBeenCalled();
+  });
+
+  it("uses a supplied occurrence time without changing the reusable template", async () => {
+    const template = createGenerationTemplate();
+
+    templateServiceMocks.getEventTemplate.mockResolvedValue({
+      kind: "found",
+
+      template,
+    });
+
+    generationMocks.generateEventFromTemplate.mockResolvedValue({
+      kind: "generated",
+
+      templateId: 7,
+
+      event: {
+        id: 120,
+
+        timezone: "Europe/London",
+
+        showDetailedDeadline: false,
+
+        name: "Sunday Naval",
+
+        startsAt: new Date("2026-09-24T17:30:00.000Z"),
+
+        signupsEnabled: false,
+
+        attendanceClosesAt: null,
+      },
+
+      publicationMode: "manual",
+
+      requiresImmediatePublication: false,
+    });
+
+    const interaction = createInteraction({
+      subcommand: "generate",
+
+      strings: {
+        date: "2026-09-24",
+
+        time: "18:30",
+      },
+
+      integers: {
+        "template-id": 7,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(generationMocks.generateEventFromTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        startsAt: new Date("2026-09-24T17:30:00.000Z"),
+      }),
+    );
+  });
+
+  it("requires an occurrence time when the template has no default local start time", async () => {
+    templateServiceMocks.getEventTemplate.mockResolvedValue({
+      kind: "found",
+
+      template: createGenerationTemplate({
+        localStartTime: null,
+      }),
+    });
+
+    const interaction = createInteraction({
+      subcommand: "generate",
+
+      strings: {
+        date: "2026-09-24",
+      },
+
+      integers: {
+        "template-id": 7,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(generationMocks.generateEventFromTemplate).not.toHaveBeenCalled();
+
+    expect(readFirstReplyContent(interaction.editReply)).toContain(
+      "has no default local start time",
+    );
+  });
+
+  it("publishes an immediate template occurrence only after generation succeeds", async () => {
+    const template = createGenerationTemplate({
+      publicationMode: "immediate",
+    });
+
+    templateServiceMocks.getEventTemplate.mockResolvedValue({
+      kind: "found",
+
+      template,
+    });
+
+    generationMocks.generateEventFromTemplate.mockResolvedValue({
+      kind: "generated",
+
+      templateId: 7,
+
+      event: {
+        id: 121,
+
+        timezone: "Europe/London",
+
+        showDetailedDeadline: false,
+
+        name: "Sunday Naval",
+
+        startsAt: new Date("2026-09-24T19:00:00.000Z"),
+
+        signupsEnabled: false,
+
+        attendanceClosesAt: null,
+      },
+
+      publicationMode: "immediate",
+
+      requiresImmediatePublication: true,
+    });
+
+    publicationMocks.publishStoredEvent.mockResolvedValue({
+      ok: true,
+
+      eventId: 121,
+
+      eventName: "Sunday Naval",
+
+      messageUrl: "https://discord.com/channels/test/event",
+
+      primaryOrganiserNotification: null,
+    });
+
+    const interaction = createInteraction({
+      subcommand: "generate",
+
+      strings: {
+        date: "2026-09-24",
+      },
+
+      integers: {
+        "template-id": 7,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(generationMocks.generateEventFromTemplate).toHaveBeenCalledTimes(1);
+
+    expect(publicationMocks.publishStoredEvent).toHaveBeenCalledWith(
+      interaction.interaction.guild,
+      121,
+    );
+
+    expect(
+      generationMocks.generateEventFromTemplate.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      publicationMocks.publishStoredEvent.mock.invocationCallOrder[0]!,
+    );
+
+    expect(readFirstReplyContent(interaction.editReply)).toContain(
+      "Generated and published",
+    );
+  });
+
+  it("asks the administrator to retry when the template changes during occurrence preparation", async () => {
+    templateServiceMocks.getEventTemplate.mockResolvedValue({
+      kind: "found",
+
+      template: createGenerationTemplate(),
+    });
+
+    generationMocks.generateEventFromTemplate.mockResolvedValue({
+      kind: "template_changed",
+    });
+
+    const interaction = createInteraction({
+      subcommand: "generate",
+
+      strings: {
+        date: "2026-09-24",
+      },
+
+      integers: {
+        "template-id": 7,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(readFirstReplyContent(interaction.editReply)).toContain(
+      "changed while this occurrence was being prepared",
+    );
+  });
 });
+
+function createGenerationTemplate(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 7,
+
+    ownerGuildId: 42,
+
+    eventTypeId: 11,
+
+    eventTypeName: "Naval",
+
+    audienceId: 12,
+
+    audienceName: "EU",
+
+    roleRequestPresetId: null,
+
+    roleRequestPresetName: null,
+
+    name: "Sunday Naval",
+
+    description: null,
+
+    timezone: "Europe/London",
+
+    localStartTime: "20:00",
+
+    durationMinutes: 60,
+
+    signupsEnabled: true,
+
+    attendanceCloseMinutesBefore: 60,
+
+    showDetailedDeadline: false,
+
+    publicationMode: "manual",
+
+    publishMinutesBeforeStart: null,
+
+    publicationChannelId: PUBLICATION_CHANNEL_ID,
+
+    active: true,
+
+    createdByUserId: ADMIN_USER_ID,
+
+    createdAt: new Date("2026-09-01T12:00:00.000Z"),
+
+    updatedAt: new Date("2026-09-20T12:00:00.000Z"),
+
+    pingRoles: [],
+
+    organiserDefaults: [],
+
+    reminders: [],
+
+    ...overrides,
+  };
+}
 
 function createInteraction(input: {
   subcommand: string;

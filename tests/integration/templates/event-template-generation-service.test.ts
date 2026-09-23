@@ -1587,6 +1587,82 @@ describe("event template generation service", () => {
       editorClient.release();
     }
   });
+
+  it("rejects generation when the inspected template revision changed before the source lock", async () => {
+    // Arrange
+    const fixture = await createTemplateFixture(pool);
+
+    const originalRevision = await pool.query<{
+      updated_at: Date;
+    }>(
+      `
+            SELECT
+              "updated_at"
+            FROM "event_templates"
+            WHERE "id" = $1
+          `,
+      [fixture.templateId],
+    );
+
+    const inspectedUpdatedAt = originalRevision.rows[0]?.updated_at;
+
+    if (!inspectedUpdatedAt) {
+      throw new Error("Expected template fixture to expose its revision.");
+    }
+
+    /*
+     * Deterministically move the source revision rather than relying on
+     * wall-clock timing between two writes.
+     */
+    await pool.query(
+      `
+          UPDATE "event_templates"
+          SET
+            "name" = 'Changed Template',
+            "updated_at" =
+              "updated_at" +
+              INTERVAL '1 second'
+          WHERE "id" = $1
+        `,
+      [fixture.templateId],
+    );
+
+    // Act
+    const result = await generateEventFromTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: fixture.templateId,
+
+      startsAt: futureStart(),
+
+      generatedByUserId: ADMIN_USER_ID,
+
+      expectedTemplateUpdatedAt: inspectedUpdatedAt,
+    });
+
+    // Assert
+    expect(result).toEqual({
+      kind: "template_changed",
+    });
+
+    const generatedEvents = await pool.query<{
+      count: number;
+    }>(
+      `
+            SELECT
+              COUNT(*)::int AS "count"
+            FROM "events"
+            WHERE "template_id" = $1
+          `,
+      [fixture.templateId],
+    );
+
+    expect(generatedEvents.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+  });
 });
 
 type FixtureOptions = {

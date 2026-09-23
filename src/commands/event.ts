@@ -7,6 +7,7 @@ import {
 import { and, asc, eq, gte, inArray, isNotNull, sql } from "drizzle-orm";
 import { DateTime } from "luxon";
 
+import { parseEventDateTime } from "../time/event-date-time.js";
 import {
   getGuildConfiguration,
   memberCanManageEvents,
@@ -60,8 +61,6 @@ import { reschedulePendingEventReminders } from "../reminders/reminder-schedulin
 import { editEvent } from "./event-edit.js";
 
 import { clearEventOrganiser, setEventOrganiser } from "./event-organisers.js";
-
-const EVENT_DATE_FORMAT = "yyyy-MM-dd HH:mm";
 
 type CachedCommandInteraction = ChatInputCommandInteraction<"cached">;
 
@@ -1834,68 +1833,4 @@ function formatEventStatus(
     case "completed":
       return "Completed";
   }
-}
-
-/*
- * Existing date/time parser
- */
-
-type ParsedEventDateTime =
-  | {
-      ok: true;
-      value: DateTime;
-    }
-  | {
-      ok: false;
-      error: string;
-    };
-
-function parseEventDateTime(
-  dateText: string,
-  timeText: string,
-  timezone: string,
-): ParsedEventDateTime {
-  const input = `${dateText} ${timeText}`;
-
-  const parsed = DateTime.fromFormat(input, EVENT_DATE_FORMAT, {
-    zone: timezone,
-
-    locale: "en-GB",
-
-    setZone: true,
-  });
-
-  if (!parsed.isValid) {
-    return {
-      ok: false,
-
-      error:
-        parsed.invalidExplanation ?? "the supplied value could not be parsed",
-    };
-  }
-
-  if (parsed.toFormat(EVENT_DATE_FORMAT) !== input) {
-    return {
-      ok: false,
-
-      error:
-        "use a real date and a 24-hour time in " +
-        "`YYYY-MM-DD` and `HH:mm` format",
-    };
-  }
-
-  if (parsed.getPossibleOffsets().length > 1) {
-    return {
-      ok: false,
-
-      error:
-        "that local time occurs twice because of the " +
-        "daylight-saving clock change; choose an unambiguous time",
-    };
-  }
-
-  return {
-    ok: true,
-    value: parsed,
-  };
 }
