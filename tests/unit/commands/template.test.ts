@@ -506,9 +506,15 @@ describe("/template command", () => {
 
         eventTypeId: 11,
 
+        eventTypeName: "Naval",
+
         audienceId: 12,
 
+        audienceName: "EU",
+
         roleRequestPresetId: null,
+
+        roleRequestPresetName: null,
 
         timezone: "Europe/London",
 
@@ -525,9 +531,15 @@ describe("/template command", () => {
 
         eventTypeId: 11,
 
+        eventTypeName: "Naval",
+
         audienceId: 12,
 
+        audienceName: "EU",
+
         roleRequestPresetId: null,
+
+        roleRequestPresetName: null,
 
         timezone: "Europe/London",
 
@@ -582,6 +594,12 @@ describe("/template command", () => {
         audienceId: 12,
 
         roleRequestPresetId: 5,
+
+        eventTypeName: "Naval",
+
+        audienceName: "EU",
+
+        roleRequestPresetName: "Naval Roles",
 
         name: "Sunday Naval",
 
@@ -671,9 +689,13 @@ describe("/template command", () => {
 
     expect(content).toContain("## Sunday Naval (#7)");
 
-    expect(content).toContain("**Event type:** #11");
-
     expect(content).toContain("Naval (<@&991000000000000020>)");
+
+    expect(content).toContain("**Event type:** Naval (#11)");
+
+    expect(content).toContain("**Region / audience:** EU (#12)");
+
+    expect(content).toContain("**Role-request preset:** Naval Roles (#5)");
 
     expect(content).toContain("**Primary:** Admiral");
 

@@ -2614,6 +2614,14 @@ describe("event template administration service", () => {
     const templates = await listEventTemplates(fixture.guildId);
 
     // Assert
+    expect(templates[0]).toMatchObject({
+      eventTypeName: "Naval main",
+
+      audienceName: "EU main",
+
+      roleRequestPresetName: null,
+    });
+
     expect(
       templates.map((template) => ({
         id: template.id,
@@ -2736,6 +2744,14 @@ describe("event template administration service", () => {
     }
 
     expect(result.template.active).toBe(false);
+
+    expect(result.template).toMatchObject({
+      eventTypeName: "Naval main",
+
+      audienceName: "EU main",
+
+      roleRequestPresetName: null,
+    });
 
     expect(result.template.pingRoles).toEqual([
       {

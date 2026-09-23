@@ -65,9 +65,15 @@ export type EventTemplateSummary = {
 
   eventTypeId: number;
 
+  eventTypeName: string | null;
+
   audienceId: number | null;
 
+  audienceName: string | null;
+
   roleRequestPresetId: number | null;
+
+  roleRequestPresetName: string | null;
 
   timezone: string;
 
@@ -134,6 +140,12 @@ export type EventTemplateReminderInvalidReason =
   | "signup_close_requires_signups";
 
 export type EventTemplateDetail = EventTemplateRecord & {
+  eventTypeName: string | null;
+
+  audienceName: string | null;
+
+  roleRequestPresetName: string | null;
+
   pingRoles: EventTemplatePingRole[];
 
   organiserDefaults: EventTemplateOrganiserDefault[];
@@ -1616,9 +1628,15 @@ export async function listEventTemplates(
 
       eventTypeId: eventTemplates.eventTypeId,
 
+      eventTypeName: eventTypes.name,
+
       audienceId: eventTemplates.audienceId,
 
+      audienceName: eventAudiences.name,
+
       roleRequestPresetId: eventTemplates.roleRequestPresetId,
+
+      roleRequestPresetName: roleRequestPresets.name,
 
       timezone: eventTemplates.timezone,
 
@@ -1629,6 +1647,30 @@ export async function listEventTemplates(
       updatedAt: eventTemplates.updatedAt,
     })
     .from(eventTemplates)
+    .leftJoin(
+      eventTypes,
+      and(
+        eq(eventTypes.id, eventTemplates.eventTypeId),
+
+        eq(eventTypes.ownerGuildId, eventTemplates.ownerGuildId),
+      ),
+    )
+    .leftJoin(
+      eventAudiences,
+      and(
+        eq(eventAudiences.id, eventTemplates.audienceId),
+
+        eq(eventAudiences.ownerGuildId, eventTemplates.ownerGuildId),
+      ),
+    )
+    .leftJoin(
+      roleRequestPresets,
+      and(
+        eq(roleRequestPresets.id, eventTemplates.roleRequestPresetId),
+
+        eq(roleRequestPresets.ownerGuildId, eventTemplates.ownerGuildId),
+      ),
+    )
     .where(eq(eventTemplates.ownerGuildId, guildDatabaseId))
     .orderBy(
       asc(eventTemplates.name),
@@ -1665,6 +1707,60 @@ export async function getEventTemplate(
       return {
         kind: "template_not_found",
       } as const;
+    }
+
+    const [eventTypeSource] = await transaction
+      .select({
+        name: eventTypes.name,
+      })
+      .from(eventTypes)
+      .where(
+        and(
+          eq(eventTypes.id, template.eventTypeId),
+
+          eq(eventTypes.ownerGuildId, input.guildDatabaseId),
+        ),
+      )
+      .limit(1);
+
+    let audienceName: string | null = null;
+
+    if (template.audienceId !== null) {
+      const [audienceSource] = await transaction
+        .select({
+          name: eventAudiences.name,
+        })
+        .from(eventAudiences)
+        .where(
+          and(
+            eq(eventAudiences.id, template.audienceId),
+
+            eq(eventAudiences.ownerGuildId, input.guildDatabaseId),
+          ),
+        )
+        .limit(1);
+
+      audienceName = audienceSource?.name ?? null;
+    }
+
+    let roleRequestPresetName: string | null = null;
+
+    if (template.roleRequestPresetId !== null) {
+      const [presetSource] = await transaction
+        .select({
+          name: roleRequestPresets.name,
+        })
+        .from(roleRequestPresets)
+        .where(
+          and(
+            eq(roleRequestPresets.id, template.roleRequestPresetId),
+
+            eq(roleRequestPresets.ownerGuildId, input.guildDatabaseId),
+          ),
+        )
+        .limit(1);
+
+      roleRequestPresetName = presetSource?.name ?? null;
     }
 
     const pingRoles = await transaction
@@ -1736,6 +1832,12 @@ export async function getEventTemplate(
 
       template: {
         ...template,
+
+        eventTypeName: eventTypeSource?.name ?? null,
+
+        audienceName,
+
+        roleRequestPresetName,
 
         pingRoles,
 

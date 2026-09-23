@@ -878,13 +878,21 @@ async function listTemplates(
     );
 
     lines.push(
-      `  Event type #${template.eventTypeId} • ${template.timezone}${
+      `  Event type ${formatNamedSource(
+        template.eventTypeName,
+        template.eventTypeId,
+      )} • ${template.timezone}${
         template.localStartTime ? ` • ${template.localStartTime}` : ""
       }`,
     );
 
     if (template.roleRequestPresetId !== null) {
-      lines.push(`  Role-request preset #${template.roleRequestPresetId}`);
+      lines.push(
+        `  Role-request preset ${formatNamedSource(
+          template.roleRequestPresetName,
+          template.roleRequestPresetId,
+        )}`,
+      );
     }
   }
 
@@ -1018,14 +1026,24 @@ function formatTemplateDetails(template: EventTemplateDetail): string {
 
     "",
 
-    `**Event type:** #${template.eventTypeId}`,
-    `**Audience:** ${
-      template.audienceId === null ? "None" : `#${template.audienceId}`
+    `**Event type:** ${formatNamedSource(
+      template.eventTypeName,
+      template.eventTypeId,
+    )}`,
+
+    `**Region / audience:** ${
+      template.audienceId === null
+        ? "None"
+        : formatNamedSource(template.audienceName, template.audienceId)
     }`,
+
     `**Role-request preset:** ${
       template.roleRequestPresetId === null
         ? "None"
-        : `#${template.roleRequestPresetId}`
+        : formatNamedSource(
+            template.roleRequestPresetName,
+            template.roleRequestPresetId,
+          )
     }`,
 
     `**Timezone:** ${template.timezone}`,
@@ -1115,6 +1133,13 @@ function formatTemplateDetails(template: EventTemplateDetail): string {
   }
 
   return lines.join("\n");
+}
+
+function formatNamedSource(
+  name: string | null | undefined,
+  id: number,
+): string {
+  return name ? `${name} (#${id})` : `#${id}`;
 }
 
 function formatCreateValidationError(
