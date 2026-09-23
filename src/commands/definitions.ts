@@ -1476,6 +1476,80 @@ export const commandDefinitions = [
 
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("set-ping-roles")
+        .setDescription(
+          "Replaces the complete reusable ping-role set for a template.",
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("template-id")
+            .setDescription("Template ID shown by /template list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("ping-role-1")
+            .setDescription("First role in the replacement ping-role set."),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("ping-role-2")
+            .setDescription("Second role in the replacement ping-role set."),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("ping-role-3")
+            .setDescription("Third role in the replacement ping-role set."),
+        )
+        .addRoleOption((option) =>
+          option
+            .setName("ping-role-4")
+            .setDescription("Fourth role in the replacement ping-role set."),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("clear")
+            .setDescription(
+              "Remove all reusable ping roles from the template.",
+            ),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("set-organisers")
+        .setDescription("Replaces the complete reusable organiser-default set.")
+        .addIntegerOption((option) =>
+          option
+            .setName("template-id")
+            .setDescription("Template ID shown by /template list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addUserOption((option) =>
+          option
+            .setName("primary-organiser")
+            .setDescription("Reusable primary organiser."),
+        )
+        .addUserOption((option) =>
+          option
+            .setName("backup-organiser")
+            .setDescription(
+              "Reusable backup organiser; requires a primary organiser.",
+            ),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("clear")
+            .setDescription(
+              "Remove all reusable organiser defaults from the template.",
+            ),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("list")
         .setDescription("Lists reusable event templates.")
         .addBooleanOption((option) =>

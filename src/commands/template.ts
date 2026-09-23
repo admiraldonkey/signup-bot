@@ -1,8 +1,10 @@
 import {
   ChannelType,
   type ChatInputCommandInteraction,
+  type GuildMember,
   MessageFlags,
   PermissionFlagsBits,
+  type Role,
 } from "discord.js";
 
 import {
@@ -15,10 +17,14 @@ import {
   editEventTemplate,
   getEventTemplate,
   listEventTemplates,
+  replaceEventTemplateOrganiserDefaults,
+  replaceEventTemplatePingRoles,
   setEventTemplateActive,
   type CreateEventTemplateResult,
   type EditEventTemplateResult,
   type EventTemplateDetail,
+  type ReplaceEventTemplateOrganiserDefaultsResult,
+  type ReplaceEventTemplatePingRolesResult,
 } from "../templates/event-template-admin-service.js";
 
 type CachedCommandInteraction = ChatInputCommandInteraction<"cached">;
@@ -36,6 +42,20 @@ type TemplateCreateValidationReason = Extract<
 
 type TemplateEditValidationReason = Extract<
   EditEventTemplateResult,
+  {
+    kind: "invalid_input";
+  }
+>["reason"];
+
+type TemplatePingRoleValidationReason = Extract<
+  ReplaceEventTemplatePingRolesResult,
+  {
+    kind: "invalid_input";
+  }
+>["reason"];
+
+type TemplateOrganiserValidationReason = Extract<
+  ReplaceEventTemplateOrganiserDefaultsResult,
   {
     kind: "invalid_input";
   }
@@ -77,6 +97,16 @@ export async function handleTemplateCommand(
 
     case "edit":
       await editTemplate(interaction, configuration);
+
+      return;
+
+    case "set-ping-roles":
+      await setTemplatePingRoles(interaction, configuration.guildId);
+
+      return;
+
+    case "set-organisers":
+      await setTemplateOrganisers(interaction, configuration);
 
       return;
 
@@ -835,6 +865,450 @@ async function editTemplate(
   }
 }
 
+async function setTemplatePingRoles(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const templateId = interaction.options.getInteger("template-id", true);
+
+  const clear = interaction.options.getBoolean("clear") ?? false;
+
+  const selectedRoles = [
+    interaction.options.getRole("ping-role-1"),
+    interaction.options.getRole("ping-role-2"),
+    interaction.options.getRole("ping-role-3"),
+    interaction.options.getRole("ping-role-4"),
+  ].filter((role): role is Role => role !== null);
+
+  if (clear && selectedRoles.length > 0) {
+    await interaction.editReply({
+      content:
+        "Choose either replacement ping roles or `clear:true`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  if (!clear && selectedRoles.length === 0) {
+    await interaction.editReply({
+      content:
+        "Select at least one replacement ping role, or use `clear:true` to remove all template ping roles.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const roleIds = selectedRoles.map((role) => role.id);
+
+  if (new Set(roleIds).size !== roleIds.length) {
+    await interaction.editReply({
+      content: "Each replacement ping role must be selected only once.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const invalidRoles = selectedRoles.filter(
+    (role) => role.id === interaction.guild.id || role.managed,
+  );
+
+  if (invalidRoles.length > 0) {
+    await interaction.editReply({
+      content: [
+        "One or more selected ping roles cannot be used:",
+        "",
+        ...invalidRoles.map((role) => `• ${role.name}`),
+        "",
+        "Do not select `@everyone` or roles managed by Discord integrations.",
+      ].join("\n"),
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const result = await replaceEventTemplatePingRoles({
+    guildDatabaseId,
+
+    templateId,
+
+    pingRoles: clear
+      ? []
+      : selectedRoles.map((role) => ({
+          discordRoleId: role.id,
+
+          roleNameSnapshot: role.name,
+        })),
+  });
+
+  switch (result.kind) {
+    case "updated":
+      await interaction.editReply({
+        content:
+          result.pingRoles.length === 0
+            ? `✅ Cleared all ping roles from event template #${templateId}.`
+            : [
+                `✅ Replaced the ping roles for event template #${templateId}.`,
+                "",
+                ...result.pingRoles.map(
+                  (role) => `• <@&${role.discordRoleId}>`,
+                ),
+                "",
+                "Existing generated events were not changed.",
+              ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: guildDatabaseId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "event_template.ping_roles.replace",
+
+        outcome: "success",
+
+        summary: `Replaced ping roles for event template #${templateId}.`,
+
+        targetType: "event_template",
+
+        targetId: String(templateId),
+
+        details: {
+          pingRoleIds: result.pingRoles.map((role) => role.discordRoleId),
+        },
+      });
+
+      return;
+
+    case "unchanged":
+      await interaction.editReply({
+        content: `Event template #${templateId} already has that ping-role set. No changes were made.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "template_not_found":
+      await interaction.editReply({
+        content: `Event template #${templateId} was not found in this server.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "invalid_input":
+      await interaction.editReply({
+        content: formatPingRoleValidationError(result.reason),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
+}
+
+async function setTemplateOrganisers(
+  interaction: CachedCommandInteraction,
+  configuration: GuildConfiguration,
+): Promise<void> {
+  const templateId = interaction.options.getInteger("template-id", true);
+
+  const clear = interaction.options.getBoolean("clear") ?? false;
+
+  const primaryUser = interaction.options.getUser("primary-organiser");
+
+  const backupUser = interaction.options.getUser("backup-organiser");
+
+  if (clear && (primaryUser || backupUser)) {
+    await interaction.editReply({
+      content: "Choose either organiser defaults or `clear:true`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  if (!clear && !primaryUser && !backupUser) {
+    await interaction.editReply({
+      content:
+        "Select a primary organiser, or use `clear:true` to remove all organiser defaults.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  if (backupUser && !primaryUser) {
+    await interaction.editReply({
+      content:
+        "A backup organiser can only be selected when a primary organiser is also supplied.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  if (primaryUser?.bot || backupUser?.bot) {
+    await interaction.editReply({
+      content: "Bot accounts cannot be configured as template organisers.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  if (primaryUser && backupUser && primaryUser.id === backupUser.id) {
+    await interaction.editReply({
+      content: "The primary and backup organiser must be different members.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  let primaryMember: GuildMember | null = null;
+
+  let backupMember: GuildMember | null = null;
+
+  if (primaryUser) {
+    try {
+      primaryMember = await interaction.guild.members.fetch(primaryUser.id);
+    } catch {
+      await interaction.editReply({
+        content:
+          "The selected primary organiser could not be resolved as a current server member.",
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+    }
+  }
+
+  if (backupUser) {
+    try {
+      backupMember = await interaction.guild.members.fetch(backupUser.id);
+    } catch {
+      await interaction.editReply({
+        content:
+          "The selected backup organiser could not be resolved as a current server member.",
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+    }
+  }
+
+  if (
+    configuration.eventOrganiserRoleId &&
+    primaryMember &&
+    !primaryMember.roles.cache.has(configuration.eventOrganiserRoleId)
+  ) {
+    await interaction.editReply({
+      content:
+        "The selected primary organiser does not have the configured Event Organiser role.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  if (
+    configuration.eventOrganiserRoleId &&
+    backupMember &&
+    !backupMember.roles.cache.has(configuration.eventOrganiserRoleId)
+  ) {
+    await interaction.editReply({
+      content:
+        "The selected backup organiser does not have the configured Event Organiser role.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const organiserDefaults = clear
+    ? []
+    : [
+        ...(primaryMember
+          ? [
+              {
+                slot: "primary" as const,
+
+                discordUserId: primaryMember.id,
+
+                displayNameSnapshot: primaryMember.displayName,
+              },
+            ]
+          : []),
+
+        ...(backupMember
+          ? [
+              {
+                slot: "backup" as const,
+
+                discordUserId: backupMember.id,
+
+                displayNameSnapshot: backupMember.displayName,
+              },
+            ]
+          : []),
+      ];
+
+  const result = await replaceEventTemplateOrganiserDefaults({
+    guildDatabaseId: configuration.guildId,
+
+    templateId,
+
+    organiserDefaults,
+  });
+
+  switch (result.kind) {
+    case "updated":
+      await interaction.editReply({
+        content:
+          result.organiserDefaults.length === 0
+            ? `✅ Cleared all organiser defaults from event template #${templateId}.`
+            : [
+                `✅ Replaced organiser defaults for event template #${templateId}.`,
+                "",
+                ...result.organiserDefaults.map(
+                  (organiser) =>
+                    `• **${formatOrganiserSlot(
+                      organiser.slot,
+                    )}:** <@${organiser.discordUserId}>`,
+                ),
+                "",
+                "Existing generated events were not changed.",
+              ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: configuration.guildId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "event_template.organisers.replace",
+
+        outcome: "success",
+
+        summary: `Replaced organiser defaults for event template #${templateId}.`,
+
+        targetType: "event_template",
+
+        targetId: String(templateId),
+
+        details: {
+          primaryOrganiserUserId:
+            result.organiserDefaults.find(
+              (organiser) => organiser.slot === "primary",
+            )?.discordUserId ?? null,
+
+          backupOrganiserUserId:
+            result.organiserDefaults.find(
+              (organiser) => organiser.slot === "backup",
+            )?.discordUserId ?? null,
+        },
+      });
+
+      return;
+
+    case "unchanged":
+      await interaction.editReply({
+        content: `Event template #${templateId} already has those organiser defaults. No changes were made.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "template_not_found":
+      await interaction.editReply({
+        content: `Event template #${templateId} was not found in this server.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "invalid_input":
+      await interaction.editReply({
+        content: formatOrganiserValidationError(result.reason),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
+}
+
 async function listTemplates(
   interaction: CachedCommandInteraction,
   guildDatabaseId: number,
@@ -1190,6 +1664,45 @@ function formatEditValidationError(
   }
 
   return formatCreateValidationError(reason);
+}
+
+function formatPingRoleValidationError(
+  reason: TemplatePingRoleValidationReason,
+): string {
+  switch (reason) {
+    case "invalid_discord_role_id":
+      return "One of the selected ping roles has an invalid Discord role ID.";
+
+    case "invalid_role_name":
+      return "One of the selected ping roles has an invalid readable role name.";
+
+    case "duplicate_discord_role":
+      return "The replacement ping-role set contains the same Discord role more than once.";
+  }
+}
+
+function formatOrganiserValidationError(
+  reason: TemplateOrganiserValidationReason,
+): string {
+  switch (reason) {
+    case "invalid_slot":
+      return "The organiser-default set contains an unsupported organiser slot.";
+
+    case "invalid_discord_user_id":
+      return "One of the organiser defaults has an invalid Discord user ID.";
+
+    case "invalid_display_name":
+      return "One of the organiser defaults has an invalid display-name snapshot.";
+
+    case "duplicate_slot":
+      return "The organiser-default set contains the same organiser slot more than once.";
+
+    case "duplicate_discord_user":
+      return "The same Discord member cannot occupy both organiser slots.";
+
+    case "backup_requires_primary":
+      return "A backup organiser requires a primary organiser.";
+  }
 }
 
 function formatPublicationMode(value: string): string {

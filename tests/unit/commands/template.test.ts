@@ -22,6 +22,10 @@ const templateServiceMocks = vi.hoisted(() => ({
 
   listEventTemplates: vi.fn(),
 
+  replaceEventTemplateOrganiserDefaults: vi.fn(),
+
+  replaceEventTemplatePingRoles: vi.fn(),
+
   setEventTemplateActive: vi.fn(),
 }));
 
@@ -104,6 +108,8 @@ describe("/template command", () => {
     expect(definition?.options?.map((option) => option.name)).toEqual([
       "create",
       "edit",
+      "set-ping-roles",
+      "set-organisers",
       "list",
       "show",
       "set-active",
@@ -180,6 +186,54 @@ describe("/template command", () => {
       "clear-publish-schedule",
       "publication-channel",
       "clear-publication-channel",
+    ]);
+
+    const pingRoleDefinition = definition?.options?.find(
+      (option) => option.name === "set-ping-roles",
+    );
+
+    expect(pingRoleDefinition).toBeDefined();
+
+    if (
+      !pingRoleDefinition ||
+      !("options" in pingRoleDefinition) ||
+      !pingRoleDefinition.options
+    ) {
+      throw new Error(
+        "Expected /template set-ping-roles to be a subcommand with options.",
+      );
+    }
+
+    expect(pingRoleDefinition.options.map((option) => option.name)).toEqual([
+      "template-id",
+      "ping-role-1",
+      "ping-role-2",
+      "ping-role-3",
+      "ping-role-4",
+      "clear",
+    ]);
+
+    const organiserDefinition = definition?.options?.find(
+      (option) => option.name === "set-organisers",
+    );
+
+    expect(organiserDefinition).toBeDefined();
+
+    if (
+      !organiserDefinition ||
+      !("options" in organiserDefinition) ||
+      !organiserDefinition.options
+    ) {
+      throw new Error(
+        "Expected /template set-organisers to be a subcommand with options.",
+      );
+    }
+
+    expect(organiserDefinition.options.map((option) => option.name)).toEqual([
+      "template-id",
+      "primary-organiser",
+      "backup-organiser",
+      "clear",
     ]);
   });
 
@@ -495,6 +549,216 @@ describe("/template command", () => {
     expect(readFirstReplyContent(interaction.editReply)).toContain(
       "either a replacement region",
     );
+  });
+
+  it("replaces template ping roles through Discord-native role selections", async () => {
+    templateServiceMocks.replaceEventTemplatePingRoles.mockResolvedValue({
+      kind: "updated",
+
+      pingRoles: [
+        {
+          discordRoleId: "991000000000000020",
+
+          roleNameSnapshot: "Naval",
+
+          sortOrder: 0,
+        },
+        {
+          discordRoleId: "991000000000000022",
+
+          roleNameSnapshot: "Events",
+
+          sortOrder: 1,
+        },
+      ],
+    });
+
+    const interaction = createInteraction({
+      subcommand: "set-ping-roles",
+
+      integers: {
+        "template-id": 7,
+      },
+
+      roles: {
+        "ping-role-1": createTestRole("991000000000000020", "Naval"),
+
+        "ping-role-2": createTestRole("991000000000000022", "Events"),
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(
+      templateServiceMocks.replaceEventTemplatePingRoles,
+    ).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      templateId: 7,
+
+      pingRoles: [
+        {
+          discordRoleId: "991000000000000020",
+
+          roleNameSnapshot: "Naval",
+        },
+        {
+          discordRoleId: "991000000000000022",
+
+          roleNameSnapshot: "Events",
+        },
+      ],
+    });
+
+    expect(readFirstReplyContent(interaction.editReply)).toContain(
+      "Replaced the ping roles for event template #7",
+    );
+
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "event_template.ping_roles.replace",
+
+        targetType: "event_template",
+
+        targetId: "7",
+      }),
+    );
+  });
+
+  it("replaces template organiser defaults using current member display names", async () => {
+    const primaryId = "991000000000000030";
+
+    const backupId = "991000000000000031";
+
+    templateServiceMocks.replaceEventTemplateOrganiserDefaults.mockResolvedValue(
+      {
+        kind: "updated",
+
+        organiserDefaults: [
+          {
+            slot: "primary",
+
+            discordUserId: primaryId,
+
+            displayNameSnapshot: "Admiral",
+          },
+          {
+            slot: "backup",
+
+            discordUserId: backupId,
+
+            displayNameSnapshot: "Vice Admiral",
+          },
+        ],
+      },
+    );
+
+    const interaction = createInteraction({
+      subcommand: "set-organisers",
+
+      integers: {
+        "template-id": 7,
+      },
+
+      users: {
+        "primary-organiser": createTestUser(primaryId),
+
+        "backup-organiser": createTestUser(backupId),
+      },
+
+      members: {
+        [primaryId]: createTestMember(primaryId, "Admiral"),
+
+        [backupId]: createTestMember(backupId, "Vice Admiral"),
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(
+      templateServiceMocks.replaceEventTemplateOrganiserDefaults,
+    ).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      templateId: 7,
+
+      organiserDefaults: [
+        {
+          slot: "primary",
+
+          discordUserId: primaryId,
+
+          displayNameSnapshot: "Admiral",
+        },
+        {
+          slot: "backup",
+
+          discordUserId: backupId,
+
+          displayNameSnapshot: "Vice Admiral",
+        },
+      ],
+    });
+
+    expect(readFirstReplyContent(interaction.editReply)).toContain(
+      "Replaced organiser defaults for event template #7",
+    );
+
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "event_template.organisers.replace",
+
+        targetType: "event_template",
+
+        targetId: "7",
+      }),
+    );
+  });
+
+  it("requires explicit clear intent before removing template ping roles", async () => {
+    templateServiceMocks.replaceEventTemplatePingRoles.mockResolvedValue({
+      kind: "updated",
+
+      pingRoles: [],
+    });
+
+    const missingIntent = createInteraction({
+      subcommand: "set-ping-roles",
+
+      integers: {
+        "template-id": 7,
+      },
+    });
+
+    await handleTemplateCommand(missingIntent.interaction);
+
+    expect(
+      templateServiceMocks.replaceEventTemplatePingRoles,
+    ).not.toHaveBeenCalled();
+
+    const clear = createInteraction({
+      subcommand: "set-ping-roles",
+
+      integers: {
+        "template-id": 7,
+      },
+
+      booleans: {
+        clear: true,
+      },
+    });
+
+    await handleTemplateCommand(clear.interaction);
+
+    expect(
+      templateServiceMocks.replaceEventTemplatePingRoles,
+    ).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      templateId: 7,
+
+      pingRoles: [],
+    });
   });
 
   it("lists active templates by default and can include inactive templates", async () => {
@@ -857,6 +1121,12 @@ function createInteraction(input: {
   booleans?: Record<string, boolean | null>;
 
   channels?: Record<string, ReturnType<typeof createTestTextChannel> | null>;
+
+  roles?: Record<string, ReturnType<typeof createTestRole> | null>;
+
+  users?: Record<string, ReturnType<typeof createTestUser> | null>;
+
+  members?: Record<string, ReturnType<typeof createTestMember>>;
 }) {
   const deferReply = vi.fn().mockResolvedValue(undefined);
 
@@ -889,6 +1159,16 @@ function createInteraction(input: {
 
         fetchMe: vi.fn().mockResolvedValue({
           id: "991000000000000099",
+        }),
+
+        fetch: vi.fn(async (userId: string) => {
+          const member = input.members?.[userId];
+
+          if (!member) {
+            throw new Error(`Unknown test member ${userId}.`);
+          }
+
+          return member;
         }),
       },
 
@@ -949,6 +1229,10 @@ function createInteraction(input: {
       },
 
       getChannel: (name: string) => input.channels?.[name] ?? null,
+
+      getRole: (name: string) => input.roles?.[name] ?? null,
+
+      getUser: (name: string) => input.users?.[name] ?? null,
     },
   };
 
@@ -980,6 +1264,38 @@ function createTestTextChannel() {
         permission === PermissionFlagsBits.EmbedLinks ||
         permission === PermissionFlagsBits.ReadMessageHistory,
     }),
+  };
+}
+
+function createTestRole(id: string, name: string, managed = false) {
+  return {
+    id,
+
+    name,
+
+    managed,
+  };
+}
+
+function createTestUser(id: string, bot = false) {
+  return {
+    id,
+
+    bot,
+  };
+}
+
+function createTestMember(id: string, displayName: string) {
+  return {
+    id,
+
+    displayName,
+
+    roles: {
+      cache: {
+        has: () => true,
+      },
+    },
   };
 }
 
