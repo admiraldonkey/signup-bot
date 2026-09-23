@@ -4,10 +4,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { pool as applicationPool } from "../../../src/db/client.js";
 import {
+  addEventTemplateReminder,
   createEventTemplate,
   editEventTemplate,
+  editEventTemplateReminder,
   getEventTemplate,
   listEventTemplates,
+  removeEventTemplateReminder,
   replaceEventTemplateOrganiserDefaults,
   replaceEventTemplatePingRoles,
   replaceEventTemplateReminders,
@@ -2560,6 +2563,341 @@ describe("event template administration service", () => {
     }
   });
 
+  it("adds, edits and removes individual template reminder definitions", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const created = await createEventTemplate(buildCreateInput(fixture));
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected reminder CRUD fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    // Add
+    const added = await addEventTemplateReminder({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      reminder: {
+        timingReference: "  event_start  ",
+
+        minutesBefore: 30,
+
+        message: "  Event starts soon.  ",
+
+        channelId: null,
+
+        pingEventRoles: true,
+      },
+    });
+
+    expect(added.kind).toBe("created");
+
+    if (added.kind !== "created") {
+      throw new Error(
+        `Expected reminder creation to succeed, received "${added.kind}".`,
+      );
+    }
+
+    expect(added.reminder).toEqual({
+      id: expect.any(Number),
+
+      timingReference: "event_start",
+
+      minutesBefore: 30,
+
+      message: "Event starts soon.",
+
+      channelId: null,
+
+      pingEventRoles: true,
+    });
+
+    // Edit
+    const edited = await editEventTemplateReminder({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      reminderId: added.reminder.id,
+
+      timingReference: "signup_close",
+
+      minutesBefore: 15,
+
+      message: "  Signups close soon.  ",
+
+      channelId: REMINDER_CHANNEL_ID,
+
+      pingEventRoles: false,
+    });
+
+    expect(edited.kind).toBe("updated");
+
+    if (edited.kind !== "updated") {
+      throw new Error(
+        `Expected reminder edit to succeed, received "${edited.kind}".`,
+      );
+    }
+
+    expect(edited.reminder).toEqual({
+      id: added.reminder.id,
+
+      timingReference: "signup_close",
+
+      minutesBefore: 15,
+
+      message: "Signups close soon.",
+
+      channelId: REMINDER_CHANNEL_ID,
+
+      pingEventRoles: false,
+    });
+
+    /*
+     * Repeating the same requested values is idempotent.
+     */
+    expect(
+      await editEventTemplateReminder({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        reminderId: added.reminder.id,
+
+        message: "Signups close soon.",
+      }),
+    ).toMatchObject({
+      kind: "unchanged",
+    });
+
+    // Remove
+    expect(
+      await removeEventTemplateReminder({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        reminderId: added.reminder.id,
+      }),
+    ).toEqual({
+      kind: "removed",
+
+      reminderId: added.reminder.id,
+    });
+
+    expect(
+      await removeEventTemplateReminder({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        reminderId: added.reminder.id,
+      }),
+    ).toEqual({
+      kind: "reminder_not_found",
+    });
+
+    const shown = await getEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+    });
+
+    expect(shown.kind).toBe("found");
+
+    if (shown.kind !== "found") {
+      throw new Error(
+        "Expected template to remain readable after reminder removal.",
+      );
+    }
+
+    expect(shown.template.reminders).toEqual([]);
+  });
+
+  it("rejects individual signup-close reminder mutations while template signups are disabled", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const created = await createEventTemplate({
+      ...buildCreateInput(fixture),
+
+      signupsEnabled: false,
+    });
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected no-signups template fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    // Signup-close cannot be added.
+    expect(
+      await addEventTemplateReminder({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        reminder: {
+          timingReference: "signup_close",
+
+          minutesBefore: 10,
+
+          message: "Signups close soon.",
+
+          channelId: null,
+
+          pingEventRoles: false,
+        },
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "signup_close_requires_signups",
+    });
+
+    // Event-start remains valid.
+    const added = await addEventTemplateReminder({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      reminder: {
+        timingReference: "event_start",
+
+        minutesBefore: 10,
+
+        message: "Event starts soon.",
+
+        channelId: null,
+
+        pingEventRoles: false,
+      },
+    });
+
+    expect(added.kind).toBe("created");
+
+    if (added.kind !== "created") {
+      throw new Error(
+        `Expected event-start reminder creation to succeed, received "${added.kind}".`,
+      );
+    }
+
+    // It cannot then be edited into an invalid signup-close definition.
+    expect(
+      await editEventTemplateReminder({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        reminderId: added.reminder.id,
+
+        timingReference: "signup_close",
+      }),
+    ).toEqual({
+      kind: "invalid_input",
+
+      reason: "signup_close_requires_signups",
+    });
+
+    const shown = await getEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+    });
+
+    expect(shown.kind).toBe("found");
+
+    if (shown.kind !== "found") {
+      throw new Error("Expected template to remain readable.");
+    }
+
+    expect(shown.template.reminders).toEqual([
+      expect.objectContaining({
+        id: added.reminder.id,
+
+        timingReference: "event_start",
+
+        message: "Event starts soon.",
+      }),
+    ]);
+  });
+
+  it("keeps individual reminder mutation scoped to the owning template and guild", async () => {
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const foreignFixture = await createSourceFixture(
+      pool,
+      OTHER_DISCORD_GUILD_ID,
+      "foreign",
+    );
+
+    const first = await createEventTemplate(buildCreateInput(fixture));
+
+    const second = await createEventTemplate({
+      ...buildCreateInput(fixture),
+
+      name: "Second Template",
+    });
+
+    if (first.kind !== "created" || second.kind !== "created") {
+      throw new Error("Expected reminder ownership fixtures to be created.");
+    }
+
+    const added = await addEventTemplateReminder({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: first.template.id,
+
+      reminder: {
+        timingReference: "event_start",
+
+        minutesBefore: 30,
+
+        message: "Reminder.",
+
+        channelId: null,
+
+        pingEventRoles: true,
+      },
+    });
+
+    if (added.kind !== "created") {
+      throw new Error(
+        `Expected reminder fixture creation to succeed, received "${added.kind}".`,
+      );
+    }
+
+    expect(
+      await editEventTemplateReminder({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: second.template.id,
+
+        reminderId: added.reminder.id,
+
+        message: "Wrong template.",
+      }),
+    ).toEqual({
+      kind: "reminder_not_found",
+    });
+
+    expect(
+      await removeEventTemplateReminder({
+        guildDatabaseId: foreignFixture.guildId,
+
+        templateId: first.template.id,
+
+        reminderId: added.reminder.id,
+      }),
+    ).toEqual({
+      kind: "template_not_found",
+    });
+  });
+
   it("lists only the owning guild's templates and includes inactive templates", async () => {
     // Arrange
     const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
@@ -3516,6 +3854,195 @@ describe("event template administration service", () => {
 
       if (replacementPromise) {
         pendingOperations.push(replacementPromise);
+      }
+
+      await Promise.allSettled(pendingOperations);
+
+      blockerClient.release();
+    }
+  });
+
+  it("serialises individual reminder editing behind an in-flight generation snapshot", async () => {
+    const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");
+
+    const created = await createEventTemplate({
+      ...buildCreateInput(fixture),
+
+      audienceId: null,
+
+      roleRequestPresetId: null,
+
+      publicationMode: "manual",
+
+      publishMinutesBeforeStart: null,
+    });
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected reminder-edit concurrency fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    const added = await addEventTemplateReminder({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      reminder: {
+        timingReference: "event_start",
+
+        minutesBefore: 30,
+
+        message: "Old reminder.",
+
+        channelId: REMINDER_CHANNEL_ID,
+
+        pingEventRoles: true,
+      },
+    });
+
+    if (added.kind !== "created") {
+      throw new Error(
+        `Expected reminder fixture creation to succeed, received "${added.kind}".`,
+      );
+    }
+
+    const blockerClient = await pool.connect();
+
+    let blockerTransactionOpen = false;
+
+    let generationPromise: ReturnType<typeof generateEventFromTemplate> | null =
+      null;
+
+    let editPromise: ReturnType<typeof editEventTemplateReminder> | null = null;
+
+    try {
+      await blockerClient.query("BEGIN");
+
+      blockerTransactionOpen = true;
+
+      await blockerClient.query(`
+        LOCK TABLE "event_types"
+        IN ACCESS EXCLUSIVE MODE
+      `);
+
+      generationPromise = generateEventFromTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        startsAt: futureStart(),
+
+        generatedByUserId: ADMIN_USER_ID,
+      });
+
+      await waitForBlockedDatabaseQuery(pool, '%from "event_types"%');
+
+      let editResolved = false;
+
+      editPromise = editEventTemplateReminder({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        reminderId: added.reminder.id,
+
+        message: "New reminder.",
+      }).then((result) => {
+        editResolved = true;
+
+        return result;
+      });
+
+      await waitForBlockedDatabaseQuery(
+        pool,
+        '%from "event_templates"%for update%',
+      );
+
+      expect(editResolved).toBe(false);
+
+      await blockerClient.query("COMMIT");
+
+      blockerTransactionOpen = false;
+
+      const generationResult = await generationPromise;
+
+      const editResult = await editPromise;
+
+      expect(generationResult.kind).toBe("generated");
+
+      expect(editResult.kind).toBe("updated");
+
+      if (generationResult.kind !== "generated") {
+        throw new Error(
+          `Expected generation to succeed, received "${generationResult.kind}".`,
+        );
+      }
+
+      const firstEventReminder = await pool.query<{
+        message: string;
+      }>(
+        `
+            SELECT "message"
+            FROM "event_reminders"
+            WHERE "event_id" = $1
+          `,
+        [generationResult.event.id],
+      );
+
+      expect(firstEventReminder.rows).toEqual([
+        {
+          message: "Old reminder.",
+        },
+      ]);
+
+      const secondGeneration = await generateEventFromTemplate({
+        guildDatabaseId: fixture.guildId,
+
+        templateId: created.template.id,
+
+        startsAt: new Date(futureStart().getTime() + 60 * 60_000),
+
+        generatedByUserId: ADMIN_USER_ID,
+      });
+
+      expect(secondGeneration.kind).toBe("generated");
+
+      if (secondGeneration.kind !== "generated") {
+        throw new Error(
+          `Expected later generation to succeed, received "${secondGeneration.kind}".`,
+        );
+      }
+
+      const secondEventReminder = await pool.query<{
+        message: string;
+      }>(
+        `
+            SELECT "message"
+            FROM "event_reminders"
+            WHERE "event_id" = $1
+          `,
+        [secondGeneration.event.id],
+      );
+
+      expect(secondEventReminder.rows).toEqual([
+        {
+          message: "New reminder.",
+        },
+      ]);
+    } finally {
+      if (blockerTransactionOpen) {
+        await blockerClient.query("ROLLBACK").catch(() => undefined);
+      }
+
+      const pendingOperations: Promise<unknown>[] = [];
+
+      if (generationPromise) {
+        pendingOperations.push(generationPromise);
+      }
+
+      if (editPromise) {
+        pendingOperations.push(editPromise);
       }
 
       await Promise.allSettled(pendingOperations);

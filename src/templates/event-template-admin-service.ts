@@ -420,6 +420,90 @@ export type ReplaceEventTemplateRemindersResult =
       reason: EventTemplateReminderInvalidReason;
     };
 
+export type AddEventTemplateReminderInput = {
+  guildDatabaseId: number;
+
+  templateId: number;
+
+  reminder: EventTemplateReminderInput;
+};
+
+export type AddEventTemplateReminderResult =
+  | {
+      kind: "created";
+
+      reminder: EventTemplateReminderDefinition;
+    }
+  | {
+      kind: "template_not_found";
+    }
+  | {
+      kind: "invalid_input";
+
+      reason: EventTemplateReminderInvalidReason;
+    };
+
+export type EditEventTemplateReminderInput = {
+  guildDatabaseId: number;
+
+  templateId: number;
+
+  reminderId: number;
+
+  timingReference?: string;
+
+  minutesBefore?: number;
+
+  message?: string;
+
+  /*
+   * undefined -> preserve
+   * null      -> inherit the generated event publication destination
+   */
+  channelId?: string | null;
+
+  pingEventRoles?: boolean;
+};
+
+export type EditEventTemplateReminderResult =
+  | {
+      kind: "updated" | "unchanged";
+
+      reminder: EventTemplateReminderDefinition;
+    }
+  | {
+      kind: "template_not_found";
+    }
+  | {
+      kind: "reminder_not_found";
+    }
+  | {
+      kind: "invalid_input";
+
+      reason: EventTemplateReminderInvalidReason | "no_changes_requested";
+    };
+
+export type RemoveEventTemplateReminderInput = {
+  guildDatabaseId: number;
+
+  templateId: number;
+
+  reminderId: number;
+};
+
+export type RemoveEventTemplateReminderResult =
+  | {
+      kind: "removed";
+
+      reminderId: number;
+    }
+  | {
+      kind: "template_not_found";
+    }
+  | {
+      kind: "reminder_not_found";
+    };
+
 export type GetEventTemplateInput = {
   guildDatabaseId: number;
 
@@ -1406,6 +1490,355 @@ export async function replaceEventTemplateOrganiserDefaults(
 }
 
 /**
+ * Adds one reusable reminder definition to a template.
+ *
+ * The template parent is locked FOR UPDATE before compatibility checks or
+ * child mutation. This preserves the generation/mutation source-lock contract.
+ */
+export async function addEventTemplateReminder(
+  input: AddEventTemplateReminderInput,
+): Promise<AddEventTemplateReminderResult> {
+  const normalised = normaliseEventTemplateReminder(input.reminder);
+
+  if (!normalised.ok) {
+    return {
+      kind: "invalid_input",
+
+      reason: normalised.reason,
+    };
+  }
+
+  return db.transaction(async (transaction) => {
+    const [template] = await transaction
+      .select({
+        id: eventTemplates.id,
+
+        signupsEnabled: eventTemplates.signupsEnabled,
+      })
+      .from(eventTemplates)
+      .where(
+        and(
+          eq(eventTemplates.id, input.templateId),
+
+          eq(eventTemplates.ownerGuildId, input.guildDatabaseId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    if (!template) {
+      return {
+        kind: "template_not_found",
+      } as const;
+    }
+
+    if (
+      normalised.reminder.timingReference === "signup_close" &&
+      !template.signupsEnabled
+    ) {
+      return {
+        kind: "invalid_input",
+
+        reason: "signup_close_requires_signups",
+      } as const;
+    }
+
+    const now = new Date();
+
+    const [createdRow] = await transaction
+      .insert(eventTemplateReminders)
+      .values({
+        templateId: template.id,
+
+        timingReference: normalised.reminder.timingReference,
+
+        minutesBefore: normalised.reminder.minutesBefore,
+
+        message: normalised.reminder.message,
+
+        channelId: normalised.reminder.channelId,
+
+        pingEventRoles: normalised.reminder.pingEventRoles,
+
+        updatedAt: now,
+      })
+      .returning({
+        id: eventTemplateReminders.id,
+
+        timingReference: eventTemplateReminders.timingReference,
+
+        minutesBefore: eventTemplateReminders.minutesBefore,
+
+        message: eventTemplateReminders.message,
+
+        channelId: eventTemplateReminders.channelId,
+
+        pingEventRoles: eventTemplateReminders.pingEventRoles,
+      });
+
+    if (!createdRow) {
+      throw new Error(
+        `Event template #${template.id} reminder creation did not return a row.`,
+      );
+    }
+
+    await transaction
+      .update(eventTemplates)
+      .set({
+        updatedAt: now,
+      })
+      .where(eq(eventTemplates.id, template.id));
+
+    return {
+      kind: "created",
+
+      reminder: eventTemplateReminderFromRow(createdRow),
+    } as const;
+  });
+}
+
+/**
+ * Edits one reusable reminder definition.
+ *
+ * Omitted fields preserve their current values. A null channel explicitly
+ * restores generated-event publication-destination inheritance.
+ */
+export async function editEventTemplateReminder(
+  input: EditEventTemplateReminderInput,
+): Promise<EditEventTemplateReminderResult> {
+  if (
+    input.timingReference === undefined &&
+    input.minutesBefore === undefined &&
+    input.message === undefined &&
+    input.channelId === undefined &&
+    input.pingEventRoles === undefined
+  ) {
+    return {
+      kind: "invalid_input",
+
+      reason: "no_changes_requested",
+    };
+  }
+
+  return db.transaction(async (transaction) => {
+    const [template] = await transaction
+      .select({
+        id: eventTemplates.id,
+
+        signupsEnabled: eventTemplates.signupsEnabled,
+      })
+      .from(eventTemplates)
+      .where(
+        and(
+          eq(eventTemplates.id, input.templateId),
+
+          eq(eventTemplates.ownerGuildId, input.guildDatabaseId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    if (!template) {
+      return {
+        kind: "template_not_found",
+      } as const;
+    }
+
+    const [existingRow] = await transaction
+      .select({
+        id: eventTemplateReminders.id,
+
+        timingReference: eventTemplateReminders.timingReference,
+
+        minutesBefore: eventTemplateReminders.minutesBefore,
+
+        message: eventTemplateReminders.message,
+
+        channelId: eventTemplateReminders.channelId,
+
+        pingEventRoles: eventTemplateReminders.pingEventRoles,
+      })
+      .from(eventTemplateReminders)
+      .where(
+        and(
+          eq(eventTemplateReminders.id, input.reminderId),
+
+          eq(eventTemplateReminders.templateId, template.id),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    if (!existingRow) {
+      return {
+        kind: "reminder_not_found",
+      } as const;
+    }
+
+    const existing = eventTemplateReminderFromRow(existingRow);
+
+    const normalised = normaliseEventTemplateReminder({
+      timingReference: input.timingReference ?? existing.timingReference,
+
+      minutesBefore: input.minutesBefore ?? existing.minutesBefore,
+
+      message: input.message ?? existing.message,
+
+      channelId:
+        input.channelId === undefined ? existing.channelId : input.channelId,
+
+      pingEventRoles: input.pingEventRoles ?? existing.pingEventRoles,
+    });
+
+    if (!normalised.ok) {
+      return {
+        kind: "invalid_input",
+
+        reason: normalised.reason,
+      } as const;
+    }
+
+    if (
+      normalised.reminder.timingReference === "signup_close" &&
+      !template.signupsEnabled
+    ) {
+      return {
+        kind: "invalid_input",
+
+        reason: "signup_close_requires_signups",
+      } as const;
+    }
+
+    if (eventTemplateReminderMatches(existing, normalised.reminder)) {
+      return {
+        kind: "unchanged",
+
+        reminder: existing,
+      } as const;
+    }
+
+    const now = new Date();
+
+    const [updatedRow] = await transaction
+      .update(eventTemplateReminders)
+      .set({
+        timingReference: normalised.reminder.timingReference,
+
+        minutesBefore: normalised.reminder.minutesBefore,
+
+        message: normalised.reminder.message,
+
+        channelId: normalised.reminder.channelId,
+
+        pingEventRoles: normalised.reminder.pingEventRoles,
+
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(eventTemplateReminders.id, existing.id),
+
+          eq(eventTemplateReminders.templateId, template.id),
+        ),
+      )
+      .returning({
+        id: eventTemplateReminders.id,
+
+        timingReference: eventTemplateReminders.timingReference,
+
+        minutesBefore: eventTemplateReminders.minutesBefore,
+
+        message: eventTemplateReminders.message,
+
+        channelId: eventTemplateReminders.channelId,
+
+        pingEventRoles: eventTemplateReminders.pingEventRoles,
+      });
+
+    if (!updatedRow) {
+      throw new Error(
+        `Event-template reminder #${existing.id} disappeared while being edited.`,
+      );
+    }
+
+    await transaction
+      .update(eventTemplates)
+      .set({
+        updatedAt: now,
+      })
+      .where(eq(eventTemplates.id, template.id));
+
+    return {
+      kind: "updated",
+
+      reminder: eventTemplateReminderFromRow(updatedRow),
+    } as const;
+  });
+}
+
+/**
+ * Removes one reusable reminder definition.
+ */
+export async function removeEventTemplateReminder(
+  input: RemoveEventTemplateReminderInput,
+): Promise<RemoveEventTemplateReminderResult> {
+  return db.transaction(async (transaction) => {
+    const [template] = await transaction
+      .select({
+        id: eventTemplates.id,
+      })
+      .from(eventTemplates)
+      .where(
+        and(
+          eq(eventTemplates.id, input.templateId),
+
+          eq(eventTemplates.ownerGuildId, input.guildDatabaseId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    if (!template) {
+      return {
+        kind: "template_not_found",
+      } as const;
+    }
+
+    const [removed] = await transaction
+      .delete(eventTemplateReminders)
+      .where(
+        and(
+          eq(eventTemplateReminders.id, input.reminderId),
+
+          eq(eventTemplateReminders.templateId, template.id),
+        ),
+      )
+      .returning({
+        id: eventTemplateReminders.id,
+      });
+
+    if (!removed) {
+      return {
+        kind: "reminder_not_found",
+      } as const;
+    }
+
+    await transaction
+      .update(eventTemplates)
+      .set({
+        updatedAt: new Date(),
+      })
+      .where(eq(eventTemplates.id, template.id));
+
+    return {
+      kind: "removed",
+
+      reminderId: removed.id,
+    } as const;
+  });
+}
+
+/**
  * Replaces the complete reusable reminder-definition collection for one
  * template.
  *
@@ -1426,59 +1859,17 @@ export async function replaceEventTemplateReminders(
   const normalisedReminders: NormalisedEventTemplateReminder[] = [];
 
   for (const reminder of input.reminders) {
-    const timingReference = reminder.timingReference.trim();
+    const normalised = normaliseEventTemplateReminder(reminder);
 
-    if (!isEventTemplateReminderTimingReference(timingReference)) {
+    if (!normalised.ok) {
       return {
         kind: "invalid_input",
 
-        reason: "invalid_timing_reference",
+        reason: normalised.reason,
       };
     }
 
-    if (!isPostgresNonNegativeInteger(reminder.minutesBefore)) {
-      return {
-        kind: "invalid_input",
-
-        reason: "invalid_minutes_before",
-      };
-    }
-
-    const message = reminder.message.trim();
-
-    if (message.length === 0) {
-      return {
-        kind: "invalid_input",
-
-        reason: "invalid_message",
-      };
-    }
-
-    let channelId: string | null = null;
-
-    if (reminder.channelId !== null) {
-      channelId = reminder.channelId.trim();
-
-      if (channelId.length === 0) {
-        return {
-          kind: "invalid_input",
-
-          reason: "invalid_channel_id",
-        };
-      }
-    }
-
-    normalisedReminders.push({
-      timingReference,
-
-      minutesBefore: reminder.minutesBefore,
-
-      message,
-
-      channelId,
-
-      pingEventRoles: reminder.pingEventRoles,
-    });
+    normalisedReminders.push(normalised.reminder);
   }
 
   normalisedReminders.sort(compareEventTemplateReminders);
@@ -2143,6 +2534,80 @@ type NormalisedEventTemplateReminder = Omit<
   "id"
 >;
 
+type NormaliseEventTemplateReminderResult =
+  | {
+      ok: true;
+
+      reminder: NormalisedEventTemplateReminder;
+    }
+  | {
+      ok: false;
+
+      reason: EventTemplateReminderInvalidReason;
+    };
+
+function normaliseEventTemplateReminder(
+  reminder: EventTemplateReminderInput,
+): NormaliseEventTemplateReminderResult {
+  const timingReference = reminder.timingReference.trim();
+
+  if (!isEventTemplateReminderTimingReference(timingReference)) {
+    return {
+      ok: false,
+
+      reason: "invalid_timing_reference",
+    };
+  }
+
+  if (!isPostgresNonNegativeInteger(reminder.minutesBefore)) {
+    return {
+      ok: false,
+
+      reason: "invalid_minutes_before",
+    };
+  }
+
+  const message = reminder.message.trim();
+
+  if (message.length === 0) {
+    return {
+      ok: false,
+
+      reason: "invalid_message",
+    };
+  }
+
+  let channelId: string | null = null;
+
+  if (reminder.channelId !== null) {
+    channelId = reminder.channelId.trim();
+
+    if (channelId.length === 0) {
+      return {
+        ok: false,
+
+        reason: "invalid_channel_id",
+      };
+    }
+  }
+
+  return {
+    ok: true,
+
+    reminder: {
+      timingReference,
+
+      minutesBefore: reminder.minutesBefore,
+
+      message,
+
+      channelId,
+
+      pingEventRoles: reminder.pingEventRoles,
+    },
+  };
+}
+
 function eventTemplateReminderFromRow(reminder: {
   id: number;
 
@@ -2171,6 +2636,19 @@ function eventTemplateReminderFromRow(reminder: {
 
     pingEventRoles: reminder.pingEventRoles,
   };
+}
+
+function eventTemplateReminderMatches(
+  existing: EventTemplateReminderDefinition,
+  intended: NormalisedEventTemplateReminder,
+): boolean {
+  return (
+    existing.timingReference === intended.timingReference &&
+    existing.minutesBefore === intended.minutesBefore &&
+    existing.message === intended.message &&
+    existing.channelId === intended.channelId &&
+    existing.pingEventRoles === intended.pingEventRoles
+  );
 }
 
 function eventTemplateRemindersMatch(
