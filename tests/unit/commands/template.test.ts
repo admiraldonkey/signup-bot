@@ -14,17 +14,25 @@ const authMocks = vi.hoisted(() => ({
 }));
 
 const templateServiceMocks = vi.hoisted(() => ({
+  addEventTemplateReminder: vi.fn(),
+
   createEventTemplate: vi.fn(),
 
   editEventTemplate: vi.fn(),
+
+  editEventTemplateReminder: vi.fn(),
 
   getEventTemplate: vi.fn(),
 
   listEventTemplates: vi.fn(),
 
+  removeEventTemplateReminder: vi.fn(),
+
   replaceEventTemplateOrganiserDefaults: vi.fn(),
 
   replaceEventTemplatePingRoles: vi.fn(),
+
+  replaceEventTemplateReminders: vi.fn(),
 
   setEventTemplateActive: vi.fn(),
 }));
@@ -110,6 +118,10 @@ describe("/template command", () => {
       "edit",
       "set-ping-roles",
       "set-organisers",
+      "reminder-add",
+      "reminder-edit",
+      "reminder-remove",
+      "reminder-clear",
       "list",
       "show",
       "set-active",
@@ -235,6 +247,35 @@ describe("/template command", () => {
       "backup-organiser",
       "clear",
     ]);
+
+    const reminderEditDefinition = definition?.options?.find(
+      (option) => option.name === "reminder-edit",
+    );
+
+    expect(reminderEditDefinition).toBeDefined();
+
+    if (
+      !reminderEditDefinition ||
+      !("options" in reminderEditDefinition) ||
+      !reminderEditDefinition.options
+    ) {
+      throw new Error(
+        "Expected /template reminder-edit to be a subcommand with options.",
+      );
+    }
+
+    expect(reminderEditDefinition.options.map((option) => option.name)).toEqual(
+      [
+        "template-id",
+        "reminder-id",
+        "timing-reference",
+        "minutes-before",
+        "message",
+        "channel",
+        "clear-channel",
+        "ping-event-roles",
+      ],
+    );
   });
 
   it("creates a template through the administration service and audits the mutation", async () => {
@@ -1107,6 +1148,256 @@ describe("/template command", () => {
 
         targetId: "/template list",
       }),
+    );
+  });
+
+  it("adds a reusable template reminder through the reminder service", async () => {
+    templateServiceMocks.addEventTemplateReminder.mockResolvedValue({
+      kind: "created",
+
+      reminder: {
+        id: 31,
+
+        timingReference: "event_start",
+
+        minutesBefore: 30,
+
+        message: "Event starts soon.",
+
+        channelId: PUBLICATION_CHANNEL_ID,
+
+        pingEventRoles: true,
+      },
+    });
+
+    const reminderChannel = createTestTextChannel();
+
+    const interaction = createInteraction({
+      subcommand: "reminder-add",
+
+      strings: {
+        "timing-reference": "event_start",
+
+        message: "Event starts soon.",
+      },
+
+      integers: {
+        "template-id": 7,
+
+        "minutes-before": 30,
+      },
+
+      booleans: {
+        "ping-event-roles": true,
+      },
+
+      channels: {
+        channel: reminderChannel,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(templateServiceMocks.addEventTemplateReminder).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      templateId: 7,
+
+      reminder: {
+        timingReference: "event_start",
+
+        minutesBefore: 30,
+
+        message: "Event starts soon.",
+
+        channelId: PUBLICATION_CHANNEL_ID,
+
+        pingEventRoles: true,
+      },
+    });
+
+    expect(readFirstReplyContent(interaction.editReply)).toContain(
+      "Added reminder #31 to event template #7",
+    );
+
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "event_template.reminder.add",
+
+        targetType: "event_template",
+
+        targetId: "7",
+      }),
+    );
+  });
+
+  it("edits a template reminder and explicitly restores inherited channel behaviour", async () => {
+    templateServiceMocks.editEventTemplateReminder.mockResolvedValue({
+      kind: "updated",
+
+      reminder: {
+        id: 31,
+
+        timingReference: "signup_close",
+
+        minutesBefore: 15,
+
+        message: "Signups close soon.",
+
+        channelId: null,
+
+        pingEventRoles: false,
+      },
+    });
+
+    const interaction = createInteraction({
+      subcommand: "reminder-edit",
+
+      strings: {
+        "timing-reference": "signup_close",
+
+        message: "Signups close soon.",
+      },
+
+      integers: {
+        "template-id": 7,
+
+        "reminder-id": 31,
+
+        "minutes-before": 15,
+      },
+
+      booleans: {
+        "clear-channel": true,
+
+        "ping-event-roles": false,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(templateServiceMocks.editEventTemplateReminder).toHaveBeenCalledWith(
+      {
+        guildDatabaseId: 42,
+
+        templateId: 7,
+
+        reminderId: 31,
+
+        timingReference: "signup_close",
+
+        minutesBefore: 15,
+
+        message: "Signups close soon.",
+
+        channelId: null,
+
+        pingEventRoles: false,
+      },
+    );
+
+    expect(readFirstReplyContent(interaction.editReply)).toContain(
+      "Updated reminder #31 for event template #7",
+    );
+  });
+
+  it("removes one template reminder and audits the mutation", async () => {
+    templateServiceMocks.removeEventTemplateReminder.mockResolvedValue({
+      kind: "removed",
+
+      reminderId: 31,
+    });
+
+    const interaction = createInteraction({
+      subcommand: "reminder-remove",
+
+      integers: {
+        "template-id": 7,
+
+        "reminder-id": 31,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(
+      templateServiceMocks.removeEventTemplateReminder,
+    ).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      templateId: 7,
+
+      reminderId: 31,
+    });
+
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "event_template.reminder.remove",
+
+        targetId: "7",
+      }),
+    );
+  });
+
+  it("clears all template reminders through complete replacement", async () => {
+    templateServiceMocks.replaceEventTemplateReminders.mockResolvedValue({
+      kind: "updated",
+
+      reminders: [],
+    });
+
+    const interaction = createInteraction({
+      subcommand: "reminder-clear",
+
+      integers: {
+        "template-id": 7,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(
+      templateServiceMocks.replaceEventTemplateReminders,
+    ).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      templateId: 7,
+
+      reminders: [],
+    });
+
+    expect(readFirstReplyContent(interaction.editReply)).toContain(
+      "Cleared all reminder definitions from event template #7",
+    );
+  });
+
+  it("rejects reminder-edit channel replacement and clear intent together", async () => {
+    const interaction = createInteraction({
+      subcommand: "reminder-edit",
+
+      integers: {
+        "template-id": 7,
+
+        "reminder-id": 31,
+      },
+
+      booleans: {
+        "clear-channel": true,
+      },
+
+      channels: {
+        channel: createTestTextChannel(),
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(
+      templateServiceMocks.editEventTemplateReminder,
+    ).not.toHaveBeenCalled();
+
+    expect(readFirstReplyContent(interaction.editReply)).toContain(
+      "either a replacement reminder channel",
     );
   });
 });

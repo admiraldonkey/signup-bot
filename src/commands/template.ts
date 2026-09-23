@@ -13,16 +13,21 @@ import {
 } from "../auth/event-admin.js";
 import { writeAuditLog } from "../audit/audit-log.js";
 import {
+  addEventTemplateReminder,
   createEventTemplate,
   editEventTemplate,
+  editEventTemplateReminder,
   getEventTemplate,
   listEventTemplates,
+  removeEventTemplateReminder,
   replaceEventTemplateOrganiserDefaults,
   replaceEventTemplatePingRoles,
+  replaceEventTemplateReminders,
   setEventTemplateActive,
   type CreateEventTemplateResult,
   type EditEventTemplateResult,
   type EventTemplateDetail,
+  type EventTemplateReminderInvalidReason,
   type ReplaceEventTemplateOrganiserDefaultsResult,
   type ReplaceEventTemplatePingRolesResult,
 } from "../templates/event-template-admin-service.js";
@@ -107,6 +112,26 @@ export async function handleTemplateCommand(
 
     case "set-organisers":
       await setTemplateOrganisers(interaction, configuration);
+
+      return;
+
+    case "reminder-add":
+      await addTemplateReminder(interaction, configuration.guildId);
+
+      return;
+
+    case "reminder-edit":
+      await editTemplateReminder(interaction, configuration.guildId);
+
+      return;
+
+    case "reminder-remove":
+      await removeTemplateReminder(interaction, configuration.guildId);
+
+      return;
+
+    case "reminder-clear":
+      await clearTemplateReminders(interaction, configuration.guildId);
 
       return;
 
@@ -1309,6 +1334,444 @@ async function setTemplateOrganisers(
   }
 }
 
+async function addTemplateReminder(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const templateId = interaction.options.getInteger("template-id", true);
+
+  const selectedChannel = interaction.options.getChannel("channel");
+
+  let channelId: string | null = null;
+
+  if (selectedChannel) {
+    const resolvedChannelId = await resolveTemplateReminderChannel(
+      interaction,
+      selectedChannel.id,
+    );
+
+    if (resolvedChannelId === null) {
+      return;
+    }
+
+    channelId = resolvedChannelId;
+  }
+
+  const result = await addEventTemplateReminder({
+    guildDatabaseId,
+
+    templateId,
+
+    reminder: {
+      timingReference: interaction.options.getString("timing-reference", true),
+
+      minutesBefore: interaction.options.getInteger("minutes-before", true),
+
+      message: interaction.options.getString("message", true),
+
+      channelId,
+
+      pingEventRoles:
+        interaction.options.getBoolean("ping-event-roles") ?? false,
+    },
+  });
+
+  switch (result.kind) {
+    case "created":
+      await interaction.editReply({
+        content: [
+          `✅ Added reminder #${result.reminder.id} to event template #${templateId}.`,
+          "",
+          `**Timing:** ${formatReminderTiming(result.reminder.timingReference)}`,
+          `**Offset:** ${result.reminder.minutesBefore} minutes before`,
+          `**Message:** ${result.reminder.message}`,
+          `**Channel:** ${
+            result.reminder.channelId
+              ? `<#${result.reminder.channelId}>`
+              : "Generated event publication destination"
+          }`,
+          `**Ping event roles:** ${
+            result.reminder.pingEventRoles ? "Yes" : "No"
+          }`,
+          "",
+          "Existing generated events were not changed.",
+        ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: guildDatabaseId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "event_template.reminder.add",
+
+        outcome: "success",
+
+        summary: `Added reminder #${result.reminder.id} to event template #${templateId}.`,
+
+        targetType: "event_template",
+
+        targetId: String(templateId),
+
+        details: {
+          reminderId: result.reminder.id,
+
+          timingReference: result.reminder.timingReference,
+
+          minutesBefore: result.reminder.minutesBefore,
+
+          channelId: result.reminder.channelId,
+
+          pingEventRoles: result.reminder.pingEventRoles,
+        },
+      });
+
+      return;
+
+    case "template_not_found":
+      await replyTemplateNotFound(interaction, templateId);
+
+      return;
+
+    case "invalid_input":
+      await interaction.editReply({
+        content: formatTemplateReminderValidationError(result.reason),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
+}
+
+async function editTemplateReminder(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const templateId = interaction.options.getInteger("template-id", true);
+
+  const reminderId = interaction.options.getInteger("reminder-id", true);
+
+  const selectedChannel = interaction.options.getChannel("channel");
+
+  const clearChannel = interaction.options.getBoolean("clear-channel") ?? false;
+
+  if (selectedChannel !== null && clearChannel) {
+    await interaction.editReply({
+      content:
+        "Choose either a replacement reminder channel or `clear-channel:true`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  let channelId: string | null | undefined;
+
+  if (clearChannel) {
+    channelId = null;
+  } else if (selectedChannel) {
+    const resolvedChannelId = await resolveTemplateReminderChannel(
+      interaction,
+      selectedChannel.id,
+    );
+
+    if (resolvedChannelId === null) {
+      return;
+    }
+
+    channelId = resolvedChannelId;
+  }
+
+  const result = await editEventTemplateReminder({
+    guildDatabaseId,
+
+    templateId,
+
+    reminderId,
+
+    timingReference:
+      interaction.options.getString("timing-reference") ?? undefined,
+
+    minutesBefore:
+      interaction.options.getInteger("minutes-before") ?? undefined,
+
+    message: interaction.options.getString("message") ?? undefined,
+
+    channelId,
+
+    pingEventRoles:
+      interaction.options.getBoolean("ping-event-roles") ?? undefined,
+  });
+
+  switch (result.kind) {
+    case "updated":
+      await interaction.editReply({
+        content: [
+          `✅ Updated reminder #${result.reminder.id} for event template #${templateId}.`,
+          "",
+          `**Timing:** ${formatReminderTiming(
+            result.reminder.timingReference,
+          )}`,
+          `**Offset:** ${result.reminder.minutesBefore} minutes before`,
+          `**Message:** ${result.reminder.message}`,
+          `**Channel:** ${
+            result.reminder.channelId
+              ? `<#${result.reminder.channelId}>`
+              : "Generated event publication destination"
+          }`,
+          `**Ping event roles:** ${
+            result.reminder.pingEventRoles ? "Yes" : "No"
+          }`,
+          "",
+          "Existing generated events were not changed.",
+        ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: guildDatabaseId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "event_template.reminder.edit",
+
+        outcome: "success",
+
+        summary: `Edited reminder #${result.reminder.id} for event template #${templateId}.`,
+
+        targetType: "event_template",
+
+        targetId: String(templateId),
+
+        details: {
+          reminderId: result.reminder.id,
+
+          timingReference: result.reminder.timingReference,
+
+          minutesBefore: result.reminder.minutesBefore,
+
+          channelId: result.reminder.channelId,
+
+          pingEventRoles: result.reminder.pingEventRoles,
+        },
+      });
+
+      return;
+
+    case "unchanged":
+      await interaction.editReply({
+        content: `Reminder #${result.reminder.id} already has that reusable configuration. No changes were made.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "template_not_found":
+      await replyTemplateNotFound(interaction, templateId);
+
+      return;
+
+    case "reminder_not_found":
+      await interaction.editReply({
+        content: `Reminder #${reminderId} was not found on event template #${templateId}.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "invalid_input":
+      await interaction.editReply({
+        content: formatTemplateReminderValidationError(result.reason),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
+}
+
+async function removeTemplateReminder(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const templateId = interaction.options.getInteger("template-id", true);
+
+  const reminderId = interaction.options.getInteger("reminder-id", true);
+
+  const result = await removeEventTemplateReminder({
+    guildDatabaseId,
+
+    templateId,
+
+    reminderId,
+  });
+
+  switch (result.kind) {
+    case "removed":
+      await interaction.editReply({
+        content: [
+          `✅ Removed reminder #${result.reminderId} from event template #${templateId}.`,
+          "",
+          "Existing generated events and their reminder instances were not changed.",
+        ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: guildDatabaseId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "event_template.reminder.remove",
+
+        outcome: "success",
+
+        summary: `Removed reminder #${result.reminderId} from event template #${templateId}.`,
+
+        targetType: "event_template",
+
+        targetId: String(templateId),
+
+        details: {
+          reminderId: result.reminderId,
+        },
+      });
+
+      return;
+
+    case "template_not_found":
+      await replyTemplateNotFound(interaction, templateId);
+
+      return;
+
+    case "reminder_not_found":
+      await interaction.editReply({
+        content: `Reminder #${reminderId} was not found on event template #${templateId}.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
+}
+
+async function clearTemplateReminders(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const templateId = interaction.options.getInteger("template-id", true);
+
+  const result = await replaceEventTemplateReminders({
+    guildDatabaseId,
+
+    templateId,
+
+    reminders: [],
+  });
+
+  switch (result.kind) {
+    case "updated":
+      await interaction.editReply({
+        content: [
+          `✅ Cleared all reminder definitions from event template #${templateId}.`,
+          "",
+          "Existing generated events and their reminder instances were not changed.",
+        ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: guildDatabaseId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "event_template.reminders.clear",
+
+        outcome: "success",
+
+        summary: `Cleared reminder definitions from event template #${templateId}.`,
+
+        targetType: "event_template",
+
+        targetId: String(templateId),
+
+        details: {
+          reminderCount: 0,
+        },
+      });
+
+      return;
+
+    case "unchanged":
+      await interaction.editReply({
+        content: `Event template #${templateId} already has no reminder definitions. No changes were made.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "template_not_found":
+      await replyTemplateNotFound(interaction, templateId);
+
+      return;
+
+    case "invalid_input":
+      /*
+       * An empty replacement has no invalid reminder fields, but keep the
+       * service result handled exhaustively.
+       */
+      await interaction.editReply({
+        content: formatTemplateReminderValidationError(result.reason),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
+}
+
 async function listTemplates(
   interaction: CachedCommandInteraction,
   guildDatabaseId: number,
@@ -1703,6 +2166,90 @@ function formatOrganiserValidationError(
     case "backup_requires_primary":
       return "A backup organiser requires a primary organiser.";
   }
+}
+
+function formatTemplateReminderValidationError(
+  reason: EventTemplateReminderInvalidReason | "no_changes_requested",
+): string {
+  switch (reason) {
+    case "invalid_timing_reference":
+      return "The reminder timing reference is invalid.";
+
+    case "invalid_minutes_before":
+      return "The reminder offset must be zero or a positive whole number of minutes.";
+
+    case "invalid_message":
+      return "The reminder message cannot be blank.";
+
+    case "invalid_channel_id":
+      return "The reminder channel is invalid.";
+
+    case "signup_close_requires_signups":
+      return "A signup-close reminder requires signups to be enabled on the template.";
+
+    case "no_changes_requested":
+      return "No reminder changes were supplied.";
+  }
+}
+
+async function resolveTemplateReminderChannel(
+  interaction: CachedCommandInteraction,
+  channelId: string,
+): Promise<string | null> {
+  const channel = await interaction.guild.channels.fetch(channelId);
+
+  if (
+    !channel ||
+    (channel.type !== ChannelType.GuildText &&
+      channel.type !== ChannelType.GuildAnnouncement) ||
+    !channel.isSendable()
+  ) {
+    await interaction.editReply({
+      content: "The selected reminder channel is unavailable.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return null;
+  }
+
+  const botMember =
+    interaction.guild.members.me ?? (await interaction.guild.members.fetchMe());
+
+  const permissions = channel.permissionsFor(botMember);
+
+  if (
+    !permissions.has(PermissionFlagsBits.ViewChannel) ||
+    !permissions.has(PermissionFlagsBits.SendMessages)
+  ) {
+    await interaction.editReply({
+      content:
+        "The bot cannot view and send messages in the selected reminder channel.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return null;
+  }
+
+  return channel.id;
+}
+
+async function replyTemplateNotFound(
+  interaction: CachedCommandInteraction,
+  templateId: number,
+): Promise<void> {
+  await interaction.editReply({
+    content: `Event template #${templateId} was not found in this server.`,
+
+    allowedMentions: {
+      parse: [],
+    },
+  });
 }
 
 function formatPublicationMode(value: string): string {

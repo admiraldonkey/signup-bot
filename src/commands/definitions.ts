@@ -1550,6 +1550,180 @@ export const commandDefinitions = [
 
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("reminder-add")
+        .setDescription("Adds a reusable reminder definition to a template.")
+        .addIntegerOption((option) =>
+          option
+            .setName("template-id")
+            .setDescription("Template ID shown by /template list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("timing-reference")
+            .setDescription("What the reminder timing is relative to.")
+            .addChoices(
+              {
+                name: "Event start",
+                value: "event_start",
+              },
+              {
+                name: "Signup close",
+                value: "signup_close",
+              },
+            )
+            .setRequired(true),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("minutes-before")
+            .setDescription(
+              "How many minutes before the reference point to send it.",
+            )
+            .setMinValue(0)
+            .setMaxValue(10080)
+            .setRequired(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("message")
+            .setDescription("Reminder message.")
+            .setMinLength(1)
+            .setMaxLength(1000)
+            .setRequired(true),
+        )
+        .addChannelOption((option) =>
+          option
+            .setName("channel")
+            .setDescription(
+              "Fixed reminder channel; omit to inherit the generated event publication destination.",
+            )
+            .addChannelTypes(
+              ChannelType.GuildText,
+              ChannelType.GuildAnnouncement,
+            ),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("ping-event-roles")
+            .setDescription(
+              "Whether the reminder should ping the generated event's ping roles.",
+            ),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("reminder-edit")
+        .setDescription("Edits one reusable template reminder definition.")
+        .addIntegerOption((option) =>
+          option
+            .setName("template-id")
+            .setDescription("Template ID shown by /template list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("reminder-id")
+            .setDescription("Reminder ID shown by /template show.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("timing-reference")
+            .setDescription("Replacement timing reference.")
+            .addChoices(
+              {
+                name: "Event start",
+                value: "event_start",
+              },
+              {
+                name: "Signup close",
+                value: "signup_close",
+              },
+            ),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("minutes-before")
+            .setDescription("Replacement reminder offset.")
+            .setMinValue(0)
+            .setMaxValue(10080),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("message")
+            .setDescription("Replacement reminder message.")
+            .setMinLength(1)
+            .setMaxLength(1000),
+        )
+        .addChannelOption((option) =>
+          option
+            .setName("channel")
+            .setDescription("Replacement fixed reminder channel.")
+            .addChannelTypes(
+              ChannelType.GuildText,
+              ChannelType.GuildAnnouncement,
+            ),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("clear-channel")
+            .setDescription(
+              "Restore publication-destination inheritance for this reminder.",
+            ),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("ping-event-roles")
+            .setDescription(
+              "Whether the reminder should ping the generated event's ping roles.",
+            ),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("reminder-remove")
+        .setDescription(
+          "Removes one reusable reminder definition from a template.",
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("template-id")
+            .setDescription("Template ID shown by /template list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("reminder-id")
+            .setDescription("Reminder ID shown by /template show.")
+            .setMinValue(1)
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("reminder-clear")
+        .setDescription(
+          "Removes all reusable reminder definitions from a template.",
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("template-id")
+            .setDescription("Template ID shown by /template list.")
+            .setMinValue(1)
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("list")
         .setDescription("Lists reusable event templates.")
         .addBooleanOption((option) =>
