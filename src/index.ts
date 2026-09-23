@@ -46,8 +46,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
    */
   if (interaction.isAutocomplete()) {
     try {
-      if (interaction.commandName === "event") {
+      if (
+        interaction.commandName === "event" ||
+        interaction.commandName === "template"
+      ) {
         await handleEventAutocomplete(interaction);
+
         return;
       }
 

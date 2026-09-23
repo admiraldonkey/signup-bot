@@ -1,5 +1,5 @@
 import { eq } from "drizzle-orm";
-import { db } from "../db/client.js";
+import { db, type DatabaseTransaction } from "../db/client.js";
 
 import {
   eventOrganiserAssignments,
@@ -100,11 +100,31 @@ export type CreateStoredEventResult =
 export async function createStoredEvent(
   input: CreateStoredEventInput,
 ): Promise<CreateStoredEventResult> {
+  return db.transaction((transaction) =>
+    createStoredEventInTransaction(transaction, input),
+  );
+}
+
+/**
+ * Creates the authoritative unpublished database representation of an event
+ * inside a caller-owned transaction.
+ *
+ * This is the composable domain boundary for operations such as future
+ * template generation which must create the event and additional snapshots
+ * atomically.
+ *
+ * The caller owns commit and rollback. This function must never commit
+ * independently.
+ */
+export async function createStoredEventInTransaction(
+  transaction: DatabaseTransaction,
+  input: CreateStoredEventInput,
+): Promise<CreateStoredEventResult> {
   /*
    * These are domain invariants rather than Discord-command validation.
    *
-   * Keeping them here protects future callers such as recurring template
-   * generation, which will not pass through /event create.
+   * Keeping them here protects callers which do not pass through
+   * /event create, including future template generation.
    */
   if (input.backupOrganiser && !input.primaryOrganiser) {
     throw new Error("A backup organiser requires a primary organiser.");
@@ -123,171 +143,132 @@ export async function createStoredEvent(
   if (input.signupsEnabled && !input.attendanceClosesAt) {
     throw new Error("A signup event requires an attendance closing time.");
   }
-
-  return db.transaction(async (transaction) => {
-    /*
-     * Creating dormant organiser assignments is still an organiser-domain
-     * mutation.
-     *
-     * Participate in the same shared/exclusive feature-lock contract as the
-     * other organiser services so a concurrent parent-feature disable cannot
-     * be overtaken.
-     *
-     * Events without organiser defaults do not need this lock and remain
-     * creatable while the organiser subsystem is disabled.
-     */
-    if (input.primaryOrganiser || input.backupOrganiser) {
-      const [featureSettings] = await transaction
-        .select({
-          organisersEnabled: guildSettings.organisersEnabled,
-        })
-        .from(guildSettings)
-        .where(eq(guildSettings.guildId, input.guildDatabaseId))
-        .limit(1)
-        .for("share");
-
-      if (!featureSettings?.organisersEnabled) {
-        return {
-          kind: "organisers_disabled",
-        } as const;
-      }
-    }
-
-    const now = new Date();
-
-    const [event] = await transaction
-      .insert(events)
-      .values({
-        templateId: input.templateId,
-
-        ownerGuildId: input.guildDatabaseId,
-
-        eventTypeId: input.eventTypeId,
-
-        audienceId: input.audienceId,
-
-        timezone: input.timezone,
-
-        showDetailedDeadline: input.showDetailedDeadline,
-
-        name: input.name,
-
-        description: input.description,
-
-        startsAt: input.startsAt,
-
-        endsAt: input.endsAt,
-
-        /*
-         * An unpublished event exists internally but attendance has not
-         * yet opened to members.
-         */
-        attendanceOpensAt: null,
-
-        signupsEnabled: input.signupsEnabled,
-
-        attendanceClosesAt: input.attendanceClosesAt,
-
-        roleRequestsOpenAt: null,
-
-        publishedAt: null,
-
-        publishMinutesBeforeStart: input.publishMinutesBeforeStart,
-
-        /*
-         * Snapshot the intended publication destination. A later change
-         * to guild defaults must not silently move this event.
-         */
-        publicationChannelId: input.publicationChannelId,
-
-        status: "scheduled",
-
-        createdByUserId: input.createdByUserId,
-
-        updatedAt: now,
+  /*
+   * Creating dormant organiser assignments is still an organiser-domain
+   * mutation.
+   *
+   * Participate in the same shared/exclusive feature-lock contract as the
+   * other organiser services so a concurrent parent-feature disable cannot
+   * be overtaken.
+   *
+   * Events without organiser defaults do not need this lock and remain
+   * creatable while the organiser subsystem is disabled.
+   */
+  if (input.primaryOrganiser || input.backupOrganiser) {
+    const [featureSettings] = await transaction
+      .select({
+        organisersEnabled: guildSettings.organisersEnabled,
       })
-      .returning({
-        id: events.id,
+      .from(guildSettings)
+      .where(eq(guildSettings.guildId, input.guildDatabaseId))
+      .limit(1)
+      .for("share");
 
-        timezone: events.timezone,
-
-        showDetailedDeadline: events.showDetailedDeadline,
-
-        name: events.name,
-
-        startsAt: events.startsAt,
-
-        signupsEnabled: events.signupsEnabled,
-
-        attendanceClosesAt: events.attendanceClosesAt,
-      });
-
-    if (!event) {
-      throw new Error("The database did not return the created event.");
+    if (!featureSettings?.organisersEnabled) {
+      return {
+        kind: "organisers_disabled",
+      } as const;
     }
+  }
 
-    if (input.pingRoles.length > 0) {
-      await transaction.insert(eventPingRoles).values(
-        input.pingRoles.map((role, index) => ({
-          eventId: event.id,
+  const now = new Date();
 
-          discordRoleId: role.discordRoleId,
+  const [event] = await transaction
+    .insert(events)
+    .values({
+      templateId: input.templateId,
 
-          roleName: role.roleName,
+      ownerGuildId: input.guildDatabaseId,
 
-          sortOrder: index,
-        })),
-      );
-    }
+      eventTypeId: input.eventTypeId,
 
-    if (input.primaryOrganiser) {
-      const [assignment] = await transaction
-        .insert(eventOrganiserAssignments)
-        .values({
-          eventId: event.id,
+      audienceId: input.audienceId,
 
-          slot: "primary",
+      timezone: input.timezone,
 
-          discordUserId: input.primaryOrganiser.discordUserId,
+      showDetailedDeadline: input.showDetailedDeadline,
 
-          displayNameSnapshot: input.primaryOrganiser.displayNameSnapshot,
+      name: input.name,
 
-          status: "pending",
+      description: input.description,
 
-          isCurrent: true,
+      startsAt: input.startsAt,
 
-          assignedByUserId: input.createdByUserId,
+      endsAt: input.endsAt,
 
-          /*
-           * Organiser responsibility begins when the event becomes
-           * public, not when its internal record is created.
-           */
-          activatedAt: null,
+      /*
+       * An unpublished event exists internally but attendance has not
+       * yet opened to members.
+       */
+      attendanceOpensAt: null,
 
-          responseDeadlineAt: null,
+      signupsEnabled: input.signupsEnabled,
 
-          updatedAt: now,
-        })
-        .returning({
-          id: eventOrganiserAssignments.id,
-        });
+      attendanceClosesAt: input.attendanceClosesAt,
 
-      if (!assignment) {
-        throw new Error(
-          "The database did not return the primary organiser assignment.",
-        );
-      }
-    }
+      roleRequestsOpenAt: null,
 
-    if (input.backupOrganiser) {
-      await transaction.insert(eventOrganiserAssignments).values({
+      publishedAt: null,
+
+      publishMinutesBeforeStart: input.publishMinutesBeforeStart,
+
+      /*
+       * Snapshot the intended publication destination. A later change
+       * to guild defaults must not silently move this event.
+       */
+      publicationChannelId: input.publicationChannelId,
+
+      status: "scheduled",
+
+      createdByUserId: input.createdByUserId,
+
+      updatedAt: now,
+    })
+    .returning({
+      id: events.id,
+
+      timezone: events.timezone,
+
+      showDetailedDeadline: events.showDetailedDeadline,
+
+      name: events.name,
+
+      startsAt: events.startsAt,
+
+      signupsEnabled: events.signupsEnabled,
+
+      attendanceClosesAt: events.attendanceClosesAt,
+    });
+
+  if (!event) {
+    throw new Error("The database did not return the created event.");
+  }
+
+  if (input.pingRoles.length > 0) {
+    await transaction.insert(eventPingRoles).values(
+      input.pingRoles.map((role, index) => ({
         eventId: event.id,
 
-        slot: "backup",
+        discordRoleId: role.discordRoleId,
 
-        discordUserId: input.backupOrganiser.discordUserId,
+        roleName: role.roleName,
 
-        displayNameSnapshot: input.backupOrganiser.displayNameSnapshot,
+        sortOrder: index,
+      })),
+    );
+  }
+
+  if (input.primaryOrganiser) {
+    const [assignment] = await transaction
+      .insert(eventOrganiserAssignments)
+      .values({
+        eventId: event.id,
+
+        slot: "primary",
+
+        discordUserId: input.primaryOrganiser.discordUserId,
+
+        displayNameSnapshot: input.primaryOrganiser.displayNameSnapshot,
 
         status: "pending",
 
@@ -295,52 +276,58 @@ export async function createStoredEvent(
 
         assignedByUserId: input.createdByUserId,
 
+        /*
+         * Organiser responsibility begins when the event becomes
+         * public, not when its internal record is created.
+         */
         activatedAt: null,
 
         responseDeadlineAt: null,
 
         updatedAt: now,
+      })
+      .returning({
+        id: eventOrganiserAssignments.id,
       });
+
+    if (!assignment) {
+      throw new Error(
+        "The database did not return the primary organiser assignment.",
+      );
     }
+  }
 
-    if (input.scheduledPublicationAt) {
-      await transaction.insert(scheduledActions).values({
-        eventId: event.id,
+  if (input.backupOrganiser) {
+    await transaction.insert(eventOrganiserAssignments).values({
+      eventId: event.id,
 
-        actionKey: "publish_event",
+      slot: "backup",
 
-        dueAt: input.scheduledPublicationAt,
+      discordUserId: input.backupOrganiser.discordUserId,
 
-        status: "pending",
+      displayNameSnapshot: input.backupOrganiser.displayNameSnapshot,
 
-        attemptCount: 0,
+      status: "pending",
 
-        updatedAt: now,
-      });
-    }
+      isCurrent: true,
 
-    if (input.signupsEnabled && input.attendanceClosesAt) {
-      await transaction.insert(scheduledActions).values({
-        eventId: event.id,
+      assignedByUserId: input.createdByUserId,
 
-        actionKey: "close_attendance",
+      activatedAt: null,
 
-        dueAt: input.attendanceClosesAt,
+      responseDeadlineAt: null,
 
-        status: "pending",
+      updatedAt: now,
+    });
+  }
 
-        attemptCount: 0,
-
-        updatedAt: now,
-      });
-    }
-
+  if (input.scheduledPublicationAt) {
     await transaction.insert(scheduledActions).values({
       eventId: event.id,
 
-      actionKey: "complete_event",
+      actionKey: "publish_event",
 
-      dueAt: input.endsAt,
+      dueAt: input.scheduledPublicationAt,
 
       status: "pending",
 
@@ -348,11 +335,40 @@ export async function createStoredEvent(
 
       updatedAt: now,
     });
+  }
 
-    return {
-      kind: "created",
+  if (input.signupsEnabled && input.attendanceClosesAt) {
+    await transaction.insert(scheduledActions).values({
+      eventId: event.id,
 
-      event,
-    } as const;
+      actionKey: "close_attendance",
+
+      dueAt: input.attendanceClosesAt,
+
+      status: "pending",
+
+      attemptCount: 0,
+
+      updatedAt: now,
+    });
+  }
+
+  await transaction.insert(scheduledActions).values({
+    eventId: event.id,
+
+    actionKey: "complete_event",
+
+    dueAt: input.endsAt,
+
+    status: "pending",
+
+    attemptCount: 0,
+
+    updatedAt: now,
   });
+
+  return {
+    kind: "created",
+    event,
+  } as const;
 }

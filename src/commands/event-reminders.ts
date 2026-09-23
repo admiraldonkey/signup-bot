@@ -17,6 +17,7 @@ import {
   sendEventCustomMessage,
   validateEventMessageDestination,
 } from "../events/event-custom-message.js";
+import { createEventReminder } from "../reminders/reminder-creation-service.js";
 import {
   buildReminderActionKey,
   calculateReminderDueAt,
@@ -82,7 +83,20 @@ export async function addEventReminder(
 
   const selectedChannel = interaction.options.getChannel("channel");
 
-  const channelId = selectedChannel?.id ?? event.attendanceChannelId;
+  const channelId =
+    selectedChannel?.id ?? resolveOwnedEventDefaultChannelId(event);
+
+  if (!channelId) {
+    await interaction.editReply(
+      [
+        "This event does not currently have a usable default reminder destination.",
+        "",
+        "Choose a channel explicitly with the `channel` option.",
+      ].join("\n"),
+    );
+
+    return;
+  }
 
   const pingEventRoles =
     interaction.options.getBoolean("ping-event-roles") ?? true;
@@ -130,53 +144,22 @@ export async function addEventReminder(
     return;
   }
 
-  const now = new Date();
+  const reminder = await createEventReminder({
+    eventId: event.id,
 
-  const reminder = await db.transaction(async (transaction) => {
-    const [createdReminder] = await transaction
-      .insert(eventReminders)
-      .values({
-        eventId: event.id,
+    timingReference,
 
-        timingReference,
+    minutesBefore,
 
-        minutesBefore,
+    message,
 
-        message,
+    channelId,
 
-        channelId,
+    pingEventRoles,
 
-        pingEventRoles,
+    createdByUserId: interaction.user.id,
 
-        enabled: true,
-
-        createdByUserId: interaction.user.id,
-
-        updatedAt: now,
-      })
-      .returning({
-        id: eventReminders.id,
-      });
-
-    if (!createdReminder) {
-      throw new Error("The reminder could not be created.");
-    }
-
-    await transaction.insert(scheduledActions).values({
-      eventId: event.id,
-
-      actionKey: buildReminderActionKey(createdReminder.id),
-
-      dueAt,
-
-      status: "pending",
-
-      attemptCount: 0,
-
-      updatedAt: now,
-    });
-
-    return createdReminder;
+    dueAt,
   });
 
   await writeAuditLog({
@@ -473,7 +456,20 @@ export async function announceEvent(
 
   const selectedChannel = interaction.options.getChannel("channel");
 
-  const channelId = selectedChannel?.id ?? event.attendanceChannelId;
+  const channelId =
+    selectedChannel?.id ?? resolveOwnedEventDefaultChannelId(event);
+
+  if (!channelId) {
+    await interaction.editReply(
+      [
+        "This event does not currently have a usable default announcement destination.",
+        "",
+        "Choose a channel explicitly with the `channel` option.",
+      ].join("\n"),
+    );
+
+    return;
+  }
 
   /*
    * Announcements default to NOT pinging anyone.
@@ -593,15 +589,30 @@ async function findOwnedEvent(guildDatabaseId: number, eventId: number) {
   const [event] = await db
     .select({
       id: events.id,
+
       name: events.name,
+
       status: events.status,
+
       signupsEnabled: events.signupsEnabled,
+
       startsAt: events.startsAt,
+
       attendanceClosesAt: events.attendanceClosesAt,
+
+      /*
+       * A published event normally resolves its current attendance
+       * destination from the durable Discord-message linkage.
+       *
+       * Scheduled unpublished events do not have that linkage yet, so the
+       * event's stored publication destination remains the fallback.
+       */
       attendanceChannelId: eventMessages.channelId,
+
+      publicationChannelId: events.publicationChannelId,
     })
     .from(events)
-    .innerJoin(
+    .leftJoin(
       eventMessages,
       and(
         eq(eventMessages.eventId, events.id),
@@ -621,6 +632,16 @@ async function findOwnedEvent(guildDatabaseId: number, eventId: number) {
     .limit(1);
 
   return event ?? null;
+}
+
+function resolveOwnedEventDefaultChannelId(
+  event: Awaited<ReturnType<typeof findOwnedEvent>>,
+): string | null {
+  if (!event) {
+    return null;
+  }
+
+  return event.attendanceChannelId ?? event.publicationChannelId;
 }
 
 function formatTimingReference(timingReference: string): string {

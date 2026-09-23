@@ -15,7 +15,7 @@ If several files appear to discuss the same subsystem, prefer the document whose
 | [`ARCHITECTURE.md`](./ARCHITECTURE.md)   | Developers                  | Current subsystem architecture, persistence model, data flow, scheduling, concurrency, recovery, and structural invariants |
 | [`DECISIONS.md`](./DECISIONS.md)         | Developers                  | Durable architectural/product decisions and the reasons behind non-obvious behaviour                                       |
 | [`ROADMAP.md`](./ROADMAP.md)             | Contributors                | Future development only                                                                                                    |
-| [`CURRENT-WORK.md`](./CURRENT-WORK.md)   | Active development sessions | Current checkpoint, immediate objective, implementation constraints, and fresh-chat handoff                                |
+| [`CURRENT-WORK.md`](./CURRENT-WORK.md)   | Active development sessions | Current checkpoint, immediate objective, and implementation constraints handoff                                            |
 | [`TESTING-GUIDE.md`](./TESTING-GUIDE.md) | Developers                  | Unit/integration/manual testing strategy and verification workflow                                                         |
 | [`ADMIN-GUIDE.md`](./ADMIN-GUIDE.md)     | Discord administrators      | Current setup commands, event administration workflows, operational behaviour, and troubleshooting                         |
 
@@ -213,19 +213,32 @@ Documentation should make the current system easier to understand.
 
 # Current development phase
 
-The foundational event-management, organiser, role-request, reusable preset, scheduler, recovery, and reliability work is established.
+The foundational event-management, organiser, role-request, reusable preset, scheduler, recovery, reliability, and one-off template workflows are established.
+
+The completed event-template milestone includes:
+
+```text
+template schema reconciliation
+template administration/lifecycle services
+template editing services
+Discord template administration
+reusable ping-role / organiser / reminder configuration
+atomic one-off template generation
+administrator-facing /template generate
+shared timezone-aware occurrence parsing
+generation snapshot independence
+template source-lock concurrency
+source-revision guard during occurrence preparation
+post-commit immediate publication
+```
 
 Current major development phase:
 
 ```text
-P1 — Event Templates
+P1 — Recurring Event Generation
 ```
 
-Immediate task:
-
-```text
-P1.1 — reconcile existing event-template schema scaffolding
-```
+Recurrence should reuse the existing template generation boundary and continue producing ordinary independent event snapshots.
 
 See:
 

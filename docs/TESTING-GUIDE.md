@@ -1,6 +1,6 @@
 # Testing Guide
 
-**Last reconciled:** 19 September 2026
+**Last reconciled:** 24 September 2026
 
 ## Purpose
 
@@ -3115,6 +3115,16 @@ After a substantial deployment, choose the relevant subset of this checklist.
 - [ ] Parent preset lifecycle works
 - [ ] Preset option lifecycle works
 - [ ] Preset group lifecycle works
+- [ ] Template can be created and inspected
+- [ ] Template core configuration can be edited
+- [ ] Template ping roles can be replaced/cleared
+- [ ] Template organiser defaults can be replaced/cleared
+- [ ] Template reminders can be added/edited/removed/cleared
+- [ ] Manual template occurrence generation works
+- [ ] Scheduled template occurrence generation works
+- [ ] Immediate template occurrence generation publishes after generation
+- [ ] Occurrence-specific time override does not edit the source template
+- [ ] Generated event snapshots contain expected reminders/organisers/role requests
 - [ ] Reminder scheduling works
 - [ ] Immediate announcement works
 - [ ] Actual attendance can be recorded
@@ -3548,23 +3558,42 @@ The PostgreSQL-backed service suite remains authoritative for persistence and lo
 
 # P1 Event Template Testing Expectations
 
-Event templates are the current major feature area.
+The one-off event-template workflow is implemented.
 
-Testing should begin at the schema and service boundary rather than at the Discord command surface.
+Its testing model deliberately spans schema, service, concurrency, calendar parsing, command-adapter, and manual Discord boundaries.
 
-## P1.1 schema reconciliation
+PostgreSQL-backed service tests remain the primary proof of authoritative generation behaviour. Command tests prove adapter behaviour rather than replacing those database guarantees.
 
-If P1.1 changes schema, verify:
+## P1.1 schema reconciliation baseline
 
-- the committed migration chain still applies from an empty database
-- the new migration preserves existing application data
+P1.1 schema reconciliation is complete.
+
+Migration:
+
+```text
+0021_reconcile-event-template-schema
+```
+
+established the current template source model and removed obsolete template scaffolding.
+
+Direct PostgreSQL-backed migration-chain coverage verifies the reconciled schema through:
+
+```text
+tests/integration/templates/event-template-schema.test.ts
+```
+
+The completed P1.1 work established the testing precedent that template schema changes must verify:
+
+- the committed migration chain applies from an empty database
+- new migrations preserve required existing application data
 - foreign keys reflect intended ownership
 - uniqueness constraints reflect domain identity rather than UI assumptions
-- obsolete scaffolding is removed only through a new migration
+- obsolete scaffolding is removed only through new forward migrations
 - old applied migrations remain unchanged
 - schema source and generated SQL agree
+- important delete/update semantics are exercised against PostgreSQL rather than inferred only from Drizzle declarations
 
-Relevant migration changes should receive direct migration-chain integration coverage.
+Future template schema changes should continue using direct migration-chain integration coverage where the migration itself carries meaningful behaviour.
 
 ## Template ownership
 
@@ -3598,35 +3627,43 @@ Where templates receive active/inactive state, test:
 
 ## Generated event creation
 
-A generation service should receive direct PostgreSQL-backed coverage.
+One-off generation has direct PostgreSQL-backed coverage in:
 
-Verify that generation creates one coherent event containing the intended:
+```text
+tests/integration/templates/event-template-generation-service.test.ts
+```
+
+The generation suite verifies coherent creation of:
 
 - core event fields
 - publication state
 - ping-role snapshots
-- dormant organiser assignments
+- dormant organiser assignments where enabled
 - reminders
 - role-request snapshots
 - scheduled actions
 - template provenance
 
-Do not rely on a slash command test to prove those database guarantees.
+Do not rely on a slash-command test to prove those database guarantees.
 
 ## Generated event independence
 
-After generation, mutate the source template.
+The generation integration suite verifies that reusable source mutation does not rewrite an existing generated event.
 
-Verify that the existing event retains its previously snapshotted:
+Current coverage mutates:
 
-- event fields
-- ping roles
-- organisers
-- reminders
-- role-request configuration
-- publication schedule
+```text
+template core fields
+template ping roles
+template organiser defaults
+template reminders
+role-request preset options
+guild default publication destination
+```
 
-Then generate another event and verify future generation uses the new template state where intended.
+and verifies the existing event retains its original snapshots.
+
+Administration and generation coverage should also prove that generation performed **after** a committed template edit observes the new source state.
 
 ## Organiser snapshots
 
@@ -3672,18 +3709,20 @@ Test:
 
 ## Long-lived unpublished generated events
 
-Add a regression for a generated event that remains:
+The prerequisite reminder regression is implemented.
+
+Coverage protects an event that remains:
 
 ```text
 scheduled
 publishedAt = null
 ```
 
-for a substantial period.
+while its future signup-close reminder is still legitimate.
 
-A legitimate future signup-close-relative reminder must not be marked missed or cancelled solely because the event has not yet been publicly published.
+The reminder must not be marked missed or cancelled merely because public publication has not happened yet.
 
-This regression should exist before template generation relies on the current reminder-validity path.
+A genuinely closed event still invalidates the signup-close reminder.
 
 ## Publication scheduling
 
@@ -3720,34 +3759,107 @@ The operation must not create duplicate generated state merely because the first
 
 ## Concurrency
 
-Any generation path that may race should use deterministic PostgreSQL tests.
-
-Relevant cases may include:
+One-off template generation uses the established source-lock contract:
 
 ```text
-two generators target same occurrence
+generation
+    -> event_templates parent FOR SHARE
 
-template edit races generation
-
-template deactivation races generation
+template mutation
+    -> event_templates parent FOR UPDATE
 ```
 
-The exact lock contract should be tested once P1 establishes it.
+The generation integration suite deterministically proves that a correctly parent-locked editor cannot interleave with an in-flight generation snapshot.
+
+Future template mutation services must preserve that contract.
+
+For child-state editing, taking only child-row locks is insufficient.
+
+The template parent must be locked first so generation sees either:
+
+```text
+complete old source graph
+```
+
+or:
+
+```text
+complete new source graph
+```
+
+never a partial mixture.
+
+Administrator-driven occurrence preparation has one additional race boundary.
+
+The command first inspects the template to resolve local wall-clock timing, then calls generation.
+
+Coverage therefore also protects the optimistic revision contract:
+
+```text
+inspect template revision
+        |
+        v
+template changes
+        |
+        v
+generation receives old expected revision
+        |
+        v
+template_changed
+        |
+        v
+no event created
+```
+
+Recurrence will require additional duplicate/idempotency concurrency coverage once occurrence identity exists.
 
 ## Discord adapters
 
-Template command tests should be added only after the service contract exists.
+The implemented command surface is covered in:
+
+```text
+tests/unit/commands/template.test.ts
+```
 
 Command tests should verify:
 
-- option parsing
-- autocomplete or ID lookup if introduced
-- Discord role/channel validation
+- command registration
 - authorisation
-- response formatting
+- source-ID/autocomplete parsing
+- explicit clear semantics
+- Discord role/channel validation
+- core edits
+- ping-role replacement
+- organiser-default replacement
+- reminder administration
+- default local-time generation
+- occurrence-specific time override
+- missing-default-time rejection
+- generation result handling
+- immediate post-generation publication handoff
+- source-revision retry behaviour
 - audit invocation
 
-Do not make command tests the primary proof of template-generation correctness.
+Do not use these command tests as the primary proof of database generation correctness.
+
+That belongs to the PostgreSQL-backed template service suites.
+
+### Local date/time parsing
+
+One-off event creation and template generation share:
+
+```text
+src/time/event-date-time.ts
+```
+
+Unit coverage verifies:
+
+- valid named-timezone parsing
+- invalid calendar values
+- nonexistent daylight-saving local times
+- ambiguous daylight-saving overlap times
+
+Future recurrence must build on the same wall-clock correctness requirements.
 
 ---
 

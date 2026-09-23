@@ -8,14 +8,22 @@ import { findTimezoneOptions } from "../time/timezones.js";
 export async function handleEventAutocomplete(
   interaction: AutocompleteInteraction,
 ): Promise<void> {
-  if (interaction.commandName !== "event" || !interaction.guildId) {
+  if (!interaction.guildId) {
     await interaction.respond([]);
     return;
   }
 
   const subcommand = interaction.options.getSubcommand(false);
 
-  if (subcommand !== "create" && subcommand !== "edit") {
+  const supportsEventAutocomplete =
+    interaction.commandName === "event" &&
+    (subcommand === "create" || subcommand === "edit");
+
+  const supportsTemplateAutocomplete =
+    interaction.commandName === "template" &&
+    (subcommand === "create" || subcommand === "edit");
+
+  if (!supportsEventAutocomplete && !supportsTemplateAutocomplete) {
     await interaction.respond([]);
     return;
   }
@@ -41,10 +49,20 @@ export async function handleEventAutocomplete(
   }
 
   /*
-   * Region and event-type autocomplete currently belongs only
-   * to event creation.
+   * Event type and audience source selection applies to:
+   *
+   * - one-off event creation
+   * - template creation
+   * - template core editing
+   *
+   * Ordinary event editing continues to use only timezone autocomplete.
    */
-  if (subcommand !== "create") {
+  const supportsSourceAutocomplete =
+    (interaction.commandName === "event" && subcommand === "create") ||
+    (interaction.commandName === "template" &&
+      (subcommand === "create" || subcommand === "edit"));
+
+  if (!supportsSourceAutocomplete) {
     await interaction.respond([]);
     return;
   }

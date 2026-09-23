@@ -8,6 +8,8 @@ import { handleDbCheckCommand } from "./dbcheck.js";
 
 import { handleEventCommand } from "./event.js";
 
+import { handleTemplateCommand } from "./template.js";
+
 import { handlePingCommand } from "./ping.js";
 
 import { handleRolePresetCommand } from "./role-preset.js";
@@ -36,6 +38,11 @@ export async function handleChatInputCommand(
 
     case "event":
       await handleEventCommand(interaction);
+
+      return;
+
+    case "template":
+      await handleTemplateCommand(interaction);
 
       return;
 

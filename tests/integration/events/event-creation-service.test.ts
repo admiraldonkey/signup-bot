@@ -2,10 +2,14 @@ import type { Pool } from "pg";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { pool as applicationPool } from "../../../src/db/client.js";
+import {
+  db as applicationDb,
+  pool as applicationPool,
+} from "../../../src/db/client.js";
 
 import {
   createStoredEvent,
+  createStoredEventInTransaction,
   type CreateStoredEventInput,
 } from "../../../src/events/event-creation-service.js";
 import { setGuildOrganisersEnabled } from "../../../src/organisers/organiser-feature-service.js";
@@ -493,6 +497,82 @@ describe("event creation service", () => {
     ]);
   });
 
+  it("participates in a caller-owned transaction and rolls back all created event state with it", async () => {
+    // Arrange
+    const fixture = await createCreationFixture(pool);
+
+    const input = buildMinimalCreationInput(fixture, true);
+
+    input.pingRoles = [
+      {
+        discordRoleId: PING_ROLE_ONE_ID,
+        roleName: "Naval",
+      },
+    ];
+
+    input.scheduledPublicationAt = new Date(
+      input.startsAt.getTime() - 120 * 60_000,
+    );
+
+    input.publishMinutesBeforeStart = 120;
+
+    // Act
+    await expect(
+      applicationDb.transaction(async (transaction) => {
+        const result = await createStoredEventInTransaction(transaction, input);
+
+        expect(result.kind).toBe("created");
+
+        if (result.kind !== "created") {
+          throw new Error(
+            `Expected transactional event creation to succeed, received "${result.kind}".`,
+          );
+        }
+
+        /*
+         * Simulate a later template-generation step failing after the event
+         * and its ordinary snapshots/actions have already been created.
+         */
+        throw new Error("force caller-owned transaction rollback");
+      }),
+    ).rejects.toThrow("force caller-owned transaction rollback");
+
+    // Assert
+    const persistedCounts = await pool.query<{
+      event_count: number;
+      ping_role_count: number;
+      organiser_count: number;
+      scheduled_action_count: number;
+    }>(`
+      SELECT
+        (
+          SELECT COUNT(*)::int
+          FROM "events"
+        ) AS "event_count",
+        (
+          SELECT COUNT(*)::int
+          FROM "event_ping_roles"
+        ) AS "ping_role_count",
+        (
+          SELECT COUNT(*)::int
+          FROM "event_organiser_assignments"
+        ) AS "organiser_count",
+        (
+          SELECT COUNT(*)::int
+          FROM "scheduled_actions"
+        ) AS "scheduled_action_count"
+    `);
+
+    expect(persistedCounts.rows).toEqual([
+      {
+        event_count: 0,
+        ping_role_count: 0,
+        organiser_count: 0,
+        scheduled_action_count: 0,
+      },
+    ]);
+  });
+
   it("lets in-flight event creation finish before organiser disable retires its dormant organiser", async () => {
     // Arrange
     const fixture = await createCreationFixture(pool);
@@ -664,9 +744,9 @@ async function createCreationFixture(pool: Pool): Promise<{
   }
 
   /*
-   * The creation service does not consume organiser feature settings yet,
-   * but create the settings row now because the next hardening slice will
-   * make that feature policy authoritative here.
+   * Event creation participates in the organiser feature-lock contract when
+   * organiser defaults are supplied, so the fixture needs authoritative guild
+   * feature settings.
    */
   await pool.query(
     `

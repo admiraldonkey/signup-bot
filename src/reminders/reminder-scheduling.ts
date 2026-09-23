@@ -101,21 +101,19 @@ export async function reschedulePendingEventReminders(
     const actionKey = buildReminderActionKey(reminder.id);
 
     /*
-     * Signup-close reminders only make sense while:
+     * Signup-close reminders remain valid for unpublished scheduled events.
+     * Publication may happen well before the reminder becomes due, so the
+     * event does not need to be open yet.
      *
-     * - signups exist
-     * - there is an actual signup-close timestamp
-     * - attendance remains open.
-     *
-     * Manual early closure therefore invalidates a future
-     * signup-close reminder. Natural expiry is still handled by
-     * the scheduler so missed reminders can be classified correctly
+     * They become invalid when signups are disabled, there is no signup-close
+     * timestamp, or attendance has already been closed. Cancelled and
+     * completed events are handled separately below.
      */
     const signupReminderInvalid =
       reminder.timingReference === "signup_close" &&
       (!event.signupsEnabled ||
         !event.attendanceClosesAt ||
-        event.status !== "open");
+        event.status === "closed");
 
     const shouldCancel =
       event.status === "cancelled" ||

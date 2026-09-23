@@ -73,3 +73,7 @@ export const db = drizzle({
   client: pool,
   schema,
 });
+
+type DatabaseTransactionCallback = Parameters<typeof db.transaction>[0];
+
+export type DatabaseTransaction = Parameters<DatabaseTransactionCallback>[0];

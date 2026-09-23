@@ -15,7 +15,7 @@ The project replaces reaction based signups and manual event coordination with p
 | ---------------------------- | ----------------------------------------- |
 | Runtime                      | Node.js                                   |
 | Language                     | TypeScript                                |
-| Discord                      | discord.js 14                             |
+| Discord API                  | discord.js 14                             |
 | Database                     | PostgreSQL                                |
 | ORM/schema                   | Drizzle ORM                               |
 | Migrations                   | drizzle-kit                               |
@@ -111,7 +111,7 @@ Examples include:
 
 This prevents later reusable-configuration changes from rewriting events that already exist.
 
-The same principle is central to the next major feature area: event templates.
+The same principle is also used by event templates: reusable template state is snapshotted into ordinary event-owned state when an occurrence is generated.
 
 ---
 
@@ -352,6 +352,29 @@ event-level role-request snapshot
 ```
 
 Later preset changes do not rewrite events that already received the preset.
+
+---
+
+## Event templates
+
+Administrators can build and maintain reusable event templates covering:
+
+- core event defaults
+- optional audience/region
+- timezone and normal local start time
+- duration and signup behaviour
+- manual, scheduled, or immediate publication intent
+- fixed or generation-time-default publication destination
+- ordered ping roles
+- optional primary/backup organiser defaults
+- reusable reminder definitions
+- an optional role-request preset
+
+The `/template` command supports creation, inspection, editing, lifecycle management, reminder administration, and one-off event generation.
+
+Generated occurrences become ordinary independent events. Later template changes affect future generation rather than rewriting events that already exist.
+
+One-off generation resolves the occurrence in the template timezone, snapshots the complete reusable source graph transactionally, and uses the normal event publication path after commit where immediate publication is requested.
 
 ---
 
@@ -615,15 +638,16 @@ See [docs/ADMIN-GUIDE.md](docs/ADMIN-GUIDE.md) for the full operational referenc
 
 Current top-level commands include:
 
-| Command        | Purpose                                               |
-| -------------- | ----------------------------------------------------- |
-| `/ping`        | Basic bot response check                              |
-| `/dbcheck`     | Administrative PostgreSQL connectivity check          |
-| `/setup`       | Initialise and configure guild event management       |
-| `/event`       | Create, publish, edit, inspect, and administer events |
-| `/role-preset` | Manage reusable role-request presets                  |
-| `/attendance`  | Record and analyse actual attendance                  |
-| `/audit`       | Inspect recent administrative audit activity          |
+| Command        | Purpose                                                  |
+| -------------- | -------------------------------------------------------- |
+| `/ping`        | Basic bot response check                                 |
+| `/dbcheck`     | Administrative PostgreSQL connectivity check             |
+| `/setup`       | Initialise and configure guild event management          |
+| `/event`       | Create, publish, edit, and administer events             |
+| `/role-preset` | Manage reusable role-request presets                     |
+| `/template`    | Manage reusable event templates and generate occurrences |
+| `/attendance`  | Record and analyse actual attendance                     |
+| `/audit`       | Inspect recent administrative audit activity             |
 
 `/event` contains most event-specific administration, including organiser, reminder, attendance-response, publication, and event-level role-request workflows.
 
@@ -678,6 +702,7 @@ The migration chain is exercised through PostgreSQL-backed integration testing.
 │   ├── reminders/
 │   ├── role-requests/
 │   ├── scheduler/
+│   ├── templates/
 │   ├── time/
 │   └── index.ts
 ├── tests/
@@ -730,56 +755,80 @@ Non-obvious concurrency and lifecycle behaviour should be protected by tests so 
 
 # Current development phase
 
-The core event-management and reusable role-request foundation is established.
+The core event-management, reusable role-request, and one-off event-template workflows are established.
 
-Recent reliability work completed focused handling for:
+The completed one-off template milestone includes:
 
-- deleted Event Administration channels
-- deleted Event Organiser notification roles
-- degraded unpinged cover delivery
-- retryable versus definitive Discord failures
+- reusable template creation and inspection
+- active/inactive lifecycle
+- core template editing
+- ordered ping-role replacement
+- primary/backup organiser defaults
+- reusable reminder administration
+- optional role-request preset configuration
+- manual, scheduled, and immediate publication intent
+- administrator-facing one-off generation
+- shared named-timezone local date/time parsing
+- post-commit immediate publication
+- source-template provenance
+- generated-event snapshot independence
+- deterministic source-lock concurrency coverage
+- optimistic source-revision protection during occurrence preparation
 
-The next major feature area is:
+The current major development area is now:
 
 ```text
-Event Templates
+Recurring Event Generation
 ```
 
-The immediate task is to reconcile existing template schema scaffolding with the current event architecture before implementing template commands or generation.
+Recurrence will reuse the established one-off generation boundary to create bounded ordinary event occurrences rather than introducing a separate mutable runtime event model.
 
-After one-off template generation is stable, planned work moves into recurring event generation.
-
-See [docs/ROADMAP.md](docs/ROADMAP.md).
+See [`CURRENT-WORK.md`](docs/CURRENT-WORK.md) and [`ROADMAP.md`](docs/ROADMAP.md).
 
 ---
 
-# Planned template model
+# Implemented template generation model
 
-The intended high-level shape is:
+The current high-level shape is:
 
 ```text
 template
     |
-    | generate
+    | atomic generation
     v
 ordinary persistent event
 ```
 
-Generated events should receive event-level snapshots and become independently editable.
+Generation snapshots reusable source configuration into ordinary event-owned state.
 
-Future template work is expected to integrate with existing:
+After commit:
 
-- event creation
-- organiser assignments
-- ping roles
-- reminders
-- publication scheduling
-- role-request presets
-- durable scheduler actions
+```text
+template
+    -> reusable source / provenance
 
-Recurrence should generate bounded ordinary occurrences rather than maintaining one mutable magical event row.
+generated event
+    -> authoritative runtime state
+```
 
-The exact schema is intentionally being reconciled before implementation.
+Generated events do not continuously consult their source template.
+
+Later changes to:
+
+```text
+template defaults
+template ping roles
+template organiser defaults
+template reminders
+referenced role-request presets
+guild default channels
+```
+
+do not rewrite state already snapshotted into an existing generated event.
+
+Generation uses the established event, organiser, reminder, role-request, publication, and durable scheduler architectures rather than creating template-specific runtime equivalents.
+
+Recurrence remains a later concern and should generate bounded ordinary occurrences rather than maintaining one mutable special event row.
 
 ---
 
