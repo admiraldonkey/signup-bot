@@ -99,31 +99,24 @@ The P0 foundation and focused reliability work are complete.
 
 ## Current development phase
 
-The current major development phase is:
+The one-off P1 event-template workflow is implemented end-to-end.
+
+Implemented template infrastructure now includes:
 
 ```text
-P1
-Event Templates
-```
-
-The template persistence, transaction-composition, and one-off generation foundations are implemented.
-
-Current implemented P1 infrastructure includes:
-
-```text
-reconciled reusable template source model
-
+reconciled reusable source model
 transaction-aware event creation
-
 transaction-aware reminder creation
-
 transaction-aware role-request preset application
-
-atomic one-off template generation
-
+template administration and lifecycle services
+core and child-source editing services
+Discord /template administration
+atomic one-off generation
+timezone-aware administrator occurrence resolution
+optimistic template-revision validation
 generated-event snapshot independence
-
 template source-lock concurrency protection
+post-commit immediate publication
 ```
 
 One-off generation creates ordinary event-owned state for:
@@ -140,23 +133,11 @@ durable scheduled actions
 
 inside one authoritative PostgreSQL transaction.
 
-Immediate Discord publication remains deliberately outside that transaction and must occur after commit.
+The Discord `/template generate` adapter resolves local date/time using the template timezone before entering that persistence boundary.
 
-Administrator-facing template creation, inspection, lifecycle, editing, and generation commands are not yet implemented.
+Immediate Discord publication occurs only after generation commits.
 
-The immediate architecture task is now the reusable template administration and lifecycle service layer.
-
-That layer should establish:
-
-```text
-create
-list
-show
-active / inactive lifecycle
-parent FOR UPDATE mutation contract
-```
-
-before Discord command adapters are introduced.
+The current architecture task is now recurring event generation using the established one-off template-generation boundary.
 
 ## Planned areas
 
@@ -465,8 +446,8 @@ scheduler/
     durable scheduled-action execution and maintenance
 
 templates/
-    reusable event-template generation and future
-    template administration/domain services
+    reusable event-template administration,
+    mutation and generation services
 
 time/
     timezone parsing and validation
@@ -4241,9 +4222,9 @@ Future UX may make this clearer before application, but the database/domain beha
 
 # P1 Event Template Architecture
 
-**Status: schema and one-off generation implemented — administration planned**
+**Status: one-off template administration and generation implemented — recurrence planned**
 
-Event templates are the current major feature area.
+Event templates provide reusable source configuration for ordinary events.
 
 P1.1 reconciled the reusable source schema through:
 
@@ -4265,6 +4246,18 @@ event_templates
     +---- optional role_request_preset_id
 ```
 
+Template administration is implemented through:
+
+```text
+src/templates/event-template-admin-service.ts
+```
+
+with Discord-facing commands in:
+
+```text
+src/commands/template.ts
+```
+
 One-off generation is implemented in:
 
 ```text
@@ -4281,9 +4274,9 @@ as source provenance.
 
 Generation atomically creates ordinary event-owned state using the existing event, organiser, reminder, role-request, publication, and durable scheduler architectures.
 
-Template administration/editing commands are not yet implemented.
+The `/template` surface supports source creation, inspection, lifecycle, editing, child-source administration and one-off generation.
 
-Recurrence remains deliberately separate.
+Recurrence remains deliberately separate and is the next major P1 architecture area.
 
 ---
 
@@ -4421,7 +4414,29 @@ It does not interpret:
 event_templates.local_start_time
 ```
 
-Date/local-wall-clock interpretation therefore remains an adapter or future recurrence responsibility.
+For administrator-driven one-off generation, `/template generate` resolves:
+
+```text
+requested date
++
+occurrence-specific time override
+or
+template local_start_time
++
+template timezone
+```
+
+through the shared Luxon-based parser in:
+
+```text
+src/time/event-date-time.ts
+```
+
+before calling the generation service.
+
+This parser rejects malformed, impossible and daylight-saving-ambiguous local times.
+
+Future recurrence remains responsible for producing the same kind of absolute occurrence instant while preserving intended local wall-clock semantics.
 
 The normal template duration default is:
 
@@ -4691,6 +4706,26 @@ One-off generation is implemented in:
 src/templates/event-template-generation-service.ts
 ```
 
+The administrator adapter may need to inspect template timing metadata before the generation transaction begins.
+
+To prevent a concurrent edit from mixing timing resolved from one template revision with source state from another, the adapter supplies:
+
+```text
+expectedTemplateUpdatedAt
+```
+
+Generation compares this revision after acquiring the template parent `FOR SHARE` lock.
+
+A mismatch returns:
+
+```text
+template_changed
+```
+
+without creating an event.
+
+Template parent and child mutations update the parent revision, so the check represents the reusable aggregate rather than only the parent columns.
+
 The authoritative flow is:
 
 ```text
@@ -4771,9 +4806,13 @@ inactive
     -> existing generated events remain untouched
 ```
 
-The persistence field and generation behaviour are implemented.
+The persistence, service and Discord lifecycle surfaces are implemented.
 
-Reusable administrator services and Discord commands for lifecycle management remain to be implemented.
+`/template set-active` performs reversible lifecycle mutation.
+
+Inactive templates remain inspectable and editable, but both the command adapter and generation service prevent new occurrence generation.
+
+Lifecycle changes do not alter existing generated events.
 
 ---
 
@@ -4789,9 +4828,9 @@ edit template
 
 This matches the snapshot model already established by role-request presets.
 
-Template editing should prefer explicit mutation semantics.
+Template editing uses explicit mutation semantics.
 
-For nullable or collection-style fields, P1 should distinguish where necessary between:
+For nullable or collection-style fields:
 
 ```text
 omitted
@@ -4804,7 +4843,20 @@ replacement collection
     -> replace complete intended set
 ```
 
-The exact commands and mutation services remain future implementation work.
+Implemented editing covers:
+
+```text
+core event defaults
+publication configuration
+optional role-request preset
+ordered ping roles
+primary / backup organiser defaults
+reminder definitions
+```
+
+All source mutation services take the template parent `FOR UPDATE` lock before changing parent or child state.
+
+Existing generated events remain independent snapshots.
 
 ---
 
@@ -4883,7 +4935,7 @@ applyRoleRequestPresetToEventInTransaction(...)
 
 One-off template generation now composes those boundaries inside a single authoritative PostgreSQL transaction.
 
-The next architecture task is the reusable template administration and lifecycle service layer, followed by template editing and Discord-facing administration.
+The one-off administration, editing and Discord generation layers have since been implemented. The next template-related architecture task is recurrence.
 
 ---
 

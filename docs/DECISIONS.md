@@ -3069,9 +3069,9 @@ implemented
     -> reminders
     -> message recovery
     -> focused deleted-channel/deleted-role reliability handling
+    -> one-off event-template administration and generation
 
 planned
-    -> event templates
     -> recurring event generation
     -> confirmed-organiser unavailability workflow
     -> richer participation context
@@ -3600,7 +3600,9 @@ Normal template lifecycle therefore favours active/inactive state rather than de
 
 Recurrence is not part of the one-off template source aggregate.
 
-It will be designed separately after one-off generation is stable.
+The one-off administrator workflow is now established.
+
+Recurring generation remains a separate P1 layer which must reuse the existing template-generation boundary rather than turning the one-off template aggregate into a runtime series model.
 
 ### Reason
 
@@ -3615,6 +3617,78 @@ Snapshotting into existing event-owned state preserves:
 - existing reminder behaviour
 - existing role-request behaviour
 - future portability across non-Discord interfaces
+
+---
+
+## D135 - Occurrence wall-clock resolution is external to generation and source-revision guarded
+
+**Status: Current**
+
+The reusable generation service accepts:
+
+```text
+startsAt: Date
+```
+
+as an already-resolved absolute instant.
+
+It does not interpret:
+
+```text
+date
+local_start_time
+timezone
+```
+
+into an instant itself.
+
+Administrator-driven one-off generation resolves local wall-clock input in the command/application adapter through the shared named-timezone parser.
+
+Future recurrence should likewise resolve recurrence-local wall-clock occurrences before entering the generation persistence boundary.
+
+### Source revision
+
+One-off administrator generation must inspect template timing metadata before calling the generator.
+
+A template may be edited between that inspection and the generator acquiring its source lock.
+
+The adapter therefore passes the inspected parent revision as:
+
+```text
+expectedTemplateUpdatedAt
+```
+
+Generation validates it after acquiring:
+
+```text
+event_templates FOR SHARE
+```
+
+A mismatch returns:
+
+```text
+template_changed
+```
+
+and no event is generated.
+
+Template parent and child mutation services update the parent revision.
+
+### Reason
+
+Keeping calendar interpretation outside the persistence service gives one-off administration and future recurrence a common event-generation boundary.
+
+The revision guard prevents that separation from allowing:
+
+```text
+old timezone / local time
+        +
+new template source graph
+```
+
+to produce one incoherent occurrence.
+
+This preserves the source-snapshot guarantee without teaching the core generator about Discord command input or recurrence-rule syntax.
 
 ---
 

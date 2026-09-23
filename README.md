@@ -111,7 +111,7 @@ Examples include:
 
 This prevents later reusable-configuration changes from rewriting events that already exist.
 
-The same principle is central to the next major feature area: event templates.
+The same principle is also used by event templates: reusable template state is snapshotted into ordinary event-owned state when an occurrence is generated.
 
 ---
 
@@ -352,6 +352,29 @@ event-level role-request snapshot
 ```
 
 Later preset changes do not rewrite events that already received the preset.
+
+---
+
+## Event templates
+
+Administrators can build and maintain reusable event templates covering:
+
+- core event defaults
+- optional audience/region
+- timezone and normal local start time
+- duration and signup behaviour
+- manual, scheduled, or immediate publication intent
+- fixed or generation-time-default publication destination
+- ordered ping roles
+- optional primary/backup organiser defaults
+- reusable reminder definitions
+- an optional role-request preset
+
+The `/template` command supports creation, inspection, editing, lifecycle management, reminder administration, and one-off event generation.
+
+Generated occurrences become ordinary independent events. Later template changes affect future generation rather than rewriting events that already exist.
+
+One-off generation resolves the occurrence in the template timezone, snapshots the complete reusable source graph transactionally, and uses the normal event publication path after commit where immediate publication is requested.
 
 ---
 
@@ -615,15 +638,16 @@ See [docs/ADMIN-GUIDE.md](docs/ADMIN-GUIDE.md) for the full operational referenc
 
 Current top-level commands include:
 
-| Command        | Purpose                                               |
-| -------------- | ----------------------------------------------------- |
-| `/ping`        | Basic bot response check                              |
-| `/dbcheck`     | Administrative PostgreSQL connectivity check          |
-| `/setup`       | Initialise and configure guild event management       |
-| `/event`       | Create, publish, edit, inspect, and administer events |
-| `/role-preset` | Manage reusable role-request presets                  |
-| `/attendance`  | Record and analyse actual attendance                  |
-| `/audit`       | Inspect recent administrative audit activity          |
+| Command        | Purpose                                                  |
+| -------------- | -------------------------------------------------------- |
+| `/ping`        | Basic bot response check                                 |
+| `/dbcheck`     | Administrative PostgreSQL connectivity check             |
+| `/setup`       | Initialise and configure guild event management          |
+| `/event`       | Create, publish, edit, and administer events             |
+| `/role-preset` | Manage reusable role-request presets                     |
+| `/template`    | Manage reusable event templates and generate occurrences |
+| `/attendance`  | Record and analyse actual attendance                     |
+| `/audit`       | Inspect recent administrative audit activity             |
 
 `/event` contains most event-specific administration, including organiser, reminder, attendance-response, publication, and event-level role-request workflows.
 
@@ -731,56 +755,35 @@ Non-obvious concurrency and lifecycle behaviour should be protected by tests so 
 
 # Current development phase
 
-The core event-management and reusable role-request foundation is established.
+The core event-management, reusable role-request, and one-off event-template workflows are established.
 
-The current major feature area is:
+The completed one-off template milestone includes:
 
-```text
-Event Templates
-```
-
-The P1 template persistence and one-off generation foundations are now implemented.
-
-Current template infrastructure includes:
-
-- reusable template event defaults
-- ordered template ping-role source state
-- optional primary/backup organiser defaults
-- reusable reminder definitions
-- an optional reusable role-request preset reference
-- explicit manual, scheduled, and immediate publication intent
-- source-template provenance on generated events
-- atomic one-off generation into ordinary persistent events
-- PostgreSQL-backed snapshot independence
+- reusable template creation and inspection
+- active/inactive lifecycle
+- core template editing
+- ordered ping-role replacement
+- primary/backup organiser defaults
+- reusable reminder administration
+- optional role-request preset configuration
+- manual, scheduled, and immediate publication intent
+- administrator-facing one-off generation
+- shared named-timezone local date/time parsing
+- post-commit immediate publication
+- source-template provenance
+- generated-event snapshot independence
 - deterministic source-lock concurrency coverage
+- optimistic source-revision protection during occurrence preparation
 
-One-off generation is implemented in:
-
-```text
-src/templates/event-template-generation-service.ts
-```
-
-Generation creates ordinary event-owned state for:
+The current major development area is now:
 
 ```text
-core event
-publication state
-ping roles
-organiser assignments where enabled
-reminders
-role-request preset snapshots
-durable scheduled actions
+Recurring Event Generation
 ```
 
-inside one authoritative PostgreSQL transaction.
+Recurrence will reuse the established one-off generation boundary to create bounded ordinary event occurrences rather than introducing a separate mutable runtime event model.
 
-Immediate Discord publication remains a post-commit external side effect.
-
-Template administrator commands are not yet implemented.
-
-The immediate implementation focus is now the reusable template administration/lifecycle service layer, beginning with persistent creation, inspection, listing, active/inactive lifecycle, and the parent-lock mutation contract required by later template editing.
-
-See [docs/CURRENT-WORK.md](docs/CURRENT-WORK.md) and [docs/ROADMAP.md](docs/ROADMAP.md).
+See [`CURRENT-WORK.md`](docs/CURRENT-WORK.md) and [`ROADMAP.md`](docs/ROADMAP.md).
 
 ---
 

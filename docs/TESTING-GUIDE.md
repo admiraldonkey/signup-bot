@@ -1,6 +1,6 @@
 # Testing Guide
 
-**Last reconciled:** 22 September 2026
+**Last reconciled:** 24 September 2026
 
 ## Purpose
 
@@ -3115,6 +3115,16 @@ After a substantial deployment, choose the relevant subset of this checklist.
 - [ ] Parent preset lifecycle works
 - [ ] Preset option lifecycle works
 - [ ] Preset group lifecycle works
+- [ ] Template can be created and inspected
+- [ ] Template core configuration can be edited
+- [ ] Template ping roles can be replaced/cleared
+- [ ] Template organiser defaults can be replaced/cleared
+- [ ] Template reminders can be added/edited/removed/cleared
+- [ ] Manual template occurrence generation works
+- [ ] Scheduled template occurrence generation works
+- [ ] Immediate template occurrence generation publishes after generation
+- [ ] Occurrence-specific time override does not edit the source template
+- [ ] Generated event snapshots contain expected reminders/organisers/role requests
 - [ ] Reminder scheduling works
 - [ ] Immediate announcement works
 - [ ] Actual attendance can be recorded
@@ -3548,9 +3558,11 @@ The PostgreSQL-backed service suite remains authoritative for persistence and lo
 
 # P1 Event Template Testing Expectations
 
-Event templates are the current major feature area.
+The one-off event-template workflow is implemented.
 
-Testing should begin at the schema and service boundary rather than at the Discord command surface.
+Its testing model deliberately spans schema, service, concurrency, calendar parsing, command-adapter, and manual Discord boundaries.
+
+PostgreSQL-backed service tests remain the primary proof of authoritative generation behaviour. Command tests prove adapter behaviour rather than replacing those database guarantees.
 
 ## P1.1 schema reconciliation baseline
 
@@ -3651,7 +3663,7 @@ guild default publication destination
 
 and verifies the existing event retains its original snapshots.
 
-Future template-administration tests should additionally prove that generation performed **after** a committed template edit observes the new source state.
+Administration and generation coverage should also prove that generation performed **after** a committed template edit observes the new source state.
 
 ## Organiser snapshots
 
@@ -3777,22 +3789,77 @@ complete new source graph
 
 never a partial mixture.
 
+Administrator-driven occurrence preparation has one additional race boundary.
+
+The command first inspects the template to resolve local wall-clock timing, then calls generation.
+
+Coverage therefore also protects the optimistic revision contract:
+
+```text
+inspect template revision
+        |
+        v
+template changes
+        |
+        v
+generation receives old expected revision
+        |
+        v
+template_changed
+        |
+        v
+no event created
+```
+
 Recurrence will require additional duplicate/idempotency concurrency coverage once occurrence identity exists.
 
 ## Discord adapters
 
-Template command tests should be added only after the service contract exists.
+The implemented command surface is covered in:
+
+```text
+tests/unit/commands/template.test.ts
+```
 
 Command tests should verify:
 
-- option parsing
-- autocomplete or ID lookup if introduced
-- Discord role/channel validation
+- command registration
 - authorisation
-- response formatting
+- source-ID/autocomplete parsing
+- explicit clear semantics
+- Discord role/channel validation
+- core edits
+- ping-role replacement
+- organiser-default replacement
+- reminder administration
+- default local-time generation
+- occurrence-specific time override
+- missing-default-time rejection
+- generation result handling
+- immediate post-generation publication handoff
+- source-revision retry behaviour
 - audit invocation
 
-Do not make command tests the primary proof of template-generation correctness.
+Do not use these command tests as the primary proof of database generation correctness.
+
+That belongs to the PostgreSQL-backed template service suites.
+
+### Local date/time parsing
+
+One-off event creation and template generation share:
+
+```text
+src/time/event-date-time.ts
+```
+
+Unit coverage verifies:
+
+- valid named-timezone parsing
+- invalid calendar values
+- nonexistent daylight-saving local times
+- ambiguous daylight-saving overlap times
+
+Future recurrence must build on the same wall-clock correctness requirements.
 
 ---
 

@@ -39,16 +39,11 @@ Real operational problems, regressions, or newly discovered architectural depend
 
 The foundational event-management platform is established.
 
-Implemented areas include persistent event lifecycle, publication, attendance, organiser workflows, reminders, event-level role requests, reusable role-request presets, durable scheduling, recovery behaviour, audit logging, and PostgreSQL-backed reliability testing.
+Implemented areas include persistent event lifecycle, publication, attendance, organiser workflows, reminders, event-level role requests, reusable role-request presets, one-off event templates, durable scheduling, recovery behaviour, audit logging, and PostgreSQL-backed reliability testing.
+
+The one-off event-template administrator workflow is complete.
 
 The next major development phase is:
-
-```text
-P1
-Event Templates
-```
-
-followed by:
 
 ```text
 P1
@@ -57,139 +52,35 @@ Recurring Event Generation
 
 Reliability remains an ongoing engineering requirement rather than a separate broad rewrite phase.
 
-New work should preserve existing concurrency, snapshot, scheduler, recovery, and authoritative-state guarantees as it is introduced.
+New work should preserve existing concurrency, snapshot, scheduler, recovery, timezone, and authoritative-state guarantees as it is introduced.
 
 ---
 
-# P1 — Event Templates
+# P1 — Template Preview
 
-## Objective
+A dedicated non-mutating preview may still be useful before generation.
 
-Make the implemented reusable template source model and one-off generation service usable and maintainable through administrator-facing workflows.
+`/template show` currently inspects the complete reusable source definition.
 
-The underlying generation architecture is established:
-
-```text
-template
-    |
-    | atomic generation
-    v
-ordinary independent event
-```
-
-Remaining P1 template work is primarily administration and editing.
-
----
-
-## P1.2 — Template administration and lifecycle
-
-Build reusable service boundaries for:
+A future preview would instead answer:
 
 ```text
-create
-list
-show
-set-active
+"If I generated this occurrence now, what would the resulting event look like?"
 ```
 
-before adding Discord command adapters.
+Useful preview information could include:
 
-Requirements:
-
-- explicit guild ownership
-- active/inactive lifecycle
-- inactive templates remain inspectable
-- inactive templates remain editable where intended
-- inactive templates cannot generate
-- unchanged lifecycle mutation is idempotent
-- deactivation does not modify generated events
-- provenance remains intact
-- hard deletion is not required for the first implementation
-
-Template mutation services must take:
-
-```text
-event_templates parent FOR UPDATE
-```
-
-before changing parent or child reusable source state.
-
-This must serialise correctly against generation's:
-
-```text
-event_templates parent FOR SHARE
-```
-
-lock.
-
-Use deterministic PostgreSQL integration tests for the mutation/generation race.
-
----
-
-## P1.11 — Template editing
-
-Implement reusable editing services for template source state.
-
-Normal editing means:
-
-```text
-edit template
-    |
-    v
-future generated events use new configuration
-
-existing generated events remain unchanged
-```
-
-Editing should cover the source configuration required for practical administration, including:
-
-```text
-core event defaults
-publication configuration
-ping-role collection
-organiser defaults
-reminder definitions
-optional role-request preset
-```
-
-Mutation APIs should distinguish deliberately between:
-
-```text
-omitted
-    -> preserve
-
-explicit clear
-    -> remove nullable state
-
-replacement collection
-    -> replace complete intended set
-```
-
-Child collection mutation must use the template parent lock rather than independently locking only child rows.
-
-Do not introduce implicit propagation to existing generated events.
-
----
-
-## P1.12 — Template preview
-
-Consider an administrator preview before activation or generation.
-
-Useful preview information may include:
-
-- event type
-- audience
-- normal start time
-- timezone
-- duration
-- signup settings
+- resolved occurrence time
 - publication timing
-- organiser defaults
-- role-request configuration
+- resolved publication destination
+- effective ping audience
+- organiser snapshots
 - reminder schedule
-- ping audience
+- role-request configuration
 
-This is useful but should not block the minimum viable administrator workflow if implementation does not naturally require it.
+This is an optional administrator UX improvement.
+
+It should not duplicate the generation service or become a second source of domain validation.
 
 ---
 
@@ -756,6 +647,49 @@ Potential reminder extensions include:
 - additional timing references where a real use case exists
 
 Missed reminders should remain auditable rather than simply disappearing.
+
+---
+
+# P2 — `/event show` Inspection
+
+Add a read-only event inspection command providing one coherent summary of an event's authoritative configuration.
+
+Template-generation smoke testing exposed the current fragmentation:
+
+```text
+/event list
+/event reminder-list
+/event role-option-list
+/event role-group-list
+/event role-requests
+```
+
+can each reveal part of an event, but there is no single equivalent to:
+
+```text
+/template show
+/role-preset show
+```
+
+A useful `/event show event-id:<id>` view could include:
+
+- event identity and source-template provenance
+- event type and audience
+- lifecycle and publication state
+- start/end/signup-close timing
+- publication destination
+- ping roles
+- organiser assignments
+- reminder summary
+- applied role-request preset provenance
+- role-option count
+- request-group summary
+
+The command should read ordinary event-owned state.
+
+It must not reconstruct current state from the source template, reusable preset, or rendered Discord messages.
+
+Keep this as inspection only unless a separate mutation requirement is established.
 
 ---
 

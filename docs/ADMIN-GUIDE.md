@@ -1,6 +1,6 @@
 # Administrator Guide
 
-**Last reconciled:** 19 September 2026
+**Last reconciled:** 24 September 2026
 
 ## Purpose
 
@@ -18,7 +18,9 @@ This document describes **implemented administrator-facing functionality**.
 
 Reusable role-request preset creation, editing, lifecycle management, mapping administration, and application are implemented.
 
-Planned features such as event templates, recurring event generation, confirmed-organiser self-unavailability, and richer attendance participation context are called out separately and should not be mistaken for current commands.
+Reusable event-template administration and one-off generation are implemented.
+
+Planned features such as recurring event generation, confirmed-organiser self-unavailability, richer attendance participation context, and a consolidated `/event show` inspection command are called out separately and should not be mistaken for current commands.
 
 For implementation details, see:
 
@@ -3513,6 +3515,611 @@ Preset application remains the final authoritative validator of whether the curr
 
 ---
 
+# Event Templates
+
+Event templates provide reusable source configuration for events that occur repeatedly or share a common setup.
+
+A template can define:
+
+- event type
+- optional region/audience
+- name and description
+- timezone
+- optional normal local start time
+- duration
+- signup behaviour
+- signup-close offset
+- detailed-deadline presentation
+- publication mode
+- publication timing
+- fixed or default publication destination
+- ping roles
+- primary/backup organiser defaults
+- reminder definitions
+- an optional reusable role-request preset
+
+Templates are sources for future generation.
+
+They are not live configuration for events which have already been generated.
+
+The normal model is:
+
+```text
+template
+        |
+        | generate
+        v
+ordinary event snapshot
+```
+
+After generation, administer the event through ordinary `/event` commands.
+
+Later template edits do not rewrite that event.
+
+---
+
+# Template Permissions
+
+`/template` commands require the same Event Admin authority used by event administration.
+
+The caller needs either:
+
+- the configured Event Admin role
+- Manage Server permission
+
+Template commands are guild-scoped.
+
+A template ID from another server is not a valid target.
+
+---
+
+# `/template create`
+
+Creates a reusable event template.
+
+Required options are:
+
+```text
+name
+event-type
+```
+
+Optional configuration includes:
+
+```text
+region
+timezone
+description
+local-time
+duration-minutes
+signups
+close-minutes-before
+detailed-deadline
+publication-mode
+publish-minutes-before-start
+publication-channel
+role-preset-id
+```
+
+If no timezone is supplied, the server timezone is used.
+
+The normal duration defaults to:
+
+```text
+60 minutes
+```
+
+Signups default to enabled.
+
+The signup-close offset defaults to:
+
+```text
+60 minutes before event start
+```
+
+Publication mode defaults to:
+
+```text
+manual
+```
+
+A scheduled template requires a positive publication offset.
+
+Manual and immediate templates do not store a scheduled-publication offset.
+
+If no fixed publication channel is selected, the current guild default is resolved when each event is generated.
+
+The server must therefore have either:
+
+```text
+template fixed publication channel
+```
+
+or:
+
+```text
+guild default attendance/publication channel
+```
+
+available.
+
+A template may reference zero or one reusable role-request preset.
+
+The preset must belong to the guild and be compatible with the configured event type.
+
+---
+
+# `/template list`
+
+Lists active templates by default.
+
+Use:
+
+```text
+/template list include-inactive:true
+```
+
+to include inactive templates.
+
+The list displays readable event-type and region/source names where available, while retaining internal IDs for administrative reference.
+
+Use the shown template ID with the other `/template` commands.
+
+---
+
+# `/template show`
+
+Displays the complete reusable source definition for one template.
+
+The output includes:
+
+- template ID and lifecycle
+- description
+- event type
+- region/audience
+- role-request preset
+- timezone
+- normal local start time
+- duration
+- signup configuration
+- publication mode
+- publication timing
+- publication destination behaviour
+- ping roles
+- organiser defaults
+- reminder definitions
+
+This command shows reusable source state.
+
+It does not show the runtime state of an already-generated event.
+
+Use event-level commands for generated occurrences.
+
+---
+
+# `/template edit`
+
+Edits core reusable template configuration.
+
+Only supplied fields change.
+
+For ordinary optional fields:
+
+```text
+omitted
+    -> preserve existing value
+```
+
+Explicit clear options exist for nullable configuration such as:
+
+```text
+region
+role-request preset
+description
+local start time
+publication schedule
+fixed publication channel
+```
+
+For example:
+
+```text
+clear-role-preset:true
+```
+
+removes the reusable preset reference.
+
+```text
+clear-publication-channel:true
+```
+
+returns publication destination resolution to the guild default at generation time.
+
+Editing the template affects future generation only.
+
+Existing generated events remain unchanged.
+
+---
+
+# `/template set-ping-roles`
+
+Replaces the complete reusable ping-role collection.
+
+Supply between one and four roles.
+
+The supplied order becomes the stored reusable order.
+
+Use:
+
+```text
+clear:true
+```
+
+to remove all template ping roles.
+
+Do not combine `clear:true` with replacement roles.
+
+The command rejects:
+
+- `@everyone`
+- managed/integration roles
+- duplicate role selections
+
+Existing generated events keep their own ping-role snapshots.
+
+---
+
+# `/template set-organisers`
+
+Replaces the complete reusable organiser-default set.
+
+Supported reusable slots are:
+
+```text
+primary
+backup
+```
+
+A backup organiser requires a primary organiser.
+
+The same member cannot occupy both slots.
+
+Bot accounts cannot be configured as organisers.
+
+Where an Event Organiser role is configured, selected members must hold it.
+
+Use:
+
+```text
+clear:true
+```
+
+to remove all organiser defaults.
+
+Template organiser defaults remain reusable configuration even while the guild organiser feature is disabled.
+
+If organisers are disabled when an occurrence is generated, generation succeeds but does not create organiser assignments for that occurrence.
+
+Existing generated events are not changed by later template organiser edits.
+
+---
+
+# Template Reminders
+
+Templates can contain reusable reminder definitions.
+
+Supported timing references are currently:
+
+```text
+Event start
+Signup close
+```
+
+A signup-close reminder requires template signups to be enabled.
+
+Reminder definitions become ordinary persistent event reminders when an occurrence is generated.
+
+They then follow normal event-reminder scheduling and editing behaviour.
+
+---
+
+# `/template reminder-add`
+
+Adds one reminder definition.
+
+Required options are:
+
+```text
+template-id
+timing-reference
+minutes-before
+message
+```
+
+Optional options are:
+
+```text
+channel
+ping-event-roles
+```
+
+If no channel is supplied, the reminder uses:
+
+```text
+generated event publication destination
+```
+
+when the occurrence is generated.
+
+`ping-event-roles` defaults to No for template reminders unless explicitly enabled.
+
+---
+
+# `/template reminder-edit`
+
+Edits one reminder definition by its reminder ID.
+
+Omitted fields preserve their current values.
+
+Use:
+
+```text
+clear-channel:true
+```
+
+to restore publication-destination inheritance.
+
+Do not supply both:
+
+```text
+channel
+clear-channel:true
+```
+
+in the same edit.
+
+The reminder IDs required here are displayed by:
+
+```text
+/template show
+```
+
+---
+
+# `/template reminder-remove`
+
+Removes one reusable reminder definition.
+
+This does not remove reminders already snapshotted into previously-generated events.
+
+---
+
+# `/template reminder-clear`
+
+Removes all reminder definitions from the reusable template.
+
+Existing generated-event reminders remain unchanged.
+
+---
+
+# `/template set-active`
+
+Activates or deactivates a reusable template.
+
+An active template may generate events.
+
+An inactive template:
+
+- cannot generate new events
+- remains inspectable
+- remains editable
+- remains visible with `include-inactive:true`
+- does not alter events it generated previously
+
+Repeatedly setting the existing state is treated as a no-op.
+
+---
+
+# `/template generate`
+
+Generates one ordinary event occurrence from the current template definition.
+
+Required options are:
+
+```text
+template-id
+date
+```
+
+`date` uses:
+
+```text
+YYYY-MM-DD
+```
+
+The optional:
+
+```text
+time
+```
+
+uses:
+
+```text
+HH:mm
+```
+
+and overrides the template's normal local start time for this occurrence only.
+
+If no `time` is supplied:
+
+```text
+template.local-time
+```
+
+is used.
+
+If the template has no normal local start time, `time` is required for that occurrence.
+
+The supplied local date/time is interpreted in the template timezone.
+
+The bot rejects:
+
+- malformed dates
+- impossible local times
+- ambiguous local times during daylight-saving clock changes
+- occurrence times which are no longer in the future
+- signup configurations whose closing time would already have passed
+
+An occurrence-specific time override does not edit the reusable template.
+
+---
+
+# Generation Snapshot Behaviour
+
+Successful generation creates an ordinary event containing snapshots of the template's current applicable state.
+
+This can include:
+
+```text
+core event configuration
+publication destination
+ping roles
+organiser assignments
+reminders
+role-request preset configuration
+durable scheduled work
+```
+
+The event retains source provenance through:
+
+```text
+events.template_id
+```
+
+but does not continue reading its runtime configuration from the template.
+
+Later template changes do not rewrite the generated event.
+
+---
+
+# Template Generation and Concurrent Edits
+
+`/template generate` first inspects the template to resolve its local occurrence time.
+
+The bot also records the inspected template revision.
+
+If another administrator changes the template before generation acquires its source lock, generation returns a retry message rather than combining:
+
+```text
+old timing metadata
+```
+
+with:
+
+```text
+new template configuration
+```
+
+Run `/template generate` again after the edit completes.
+
+---
+
+# Template Publication Modes
+
+## Manual
+
+The generated event remains unpublished.
+
+Publish it later with:
+
+```text
+/event publish
+event-id: <generated event ID>
+```
+
+## Scheduled
+
+Generation creates the normal durable event-publication action.
+
+The event appears in `/event list` before publication.
+
+It can still be manually published early with `/event publish`.
+
+## Immediate
+
+The complete event is generated and committed first.
+
+The bot then invokes the normal event-publication workflow.
+
+This ordering is deliberate:
+
+```text
+PostgreSQL generation commits
+        |
+        v
+Discord publication attempted
+```
+
+If immediate Discord publication fails, the generated event remains stored as an unpublished event.
+
+The command reports the failure and provides the event ID.
+
+Publication can then be retried using:
+
+```text
+/event publish
+```
+
+---
+
+# Inspecting Generated Events
+
+Once generated, an occurrence is an ordinary event.
+
+Current event information is spread across the relevant event-level commands.
+
+Depending on the configured features, useful inspection commands include:
+
+```text
+/event list
+/event reminder-list
+/event role-option-list
+/event role-group-list
+/event role-requests
+```
+
+A consolidated `/event show` command is not currently implemented and is tracked as a future administrator-UX improvement.
+
+---
+
+# Template Snapshot Independence
+
+The most important administrator rule is:
+
+```text
+template edit
+    -> future generation
+
+generated event edit
+    -> that event only
+```
+
+Changing reusable:
+
+- ping roles
+- organiser defaults
+- reminders
+- publication defaults
+- role-request preset
+- core template configuration
+
+does not retroactively modify events which already exist.
+
+Likewise, editing a generated event does not modify its source template.
+
+---
+
 # Reminders
 
 Event reminders are persistent scheduled messages.
@@ -4397,6 +5004,41 @@ Used by commands such as:
 /attendance record
 ```
 
+## Template ID
+
+Shown by:
+
+```text
+/template list
+```
+
+Used by the other `/template` administration commands.
+
+A template ID is not an event ID.
+
+After `/template generate`, use the newly-created Event ID with `/event` commands.
+
+---
+
+## Template reminder ID
+
+Shown inside:
+
+```text
+/template show
+```
+
+Used by:
+
+```text
+/template reminder-edit
+/template reminder-remove
+```
+
+This is the reusable reminder-definition ID.
+
+It is not the same as the ID of an ordinary event reminder created when an occurrence is generated.
+
 ---
 
 ## Event role-option ID
@@ -4833,6 +5475,27 @@ The following administrator-facing areas are implemented.
 - event-level snapshot independence
 - inactive-state warnings and repair guidance
 
+## Event templates
+
+- reusable template creation
+- list and full inspection
+- active/inactive lifecycle
+- core configuration editing
+- optional role-request preset reference
+- ordered ping-role replacement
+- primary/backup organiser defaults
+- reminder creation/editing/removal/clearing
+- manual/scheduled/immediate publication intent
+- fixed or generation-time-default publication destination
+- one-off occurrence generation
+- occurrence-specific time override
+- timezone-aware local-date/time validation
+- generated-event provenance
+- generated-event snapshot independence
+- source-lock concurrency protection
+- source-revision protection during occurrence preparation
+- post-commit immediate publication
+
 ## Reminders and announcements
 
 - persistent event reminders
@@ -4865,16 +5528,6 @@ The following administrator-facing areas are implemented.
 # Not Yet Complete
 
 The following should **not** be treated as implemented administrator features yet.
-
-## Event templates
-
-The repository contains template-related schema groundwork, but there is not yet a complete administrator-facing event-template workflow.
-
-There is currently no finished production `/template` command surface.
-
-P1 development begins by reconciling the existing template schema against the current event architecture before commands are added.
-
----
 
 ## Recurring event generation
 

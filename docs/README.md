@@ -213,33 +213,32 @@ Documentation should make the current system easier to understand.
 
 # Current development phase
 
-The foundational event-management, organiser, role-request, reusable preset, scheduler, recovery, and reliability work is established.
+The foundational event-management, organiser, role-request, reusable preset, scheduler, recovery, reliability, and one-off template workflows are established.
+
+The completed event-template milestone includes:
+
+```text
+template schema reconciliation
+template administration/lifecycle services
+template editing services
+Discord template administration
+reusable ping-role / organiser / reminder configuration
+atomic one-off template generation
+administrator-facing /template generate
+shared timezone-aware occurrence parsing
+generation snapshot independence
+template source-lock concurrency
+source-revision guard during occurrence preparation
+post-commit immediate publication
+```
 
 Current major development phase:
 
 ```text
-P1 — Event Templates
+P1 — Recurring Event Generation
 ```
 
-Implemented P1 foundations now include:
-
-```text
-template schema reconciliation
-transaction-aware snapshot services
-atomic one-off template generation
-generation snapshot independence
-template source-lock concurrency contract
-```
-
-Immediate task:
-
-```text
-P1 — establish template administration and lifecycle services
-```
-
-The next implementation should remain service-first.
-
-Build the reusable persistence/domain boundary for template creation, inspection, listing, active/inactive lifecycle, and mutation locking before adding Discord command adapters.
+Recurrence should reuse the existing template generation boundary and continue producing ordinary independent event snapshots.
 
 See:
 
