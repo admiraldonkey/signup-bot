@@ -1323,6 +1323,159 @@ export const commandDefinitions = [
 
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("edit")
+        .setDescription("Edits the reusable core configuration of a template.")
+
+        /*
+         * Required identity first. Every actual mutation is optional so an
+         * administrator can change only the fields they intend to replace.
+         */
+        .addIntegerOption((option) =>
+          option
+            .setName("template-id")
+            .setDescription("Template ID shown by /template list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("name")
+            .setDescription("Replacement template name.")
+            .setMinLength(1)
+            .setMaxLength(150),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("event-type")
+            .setDescription("Replacement configured event type.")
+            .setAutocomplete(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("region")
+            .setDescription("Replacement configured audience or region.")
+            .setAutocomplete(true),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("clear-region")
+            .setDescription("Remove the template's configured audience."),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("role-preset-id")
+            .setDescription("Replacement reusable role-request preset ID.")
+            .setMinValue(1),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("clear-role-preset")
+            .setDescription("Remove the template's role-request preset."),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("timezone")
+            .setDescription("Replacement template timezone.")
+            .setAutocomplete(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("description")
+            .setDescription("Replacement reusable event description.")
+            .setMaxLength(1000),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("clear-description")
+            .setDescription("Remove the template description."),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("local-time")
+            .setDescription("Replacement normal local start time in HH:mm.")
+            .setMinLength(5)
+            .setMaxLength(5),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("clear-local-time")
+            .setDescription("Remove the normal local start time."),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("duration-minutes")
+            .setDescription("Replacement normal event duration.")
+            .setMinValue(30)
+            .setMaxValue(480),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("signups")
+            .setDescription("Whether generated events use attendance signups."),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("close-minutes-before")
+            .setDescription("Replacement signup-close offset.")
+            .setMinValue(0)
+            .setMaxValue(1440),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("detailed-deadline")
+            .setDescription("Whether to show the full signup deadline."),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("publication-mode")
+            .setDescription("Replacement publication behaviour.")
+            .addChoices(
+              {
+                name: "Manual",
+                value: "manual",
+              },
+              {
+                name: "Scheduled",
+                value: "scheduled",
+              },
+              {
+                name: "Immediate",
+                value: "immediate",
+              },
+            ),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("publish-minutes-before-start")
+            .setDescription("Replacement scheduled publication offset.")
+            .setMinValue(1)
+            .setMaxValue(10080),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("clear-publish-schedule")
+            .setDescription("Remove the configured publication offset."),
+        )
+        .addChannelOption((option) =>
+          option
+            .setName("publication-channel")
+            .setDescription("Replacement fixed publication channel.")
+            .addChannelTypes(
+              ChannelType.GuildText,
+              ChannelType.GuildAnnouncement,
+            ),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("clear-publication-channel")
+            .setDescription(
+              "Use the guild default publication channel instead.",
+            ),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("list")
         .setDescription("Lists reusable event templates.")
         .addBooleanOption((option) =>

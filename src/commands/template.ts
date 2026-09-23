@@ -12,12 +12,13 @@ import {
 import { writeAuditLog } from "../audit/audit-log.js";
 import {
   createEventTemplate,
+  editEventTemplate,
   getEventTemplate,
   listEventTemplates,
   setEventTemplateActive,
   type CreateEventTemplateResult,
+  type EditEventTemplateResult,
   type EventTemplateDetail,
-  type EventTemplatePublicationMode,
 } from "../templates/event-template-admin-service.js";
 
 type CachedCommandInteraction = ChatInputCommandInteraction<"cached">;
@@ -28,6 +29,13 @@ type GuildConfiguration = NonNullable<
 
 type TemplateCreateValidationReason = Extract<
   CreateEventTemplateResult,
+  {
+    kind: "invalid_input";
+  }
+>["reason"];
+
+type TemplateEditValidationReason = Extract<
+  EditEventTemplateResult,
   {
     kind: "invalid_input";
   }
@@ -64,6 +72,11 @@ export async function handleTemplateCommand(
   switch (subcommand) {
     case "create":
       await createTemplate(interaction, configuration);
+
+      return;
+
+    case "edit":
+      await editTemplate(interaction, configuration);
 
       return;
 
@@ -436,6 +449,392 @@ async function createTemplate(
   }
 }
 
+async function editTemplate(
+  interaction: CachedCommandInteraction,
+  configuration: GuildConfiguration,
+): Promise<void> {
+  const templateId = interaction.options.getInteger("template-id", true);
+
+  const eventTypeText = interaction.options.getString("event-type");
+
+  let eventTypeId: number | undefined;
+
+  if (eventTypeText !== null) {
+    const parsed = parsePositiveIntegerId(eventTypeText);
+
+    if (parsed === null) {
+      await interaction.editReply({
+        content:
+          "The selected event type is invalid. Choose one from the autocomplete list.",
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+    }
+
+    eventTypeId = parsed;
+  }
+
+  const regionText = interaction.options.getString("region");
+
+  const clearRegion = interaction.options.getBoolean("clear-region") ?? false;
+
+  if (regionText !== null && clearRegion) {
+    await interaction.editReply({
+      content:
+        "Choose either a replacement region or `clear-region:true`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  let audienceId: number | null | undefined;
+
+  if (clearRegion) {
+    audienceId = null;
+  } else if (regionText !== null) {
+    const parsed = parsePositiveIntegerId(regionText);
+
+    if (parsed === null) {
+      await interaction.editReply({
+        content:
+          "The selected event audience is invalid. Choose one from the autocomplete list.",
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+    }
+
+    audienceId = parsed;
+  }
+
+  const rolePresetId = interaction.options.getInteger("role-preset-id");
+
+  const clearRolePreset =
+    interaction.options.getBoolean("clear-role-preset") ?? false;
+
+  if (rolePresetId !== null && clearRolePreset) {
+    await interaction.editReply({
+      content:
+        "Choose either a replacement role-request preset or `clear-role-preset:true`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const description = interaction.options.getString("description");
+
+  const clearDescription =
+    interaction.options.getBoolean("clear-description") ?? false;
+
+  if (description !== null && clearDescription) {
+    await interaction.editReply({
+      content:
+        "Choose either a replacement description or `clear-description:true`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const localTime = interaction.options.getString("local-time");
+
+  const clearLocalTime =
+    interaction.options.getBoolean("clear-local-time") ?? false;
+
+  if (localTime !== null && clearLocalTime) {
+    await interaction.editReply({
+      content:
+        "Choose either a replacement local time or `clear-local-time:true`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const publishMinutes = interaction.options.getInteger(
+    "publish-minutes-before-start",
+  );
+
+  const clearPublishSchedule =
+    interaction.options.getBoolean("clear-publish-schedule") ?? false;
+
+  if (publishMinutes !== null && clearPublishSchedule) {
+    await interaction.editReply({
+      content:
+        "Choose either a replacement publication offset or `clear-publish-schedule:true`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const selectedPublicationChannel = interaction.options.getChannel(
+    "publication-channel",
+  );
+
+  const clearPublicationChannel =
+    interaction.options.getBoolean("clear-publication-channel") ?? false;
+
+  if (selectedPublicationChannel !== null && clearPublicationChannel) {
+    await interaction.editReply({
+      content:
+        "Choose either a replacement publication channel or `clear-publication-channel:true`, not both.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  let publicationChannelId: string | null | undefined;
+
+  if (clearPublicationChannel) {
+    if (!configuration.attendanceChannelId) {
+      await interaction.editReply({
+        content:
+          "This server has no default attendance/publication channel, so the template's fixed publication channel cannot be cleared.",
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+    }
+
+    publicationChannelId = null;
+  } else if (selectedPublicationChannel) {
+    const channel = await interaction.guild.channels.fetch(
+      selectedPublicationChannel.id,
+    );
+
+    if (
+      !channel ||
+      (channel.type !== ChannelType.GuildText &&
+        channel.type !== ChannelType.GuildAnnouncement) ||
+      !channel.isSendable()
+    ) {
+      await interaction.editReply({
+        content: "The selected template publication channel is unavailable.",
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+    }
+
+    const botMember =
+      interaction.guild.members.me ??
+      (await interaction.guild.members.fetchMe());
+
+    const permissions = channel.permissionsFor(botMember);
+
+    const requiredPermissions = [
+      PermissionFlagsBits.ViewChannel,
+      PermissionFlagsBits.SendMessages,
+      PermissionFlagsBits.EmbedLinks,
+      PermissionFlagsBits.ReadMessageHistory,
+    ];
+
+    if (
+      requiredPermissions.some((permission) => !permissions.has(permission))
+    ) {
+      await interaction.editReply({
+        content:
+          "The bot does not currently have all required event-posting permissions in that publication channel.",
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+    }
+
+    publicationChannelId = channel.id;
+  }
+
+  const result = await editEventTemplate({
+    guildDatabaseId: configuration.guildId,
+
+    templateId,
+
+    eventTypeId,
+
+    audienceId,
+
+    roleRequestPresetId: clearRolePreset ? null : (rolePresetId ?? undefined),
+
+    name: interaction.options.getString("name") ?? undefined,
+
+    description: clearDescription ? null : (description ?? undefined),
+
+    timezone: interaction.options.getString("timezone")?.trim() || undefined,
+
+    localStartTime: clearLocalTime ? null : (localTime ?? undefined),
+
+    durationMinutes:
+      interaction.options.getInteger("duration-minutes") ?? undefined,
+
+    signupsEnabled: interaction.options.getBoolean("signups") ?? undefined,
+
+    attendanceCloseMinutesBefore:
+      interaction.options.getInteger("close-minutes-before") ?? undefined,
+
+    showDetailedDeadline:
+      interaction.options.getBoolean("detailed-deadline") ?? undefined,
+
+    publicationMode:
+      interaction.options.getString("publication-mode") ?? undefined,
+
+    publishMinutesBeforeStart: clearPublishSchedule
+      ? null
+      : (publishMinutes ?? undefined),
+
+    publicationChannelId,
+  });
+
+  switch (result.kind) {
+    case "updated":
+      await interaction.editReply({
+        content: [
+          `✅ Updated event template **${result.template.name}** (#${result.template.id}).`,
+          "",
+          "Existing generated events were not changed.",
+          `Use \`/template show template-id:${result.template.id}\` to inspect the updated reusable definition.`,
+        ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: configuration.guildId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "event_template.edit",
+
+        outcome: "success",
+
+        summary: `Edited event template "${result.template.name}" (#${result.template.id}).`,
+
+        targetType: "event_template",
+
+        targetId: String(result.template.id),
+
+        details: {
+          eventTypeId: result.template.eventTypeId,
+
+          audienceId: result.template.audienceId,
+
+          roleRequestPresetId: result.template.roleRequestPresetId,
+
+          publicationMode: result.template.publicationMode,
+        },
+      });
+
+      return;
+
+    case "unchanged":
+      await interaction.editReply({
+        content: `Event template **${result.template.name}** (#${result.template.id}) already has that core configuration. No changes were made.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "template_not_found":
+      await interaction.editReply({
+        content: `Event template #${templateId} was not found in this server.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "event_type_unavailable":
+      await interaction.editReply({
+        content: "That event type is not available for this server.",
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "audience_unavailable":
+      await interaction.editReply({
+        content: "That event audience is not available for this server.",
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "preset_unavailable":
+      await interaction.editReply({
+        content: "That role-request preset is not available for this server.",
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "invalid_input":
+      await interaction.editReply({
+        content: formatEditValidationError(result.reason),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
+}
+
 async function listTemplates(
   interaction: CachedCommandInteraction,
   guildDatabaseId: number,
@@ -752,6 +1151,20 @@ function formatCreateValidationError(
     case "preset_requires_role_requests":
       return "The selected event type has role requests disabled, so it cannot use a role-request preset.";
   }
+}
+
+function formatEditValidationError(
+  reason: TemplateEditValidationReason,
+): string {
+  if (reason === "no_changes_requested") {
+    return "No template changes were supplied.";
+  }
+
+  if (reason === "signup_close_requires_signups") {
+    return "Signups cannot be disabled while the template still contains signup-close reminder definitions. Clear or replace those reminders first.";
+  }
+
+  return formatCreateValidationError(reason);
 }
 
 function formatPublicationMode(value: string): string {

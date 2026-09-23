@@ -20,7 +20,8 @@ export async function handleEventAutocomplete(
     (subcommand === "create" || subcommand === "edit");
 
   const supportsTemplateAutocomplete =
-    interaction.commandName === "template" && subcommand === "create";
+    interaction.commandName === "template" &&
+    (subcommand === "create" || subcommand === "edit");
 
   if (!supportsEventAutocomplete && !supportsTemplateAutocomplete) {
     await interaction.respond([]);
@@ -48,12 +49,20 @@ export async function handleEventAutocomplete(
   }
 
   /*
-   * Region and event-type source selection applies to one-off event creation
-   * and reusable template creation.
+   * Event type and audience source selection applies to:
    *
-   * Event editing only uses timezone autocomplete.
+   * - one-off event creation
+   * - template creation
+   * - template core editing
+   *
+   * Ordinary event editing continues to use only timezone autocomplete.
    */
-  if (subcommand !== "create") {
+  const supportsSourceAutocomplete =
+    (interaction.commandName === "event" && subcommand === "create") ||
+    (interaction.commandName === "template" &&
+      (subcommand === "create" || subcommand === "edit"));
+
+  if (!supportsSourceAutocomplete) {
     await interaction.respond([]);
     return;
   }

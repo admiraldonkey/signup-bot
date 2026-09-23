@@ -16,6 +16,8 @@ const authMocks = vi.hoisted(() => ({
 const templateServiceMocks = vi.hoisted(() => ({
   createEventTemplate: vi.fn(),
 
+  editEventTemplate: vi.fn(),
+
   getEventTemplate: vi.fn(),
 
   listEventTemplates: vi.fn(),
@@ -101,6 +103,7 @@ describe("/template command", () => {
 
     expect(definition?.options?.map((option) => option.name)).toEqual([
       "create",
+      "edit",
       "list",
       "show",
       "set-active",
@@ -137,6 +140,46 @@ describe("/template command", () => {
       "publish-minutes-before-start",
       "publication-channel",
       "role-preset-id",
+    ]);
+
+    const editDefinition = definition?.options?.find(
+      (option) => option.name === "edit",
+    );
+
+    expect(editDefinition).toBeDefined();
+
+    if (
+      !editDefinition ||
+      !("options" in editDefinition) ||
+      !editDefinition.options
+    ) {
+      throw new Error(
+        "Expected /template edit to be a subcommand with options.",
+      );
+    }
+
+    expect(editDefinition.options.map((option) => option.name)).toEqual([
+      "template-id",
+      "name",
+      "event-type",
+      "region",
+      "clear-region",
+      "role-preset-id",
+      "clear-role-preset",
+      "timezone",
+      "description",
+      "clear-description",
+      "local-time",
+      "clear-local-time",
+      "duration-minutes",
+      "signups",
+      "close-minutes-before",
+      "detailed-deadline",
+      "publication-mode",
+      "publish-minutes-before-start",
+      "clear-publish-schedule",
+      "publication-channel",
+      "clear-publication-channel",
     ]);
   });
 
@@ -287,6 +330,170 @@ describe("/template command", () => {
 
         targetId: "7",
       }),
+    );
+  });
+
+  it("edits core template configuration with explicit clear semantics and audits a real mutation", async () => {
+    templateServiceMocks.editEventTemplate.mockResolvedValue({
+      kind: "updated",
+
+      template: {
+        id: 7,
+
+        ownerGuildId: 42,
+
+        eventTypeId: 13,
+
+        audienceId: null,
+
+        roleRequestPresetId: null,
+
+        name: "Updated Naval",
+
+        description: null,
+
+        timezone: "Europe/London",
+
+        localStartTime: null,
+
+        durationMinutes: 75,
+
+        signupsEnabled: false,
+
+        attendanceCloseMinutesBefore: 60,
+
+        showDetailedDeadline: false,
+
+        publicationMode: "manual",
+
+        publishMinutesBeforeStart: null,
+
+        publicationChannelId: null,
+
+        active: true,
+
+        createdByUserId: ADMIN_USER_ID,
+
+        createdAt: new Date(),
+
+        updatedAt: new Date(),
+      },
+    });
+
+    const interaction = createInteraction({
+      subcommand: "edit",
+
+      strings: {
+        name: "Updated Naval",
+
+        "event-type": "13",
+
+        "publication-mode": "manual",
+      },
+
+      integers: {
+        "template-id": 7,
+
+        "duration-minutes": 75,
+      },
+
+      booleans: {
+        "clear-region": true,
+
+        "clear-role-preset": true,
+
+        "clear-description": true,
+
+        "clear-local-time": true,
+
+        signups: false,
+
+        "clear-publish-schedule": true,
+
+        "clear-publication-channel": true,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(templateServiceMocks.editEventTemplate).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      templateId: 7,
+
+      eventTypeId: 13,
+
+      audienceId: null,
+
+      roleRequestPresetId: null,
+
+      name: "Updated Naval",
+
+      description: null,
+
+      timezone: undefined,
+
+      localStartTime: null,
+
+      durationMinutes: 75,
+
+      signupsEnabled: false,
+
+      attendanceCloseMinutesBefore: undefined,
+
+      showDetailedDeadline: undefined,
+
+      publicationMode: "manual",
+
+      publishMinutesBeforeStart: null,
+
+      publicationChannelId: null,
+    });
+
+    expect(readFirstReplyContent(interaction.editReply)).toContain(
+      "Updated event template **Updated Naval** (#7)",
+    );
+
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        guildId: 42,
+
+        actorUserId: ADMIN_USER_ID,
+
+        action: "event_template.edit",
+
+        outcome: "success",
+
+        targetType: "event_template",
+
+        targetId: "7",
+      }),
+    );
+  });
+
+  it("rejects contradictory template edit clear options before calling the service", async () => {
+    const interaction = createInteraction({
+      subcommand: "edit",
+
+      strings: {
+        region: "12",
+      },
+
+      integers: {
+        "template-id": 7,
+      },
+
+      booleans: {
+        "clear-region": true,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(templateServiceMocks.editEventTemplate).not.toHaveBeenCalled();
+
+    expect(readFirstReplyContent(interaction.editReply)).toContain(
+      "either a replacement region",
     );
   });
 
