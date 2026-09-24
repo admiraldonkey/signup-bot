@@ -4140,6 +4140,148 @@ Atomic generation removes that failure window.
 
 ---
 
+## D138 - Recurring materialisation uses a bounded 21-day local-calendar horizon
+
+**Status: Current**
+
+Recurring events are materialised through a bounded rolling horizon.
+
+The initial P1 horizon contains exactly:
+
+```text
+21 local calendar dates
+```
+
+including the template-local current date:
+
+```text
+today
+through
+today + 20 days
+```
+
+The horizon is calculated in:
+
+```text
+event_templates.timezone
+```
+
+rather than UTC or the application host timezone.
+
+### Why 21 days
+
+Current administrator-facing configuration limits publication, reminders, and role-request opening/closing to at most:
+
+```text
+10,080 minutes
+=
+7 days
+```
+
+before the relevant event reference point.
+
+A 21-day materialisation horizon therefore provides a two-week buffer ahead of the longest normal lead time.
+
+If supported lead-time limits are increased beyond this relationship, the recurrence horizon must be reconsidered at the same time.
+
+The horizon must not become shorter than work which needs to exist before a generated event.
+
+### Per-occurrence transactions
+
+A complete horizon is not generated inside one large PostgreSQL transaction.
+
+Instead:
+
+```text
+enumerate bounded local dates
+        |
+        +--> generate occurrence A atomically
+        |
+        +--> generate occurrence B atomically
+        |
+        +--> generate occurrence C atomically
+```
+
+Each occurrence continues to use the atomic event-plus-provenance boundary established by D137.
+
+This means failure of one occurrence does not roll back successful sibling occurrences.
+
+Repeated horizon execution is safe because individual occurrence generation is idempotent.
+
+### Consistent clock
+
+One horizon run captures one current instant and passes it through every occurrence-generation call.
+
+This prevents a long-running horizon pass from evaluating neighbouring slots against subtly different definitions of "now".
+
+Normal production callers use the real current instant.
+
+Tests and explicit recovery tooling may inject a deterministic current time.
+
+### Same-day stale slots
+
+The template-local current date is included in the horizon.
+
+This permits a recurrence first enabled earlier on the same day to create an event which is still usable.
+
+If that day's occurrence has already passed, or its signup deadline has already passed, it is classified as a non-retryable skipped slot for that horizon run.
+
+It is not treated as a broken recurrence series.
+
+Future valid slots continue processing.
+
+### Source changes during a horizon run
+
+The horizon first enumerates from one recurrence snapshot.
+
+Each occurrence then revalidates its requested date against the authoritative locked recurrence source before generation.
+
+A concurrent recurrence-rule edit may therefore make one enumerated slot no longer valid.
+
+Such a slot is classified as skipped due to source change.
+
+The next horizon run re-enumerates the new rule and creates any newly-introduced valid slots.
+
+Already-generated occurrences remain independent snapshots.
+
+### Automated creator provenance
+
+Automatic recurrence materialisation has no human actively pressing a command.
+
+`events.created_by_user_id` nevertheless remains non-null.
+
+Generated recurring events therefore retain the recurrence creator's user ID as their source creator provenance.
+
+System-triggered audit records may still use a null audit actor where appropriate.
+
+This avoids inventing a fake Discord user identity while preserving the administrator whose reusable schedule caused the events to exist.
+
+### Immediate publication
+
+The horizon service performs database materialisation only.
+
+It does not send Discord messages.
+
+For an occurrence generated from an `immediate` publication template, the result explicitly reports:
+
+```text
+requiresImmediatePublication = true
+```
+
+Automatic scheduler integration must not simply publish that event through an unpersisted post-commit callback.
+
+Before automatic recurrence execution is enabled for immediate templates, publication must be represented by durable retryable work so a process crash cannot leave an occurrence permanently unpublished.
+
+### Reason
+
+A rolling horizon provides enough future materialisation for existing publication/reminder/role-request lead times without creating an unbounded number of events.
+
+Using local calendar dates preserves recurrence semantics across timezone and daylight-saving changes.
+
+Using independent idempotent occurrence transactions makes horizon execution safe to repeat after scheduler ticks, process restarts, or partial failures.
+
+---
+
 # Summary of Highest-Risk Invariants
 
 The following decisions are especially easy to break during an otherwise well-intentioned refactor.

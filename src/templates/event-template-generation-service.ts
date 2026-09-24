@@ -72,6 +72,14 @@ export type GenerateEventFromTemplateInput = {
   startsAt: Date;
 
   /*
+   * Optional deterministic clock used by recurrence horizon generation and
+   * tests.
+   *
+   * Normal callers omit this and use the real current time.
+   */
+  now?: Date;
+
+  /*
    * Optional optimistic source revision.
    *
    * Discord generation first reads the template to resolve its local
@@ -301,7 +309,11 @@ async function generateEventFromTemplateCoreInTransaction(
     };
   }
 
-  const now = new Date();
+  const now = input.now ?? new Date();
+
+  if (!Number.isFinite(now.getTime())) {
+    throw new Error("Template generation received an invalid current time.");
+  }
 
   if (input.startsAt.getTime() <= now.getTime()) {
     return {

@@ -48,6 +48,14 @@ export type GenerateRecurringOccurrenceInput = {
    */
   occurrenceDate: string;
 
+  /*
+   * Optional deterministic clock.
+   *
+   * A horizon run passes one shared value to every occurrence so all slots in
+   * that run are evaluated against one coherent instant.
+   */
+  now?: Date;
+
   generatedByUserId: string;
 };
 
@@ -307,6 +315,8 @@ async function generateRecurringOccurrenceInTransaction(
     templateId: template.id,
 
     startsAt: parsedStart.value.toJSDate(),
+
+    now: input.now,
 
     expectedTemplateUpdatedAt: template.updatedAt,
 
