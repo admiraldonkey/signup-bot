@@ -4340,6 +4340,147 @@ Using independent idempotent occurrence transactions makes horizon execution saf
 
 ---
 
+## D139 - Generated events retain exact template-revision provenance
+
+**Status: Current**
+
+Template-generated events retain both their reusable source identity and the exact source revision used for generation.
+
+The authoritative provenance is:
+
+```text
+events.template_id
++
+events.template_source_updated_at
+```
+
+For a newly-generated event:
+
+```text
+events.template_source_updated_at
+    =
+the locked event_templates.updated_at
+used by generation
+```
+
+This timestamp is part of the generated-event provenance.
+
+It is not live configuration.
+
+### Existing events remain independent
+
+Generation still follows:
+
+```text
+template source
+    |
+    | snapshot
+    v
+ordinary event-owned state
+```
+
+A later template edit changes:
+
+```text
+event_templates.updated_at
+```
+
+but does not rewrite:
+
+```text
+events.template_source_updated_at
+```
+
+or any other generated-event snapshot.
+
+This allows administration to distinguish an event generated from the current reusable definition from one generated before a later template change.
+
+### Historical unknown state
+
+`template_source_updated_at` is nullable deliberately.
+
+A null value may mean:
+
+```text
+non-template event
+```
+
+or:
+
+```text
+template-generated event predating exact revision provenance
+```
+
+For an event which still has a `template_id`, inspection reports a null source revision as:
+
+```text
+Revision unknown
+```
+
+The application must not fabricate historical provenance by comparing or backfilling unrelated creation timestamps.
+
+### Administrator inspection
+
+`/template show-generated` provides the template-to-event inspection boundary.
+
+By default it lists generated events whose current:
+
+```text
+events.starts_at
+```
+
+has not yet passed.
+
+An explicit `include-past:true` option includes historical generated events.
+
+The command reads runtime information from ordinary event-owned state.
+
+Relevant state includes:
+
+```text
+events
+event_recurrence_occurrences
+scheduled_actions[action_key = publish_event]
+```
+
+The current template is read only for:
+
+```text
+guild ownership
+template identity/name
+current revision comparison
+```
+
+It is not used to reconstruct the generated event's runtime configuration.
+
+### Recurrence identity remains separate
+
+For automatically-recurring events:
+
+```text
+event_recurrence_occurrences.occurrence_date
+```
+
+continues to represent the immutable original recurrence calendar slot.
+
+The mutable:
+
+```text
+events.starts_at
+```
+
+represents the event's current scheduled start.
+
+`/template show-generated` may therefore display both without treating them as interchangeable.
+
+### Reason
+
+Template snapshot independence is difficult for administrators to manage if they cannot identify which events already exist or whether those events came from an older source revision.
+
+Exact provenance makes that distinction deterministic without weakening snapshot independence or making events continue following reusable source configuration.
+
+---
+
 # Summary of Highest-Risk Invariants
 
 The following decisions are especially easy to break during an otherwise well-intentioned refactor.

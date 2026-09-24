@@ -3995,9 +3995,20 @@ The event retains source provenance through:
 
 ```text
 events.template_id
+events.template_source_updated_at
 ```
 
-but does not continue reading its runtime configuration from the template.
+For newly-generated events, `template_source_updated_at` records the exact reusable-template revision which was snapshotted.
+
+Older generated events created before exact revision tracking may have:
+
+```text
+template_source_updated_at = NULL
+```
+
+Those events remain valid independent snapshots, but their exact historical template revision is intentionally reported as unknown rather than inferred from timestamps.
+
+Generated events do not continue reading their runtime configuration from the template.
 
 Later template changes do not rewrite the generated event.
 
@@ -4073,23 +4084,91 @@ Publication can then be retried using:
 
 ---
 
-# Inspecting Generated Events
+# `/template show-generated`
 
-Once generated, an occurrence is an ordinary event.
+Lists ordinary events which have already been generated from one template.
 
-Current event information is spread across the relevant event-level commands.
-
-Depending on the configured features, useful inspection commands include:
+Use:
 
 ```text
-/event list
-/event reminder-list
-/event role-option-list
-/event role-group-list
-/event role-requests
+/template show-generated
+template-id: <template ID>
 ```
 
-A consolidated `/event show` command is not currently implemented and is tracked as a future administrator-UX improvement.
+By default, the command shows generated events whose current event start time has not yet passed.
+
+The filter uses the event's current:
+
+```text
+events.starts_at
+```
+
+rather than its original recurrence slot.
+
+This means an event which was rescheduled remains classified according to its current event time.
+
+Use:
+
+```text
+/template show-generated
+template-id: <template ID>
+include-past: true
+```
+
+to include historical generated events as well.
+
+For each generated event the command shows:
+
+- Event ID and current event name
+- current start time
+- lifecycle state
+- publication state
+- durable scheduled-publication state where applicable
+- immutable recurrence slot where the event came from automatic recurrence
+- whether the event was generated from the template's current or an older revision
+
+A one-off event produced by `/template generate` has no recurrence slot and is identified as one-off template generation.
+
+Template revision state is reported as:
+
+```text
+Current revision
+Older revision
+Revision unknown
+```
+
+`Current revision` means the event's exact snapshotted:
+
+```text
+events.template_source_updated_at
+```
+
+matches the template's current:
+
+```text
+event_templates.updated_at
+```
+
+`Older revision` means the reusable template has changed since that event was generated.
+
+`Revision unknown` is used when exact source-revision provenance is unavailable, including generated events which predate revision tracking.
+
+The bot does not attempt to infer missing historical provenance from creation timestamps.
+
+Publication information comes from ordinary event-owned state, including:
+
+```text
+events.published_at
+scheduled_actions[action_key = publish_event]
+```
+
+The command does not reconstruct publication state from the template's current publication configuration.
+
+Once generated, an occurrence remains an ordinary event.
+
+Use its Event ID with ordinary `/event` administration commands to inspect or modify that event.
+
+A consolidated `/event show` command is tracked separately as a future administrator-UX improvement.
 
 ---
 

@@ -41,6 +41,10 @@ const generationMocks = vi.hoisted(() => ({
   generateEventFromTemplate: vi.fn(),
 }));
 
+const generatedEventServiceMocks = vi.hoisted(() => ({
+  listGeneratedEventsForTemplate: vi.fn(),
+}));
+
 const publicationMocks = vi.hoisted(() => ({
   publishStoredEvent: vi.fn(),
 }));
@@ -59,6 +63,11 @@ vi.mock(
 vi.mock(
   "../../../src/templates/event-template-generation-service.js",
   () => generationMocks,
+);
+
+vi.mock(
+  "../../../src/templates/event-template-generated-events-service.js",
+  () => generatedEventServiceMocks,
 );
 
 vi.mock("../../../src/events/event-publication.js", () => publicationMocks);
@@ -140,6 +149,7 @@ describe("/template command", () => {
       "reminder-clear",
       "list",
       "show",
+      "show-generated",
       "set-active",
     ]);
 
@@ -197,6 +207,26 @@ describe("/template command", () => {
       "date",
       "time",
     ]);
+
+    const showGeneratedDefinition = definition?.options?.find(
+      (option) => option.name === "show-generated",
+    );
+
+    expect(showGeneratedDefinition).toBeDefined();
+
+    if (
+      !showGeneratedDefinition ||
+      !("options" in showGeneratedDefinition) ||
+      !showGeneratedDefinition.options
+    ) {
+      throw new Error(
+        "Expected /template show-generated to be a subcommand with options.",
+      );
+    }
+
+    expect(
+      showGeneratedDefinition.options.map((option) => option.name),
+    ).toEqual(["template-id", "include-past"]);
 
     const editDefinition = definition?.options?.find(
       (option) => option.name === "edit",
@@ -1083,6 +1113,164 @@ describe("/template command", () => {
     expect(content).toContain("Event starts soon.");
 
     expect(content).toContain("Generated event publication destination");
+  });
+
+  it("shows generated events with recurrence, publication and source-revision state", async () => {
+    generatedEventServiceMocks.listGeneratedEventsForTemplate.mockResolvedValue(
+      {
+        kind: "found",
+
+        template: {
+          id: 7,
+
+          name: "Sunday Naval",
+
+          updatedAt: new Date("2099-01-04T09:00:00.000Z"),
+        },
+
+        events: [
+          {
+            id: 119,
+
+            name: "Sunday Naval",
+
+            startsAt: new Date("2099-01-06T20:00:00.000Z"),
+
+            status: "open",
+
+            publishedAt: new Date("2099-01-03T20:00:00.000Z"),
+
+            publicationActionStatus: "completed",
+
+            publicationDueAt: new Date("2099-01-03T20:00:00.000Z"),
+
+            recurrenceOccurrenceDate: "2099-01-06",
+
+            templateSourceUpdatedAt: new Date("2099-01-04T09:00:00.000Z"),
+
+            templateRevisionState: "current",
+          },
+
+          {
+            id: 120,
+
+            name: "Sunday Naval",
+
+            startsAt: new Date("2099-01-13T20:00:00.000Z"),
+
+            status: "scheduled",
+
+            publishedAt: null,
+
+            publicationActionStatus: "pending",
+
+            publicationDueAt: new Date("2099-01-10T20:00:00.000Z"),
+
+            recurrenceOccurrenceDate: null,
+
+            templateSourceUpdatedAt: new Date("2098-12-31T09:00:00.000Z"),
+
+            templateRevisionState: "older",
+          },
+        ],
+      },
+    );
+
+    const interaction = createInteraction({
+      subcommand: "show-generated",
+
+      integers: {
+        "template-id": 7,
+      },
+
+      booleans: {
+        "include-past": true,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(
+      generatedEventServiceMocks.listGeneratedEventsForTemplate,
+    ).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      templateId: 7,
+
+      includePast: true,
+    });
+
+    const content = readFirstReplyContent(interaction.editReply);
+
+    expect(content).toContain("## Generated events for Sunday Naval (#7)");
+
+    expect(content).toContain("### Sunday Naval (#119)");
+
+    expect(content).toContain("**Lifecycle:** Open");
+
+    expect(content).toContain("**Generation:** Recurring slot `2099-01-06`");
+
+    expect(content).toContain("**Template snapshot:** Current revision");
+
+    expect(content).toContain("### Sunday Naval (#120)");
+
+    expect(content).toContain("**Publication:** Scheduled for");
+
+    expect(content).toContain("**Generation:** One-off template generation");
+
+    expect(content).toContain("**Template snapshot:** Older revision");
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("defaults generated-event inspection to upcoming events and explains an empty result", async () => {
+    generatedEventServiceMocks.listGeneratedEventsForTemplate.mockResolvedValue(
+      {
+        kind: "found",
+
+        template: {
+          id: 7,
+
+          name: "Sunday Naval",
+
+          updatedAt: new Date("2099-01-04T09:00:00.000Z"),
+        },
+
+        events: [],
+      },
+    );
+
+    const interaction = createInteraction({
+      subcommand: "show-generated",
+
+      integers: {
+        "template-id": 7,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(
+      generatedEventServiceMocks.listGeneratedEventsForTemplate,
+    ).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      templateId: 7,
+
+      includePast: false,
+    });
+
+    const content = readFirstReplyContent(interaction.editReply);
+
+    expect(content).toContain(
+      "No upcoming events generated from this template were found.",
+    );
+
+    expect(content).toContain(
+      "/template show-generated template-id:7 include-past:true",
+    );
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
   });
 
   it("changes template lifecycle through the service and audits only a real mutation", async () => {

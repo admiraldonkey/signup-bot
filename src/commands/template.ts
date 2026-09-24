@@ -41,6 +41,10 @@ import {
   type InvalidEventTemplateReason,
   type InvalidTemplateOccurrenceReason,
 } from "../templates/event-template-generation-service.js";
+import {
+  listGeneratedEventsForTemplate,
+  type TemplateGeneratedEventSummary,
+} from "../templates/event-template-generated-events-service.js";
 
 import { parseEventDateTime } from "../time/event-date-time.js";
 
@@ -159,6 +163,15 @@ export async function handleTemplateCommand(
 
     case "show":
       await showTemplate(interaction, configuration.guildId);
+
+      return;
+
+    case "show-generated":
+      await showGeneratedTemplateEvents(
+        interaction,
+
+        configuration.guildId,
+      );
 
       return;
 
@@ -2153,6 +2166,107 @@ async function showTemplate(
   await sendEphemeralText(interaction, formatTemplateDetails(result.template));
 }
 
+async function showGeneratedTemplateEvents(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const templateId = interaction.options.getInteger("template-id", true);
+
+  const includePast = interaction.options.getBoolean("include-past") ?? false;
+
+  const result = await listGeneratedEventsForTemplate({
+    guildDatabaseId,
+
+    templateId,
+
+    includePast,
+  });
+
+  if (result.kind === "template_not_found") {
+    await interaction.editReply({
+      content: `Event template #${templateId} was not found in this server.`,
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  if (result.events.length === 0) {
+    await interaction.editReply({
+      content: includePast
+        ? `No events generated from **${result.template.name}** (#${result.template.id}) were found.`
+        : [
+            "No upcoming events generated from this template were found.",
+            "",
+            `Use \`/template show-generated template-id:${result.template.id} include-past:true\` to include events whose current start time has already passed.`,
+          ].join("\n"),
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const lines = [
+    `## Generated events for ${result.template.name} (#${result.template.id})`,
+
+    includePast
+      ? "Showing all generated events, including events whose current start time has passed."
+      : "Showing generated events whose current start time has not yet passed.",
+
+    "",
+
+    "Generated events are independent ordinary event snapshots. Later template changes do not rewrite them.",
+
+    "",
+  ];
+
+  for (const event of result.events) {
+    const startTimestamp = Math.floor(event.startsAt.getTime() / 1000);
+
+    lines.push(
+      `### ${event.name} (#${event.id})`,
+
+      `**Starts:** <t:${startTimestamp}:F> (<t:${startTimestamp}:R>)`,
+
+      `**Lifecycle:** ${formatGeneratedEventLifecycle(event.status)}`,
+
+      `**Publication:** ${formatGeneratedEventPublication(event)}`,
+
+      `**Generation:** ${
+        event.recurrenceOccurrenceDate
+          ? `Recurring slot \`${event.recurrenceOccurrenceDate}\``
+          : "One-off template generation"
+      }`,
+
+      `**Template snapshot:** ${formatGeneratedEventTemplateRevision(
+        event.templateRevisionState,
+      )}`,
+
+      "",
+    );
+  }
+
+  if (!includePast) {
+    lines.push(
+      `Use \`/template show-generated template-id:${result.template.id} include-past:true\` to include events whose current start time has already passed.`,
+
+      "",
+    );
+  }
+
+  lines.push(
+    "Use each Event ID with ordinary `/event` administration commands to inspect or change that generated event.",
+  );
+
+  await sendEphemeralText(interaction, lines.join("\n"));
+}
+
 async function setTemplateActive(
   interaction: CachedCommandInteraction,
   guildDatabaseId: number,
@@ -2694,6 +2808,79 @@ async function replyTemplateNotFound(
       parse: [],
     },
   });
+}
+
+function formatGeneratedEventLifecycle(
+  status: TemplateGeneratedEventSummary["status"],
+): string {
+  switch (status) {
+    case "scheduled":
+      return "Scheduled";
+
+    case "open":
+      return "Open";
+
+    case "closed":
+      return "Closed";
+
+    case "cancelled":
+      return "Cancelled";
+
+    case "completed":
+      return "Completed";
+  }
+}
+
+function formatGeneratedEventPublication(
+  event: TemplateGeneratedEventSummary,
+): string {
+  if (event.publishedAt) {
+    const publishedTimestamp = Math.floor(event.publishedAt.getTime() / 1000);
+
+    return `Published <t:${publishedTimestamp}:F> (<t:${publishedTimestamp}:R>)`;
+  }
+
+  if (event.publicationActionStatus === null) {
+    return "Unpublished. No scheduled publication action is stored.";
+  }
+
+  const dueText = event.publicationDueAt
+    ? `<t:${Math.floor(
+        event.publicationDueAt.getTime() / 1000,
+      )}:F> (<t:${Math.floor(event.publicationDueAt.getTime() / 1000)}:R>)`
+    : "an unknown time";
+
+  switch (event.publicationActionStatus) {
+    case "pending":
+      return `Scheduled for ${dueText}`;
+
+    case "processing":
+      return `Automatic publication is processing. Scheduled time: ${dueText}`;
+
+    case "completed":
+      return "The publication action completed, but no published timestamp is stored.";
+
+    case "failed":
+      return `Automatic publication failed. Scheduled time: ${dueText}`;
+
+    case "cancelled":
+      return `Automatic publication was cancelled. Scheduled time: ${dueText}`;
+  }
+}
+
+function formatGeneratedEventTemplateRevision(
+  state: TemplateGeneratedEventSummary["templateRevisionState"],
+): string {
+  switch (state) {
+    case "current":
+      return "Current revision";
+
+    case "older":
+      return "Older revision (the template has changed since this event was generated)";
+
+    case "unknown":
+      return "Revision unknown (generated before exact template-revision tracking)";
+  }
 }
 
 function formatPublicationMode(value: string): string {

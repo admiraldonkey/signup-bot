@@ -1780,6 +1780,26 @@ export const commandDefinitions = [
 
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("show-generated")
+        .setDescription("Lists events already generated from one template.")
+        .addIntegerOption((option) =>
+          option
+            .setName("template-id")
+            .setDescription("Template ID shown by /template list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("include-past")
+            .setDescription(
+              "Also include generated events whose current start time has passed.",
+            ),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("set-active")
         .setDescription("Activates or deactivates a reusable event template.")
         .addIntegerOption((option) =>
