@@ -6,6 +6,7 @@ import {
   eventAudiences,
   eventTemplateOrganiserDefaults,
   eventTemplatePingRoles,
+  eventTemplateRecurrences,
   eventTemplateReminders,
   eventTemplates,
   eventTypes,
@@ -307,6 +308,7 @@ export type EditEventTemplateResult =
         | EventTemplateConfigurationInvalidReason
         | "preset_requires_role_requests"
         | "signup_close_requires_signups"
+        | "recurrence_requires_local_start_time"
         | "no_changes_requested";
     };
 
@@ -913,6 +915,34 @@ export async function editEventTemplate(
     }
 
     const configuration = configurationResult.configuration;
+
+    /*
+     * A recurrence resolves each future calendar slot using the template's
+     * reusable local start time.
+     *
+     * Recurrence creation also takes the template parent FOR UPDATE first, so
+     * this check cannot race with a correctly implemented recurrence create.
+     */
+    if (
+      input.localStartTime !== undefined &&
+      configuration.localStartTime === null
+    ) {
+      const [recurrence] = await transaction
+        .select({
+          id: eventTemplateRecurrences.id,
+        })
+        .from(eventTemplateRecurrences)
+        .where(eq(eventTemplateRecurrences.templateId, template.id))
+        .limit(1);
+
+      if (recurrence) {
+        return {
+          kind: "invalid_input",
+
+          reason: "recurrence_requires_local_start_time",
+        } as const;
+      }
+    }
 
     /*
      * A signup-close reminder requires a signup-close reference point.

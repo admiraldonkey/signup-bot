@@ -2556,6 +2556,10 @@ function formatEditValidationError(
     return "Signups cannot be disabled while the template still contains signup-close reminder definitions. Clear or replace those reminders first.";
   }
 
+  if (reason === "recurrence_requires_local_start_time") {
+    return "The template local start time cannot be cleared while a recurrence series exists. Recurring occurrences require a reusable local start time.";
+  }
+
   return formatCreateValidationError(reason);
 }
 

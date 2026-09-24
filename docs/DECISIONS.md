@@ -2941,17 +2941,116 @@ Schema presence must not force the implementation to preserve an older incomplet
 
 ---
 
-## D121 - Recurrence should use a standards-based representation where practical
+## D121 - Recurrence uses an RFC 5545 rule representation behind a constrained domain adapter
 
-**Status: Planned**
+**Status: Current**
 
-The current intended direction is an RFC 5545 compatible recurrence rule representation.
+Recurring series store an RFC 5545-compatible recurrence-rule string.
+
+The implementation uses the `rrule` library for calendar recurrence parsing and bounded occurrence calculation.
+
+The library is not exposed directly as the application's recurrence contract.
+
+P1 accepts a deliberately constrained rule subset:
+
+```text
+FREQ
+INTERVAL
+BYDAY
+BYMONTHDAY
+BYMONTH
+WKST
+```
+
+Supported frequencies are:
+
+```text
+DAILY
+WEEKLY
+MONTHLY
+YEARLY
+```
+
+Clock and timezone components are deliberately excluded.
+
+In particular, P1 recurrence rules do not own:
+
+```text
+DTSTART
+TZID
+BYHOUR
+BYMINUTE
+BYSECOND
+```
+
+The event template remains authoritative for:
+
+```text
+timezone
+normal local start time
+```
+
+The recurrence layer answers:
+
+```text
+Which local calendar dates belong to this series?
+```
+
+A later occurrence-generation layer combines each local date with the template's local start time and timezone to resolve an absolute event start instant.
+
+The initial P1 recurrence-rule adapter also does not yet expose:
+
+```text
+COUNT
+UNTIL
+RDATE
+EXDATE
+EXRULE
+```
+
+Those features may be added deliberately when their product semantics, mutation behaviour, and occurrence-identity effects are defined.
+
+### Bounded enumeration
+
+Recurrence calculation always receives an explicit bounded date window.
+
+The shared recurrence-rule adapter refuses excessively large enumeration windows rather than permitting accidental unlimited materialisation.
+
+The rolling production-generation horizon is a separate policy and may be substantially smaller than the adapter's safety bound.
+
+### Timezone boundary
+
+The recurrence library is used as a calendar-date engine.
+
+Synthetic UTC `Date` values are used internally only to provide stable year/month/day arithmetic to the library.
+
+Those values are not event instants.
+
+Named-timezone conversion remains the responsibility of the existing Luxon-based event date/time boundary.
 
 ### Reason
 
-Recurrence has many edge cases.
+RFC recurrence rules have enough calendar edge cases that using an established implementation is preferable to inventing weekly/monthly arithmetic.
 
-Using a well-established rule model is preferable to inventing an ad hoc collection of weekly/monthly flags.
+At the same time, third-party recurrence libraries have their own date and timezone semantics.
+
+Keeping a constrained adapter between the library and the application preserves the project's clearer domain model:
+
+```text
+recurrence
+    -> local calendar dates
+
+template
+    -> timezone + local time
+
+occurrence preparation
+    -> absolute instant
+
+generation
+    -> ordinary event snapshot
+```
+
+This also keeps the stored representation standards-oriented without making every capability of one dependency an accidental permanent product feature.
 
 ---
 
