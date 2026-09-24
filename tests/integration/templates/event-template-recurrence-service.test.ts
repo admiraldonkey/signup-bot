@@ -111,6 +111,67 @@ describe("event template recurrence service", () => {
     });
   });
 
+  it("rejects recurrence creation for an immediate-publication template", async () => {
+    const fixture = await createTemplateFixture(
+      pool,
+      DISCORD_GUILD_ID,
+      "immediate",
+      "20:00",
+    );
+
+    /*
+     * Bypass the recurrence service deliberately.
+     *
+     * This fixture models an otherwise-valid template whose publication mode
+     * makes it unsuitable for automatic recurrence.
+     */
+    await pool.query(
+      `
+        UPDATE "event_templates"
+        SET
+          "publication_mode" =
+            'immediate'
+        WHERE
+          "id" = $1
+      `,
+      [fixture.templateId],
+    );
+
+    const result = await createEventTemplateRecurrence({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: fixture.templateId,
+
+      recurrenceRule: "FREQ=WEEKLY;BYDAY=MO",
+
+      startDate: "2026-10-05",
+
+      createdByUserId: ADMIN_USER_ID,
+    });
+
+    expect(result.kind).toBe("invalid_input");
+
+    const stored = await pool.query<{
+      count: number;
+    }>(
+      `
+          SELECT
+            COUNT(*)::int AS "count"
+          FROM
+            "event_template_recurrences"
+          WHERE
+            "template_id" = $1
+        `,
+      [fixture.templateId],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+  });
+
   it("treats another guild's template as not found", async () => {
     const ownFixture = await createTemplateFixture(
       pool,
@@ -256,6 +317,68 @@ describe("event template recurrence service", () => {
     });
 
     expect(repeated.kind).toBe("unchanged");
+  });
+
+  it("refuses to reactivate recurrence while the template uses immediate publication", async () => {
+    const fixture = await createRecurrenceFixture(pool);
+
+    const deactivated = await setEventTemplateRecurrenceActive({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: fixture.templateId,
+
+      active: false,
+    });
+
+    expect(deactivated.kind).toBe("updated");
+
+    /*
+     * Model an inactive recurrence whose reusable template is then used for
+     * ordinary immediate one-off generation.
+     *
+     * That state is valid until somebody tries to reactivate recurrence.
+     */
+    await pool.query(
+      `
+        UPDATE "event_templates"
+        SET
+          "publication_mode" =
+            'immediate'
+        WHERE
+          "id" = $1
+      `,
+      [fixture.templateId],
+    );
+
+    const reactivated = await setEventTemplateRecurrenceActive({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: fixture.templateId,
+
+      active: true,
+    });
+
+    expect(reactivated.kind).toBe("invalid_input");
+
+    const stored = await pool.query<{
+      active: boolean;
+    }>(
+      `
+          SELECT
+            "active"
+          FROM
+            "event_template_recurrences"
+          WHERE
+            "id" = $1
+        `,
+      [fixture.recurrenceId],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        active: false,
+      },
+    ]);
   });
 
   it("lists only recurrence series owned by the requested guild", async () => {

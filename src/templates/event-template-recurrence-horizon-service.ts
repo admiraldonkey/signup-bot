@@ -12,16 +12,18 @@ import {
 import { getEventTemplateRecurrence } from "./event-template-recurrence-service.js";
 
 /*
- * Materialise exactly 21 local calendar dates:
+ * Materialise exactly 10 local calendar dates:
  *
  * today
  * through
- * today + 20 days
+ * today + 9 days
  *
  * Current administrator-facing publication/reminder/role-request lead times
- * are capped at seven days, leaving a two-week safety buffer.
+ * are capped at seven days. A ten-day horizon therefore gives the longest
+ * supported lead time three days of materialisation headroom while keeping
+ * the future snapshot window reasonably small for administrator edits.
  */
-export const RECURRING_EVENT_HORIZON_DAYS = 21;
+export const RECURRING_EVENT_HORIZON_DAYS = 10;
 
 type GeneratedRecurringOccurrence = Extract<
   GenerateRecurringOccurrenceResult,
@@ -49,8 +51,6 @@ export type RecurringHorizonSlotResult =
       eventId: number;
 
       publicationMode: RecurrencePublicationMode;
-
-      immediatePublicationQueued: boolean;
     }
   | {
       kind: "already_generated";
@@ -123,6 +123,9 @@ export type GenerateRecurringHorizonResult =
       kind: "template_missing_local_start_time";
     }
   | {
+      kind: "immediate_publication_not_supported";
+    }
+  | {
       kind: "invalid_template_timezone";
     }
   | {
@@ -186,6 +189,12 @@ export async function generateRecurringHorizon(
   if (recurrence.templateLocalStartTime === null) {
     return {
       kind: "template_missing_local_start_time",
+    };
+  }
+
+  if (recurrence.templatePublicationMode === "immediate") {
+    return {
+      kind: "immediate_publication_not_supported",
     };
   }
 
@@ -297,8 +306,6 @@ function classifySlotResult(
         eventId: result.generation.event.id,
 
         publicationMode: result.generation.publicationMode,
-
-        immediatePublicationQueued: result.immediatePublicationQueued,
       };
 
     case "already_generated":

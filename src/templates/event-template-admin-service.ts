@@ -309,6 +309,7 @@ export type EditEventTemplateResult =
         | "preset_requires_role_requests"
         | "signup_close_requires_signups"
         | "recurrence_requires_local_start_time"
+        | "active_recurrence_disallows_immediate_publication"
         | "no_changes_requested";
     };
 
@@ -940,6 +941,44 @@ export async function editEventTemplate(
           kind: "invalid_input",
 
           reason: "recurrence_requires_local_start_time",
+        } as const;
+      }
+    }
+
+    /*
+     * Automatic recurrence must never inherit Immediate publication.
+     *
+     * Horizon generation happens ahead of the public event lifecycle, so
+     * treating materialisation time as publication time would expose several
+     * future occurrences at once.
+     *
+     * Only an ACTIVE recurrence blocks this edit. An inactive recurrence may
+     * coexist with an Immediate template but cannot later be reactivated until
+     * the template is changed back to Manual or Scheduled publication.
+     */
+    if (
+      input.publicationMode !== undefined &&
+      configuration.publicationMode === "immediate"
+    ) {
+      const [activeRecurrence] = await transaction
+        .select({
+          id: eventTemplateRecurrences.id,
+        })
+        .from(eventTemplateRecurrences)
+        .where(
+          and(
+            eq(eventTemplateRecurrences.templateId, template.id),
+
+            eq(eventTemplateRecurrences.active, true),
+          ),
+        )
+        .limit(1);
+
+      if (activeRecurrence) {
+        return {
+          kind: "invalid_input",
+
+          reason: "active_recurrence_disallows_immediate_publication",
         } as const;
       }
     }

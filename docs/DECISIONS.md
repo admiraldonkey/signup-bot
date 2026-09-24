@@ -4116,61 +4116,39 @@ A cancelled or rescheduled event must not be interpreted as a missing recurring 
 
 Discord publication remains outside the recurrence-generation database transaction.
 
-Recurring `immediate` publication nevertheless requires durable intent.
-
-For a recurring event whose snapshotted template publication mode is:
+Automatic recurrence does not support templates whose publication mode is:
 
 ```text
 immediate
 ```
 
-the same transaction which creates:
+Recurrence materialises future occurrences ahead of their public lifecycle.
 
-```text
-ordinary event
-+
-recurrence occurrence provenance
-```
+Treating materialisation time as "publish immediately" would make the internal rolling-generation horizon visible to administrators and members, potentially publishing several future events at once.
 
-also creates a normal:
-
-```text
-scheduled_actions
-    action_key = publish_event
-    due_at = generation time
-```
-
-row.
-
-The scheduler then performs the Discord side effect through the existing publication executor.
-
-This means the authoritative commit contains everything required to recover after a process crash:
-
-```text
-event exists
-+
-occurrence provenance exists
-+
-publication intent exists
-```
-
-No process-local post-commit callback is required.
+The recurrence service therefore rejects Immediate-publication templates.
 
 Manual administrator-driven `/template generate` remains different.
 
-That command has an active caller and continues to perform immediate publication directly after its generation transaction commits, reporting any publication failure to the administrator.
-
-Recurring automatic generation must not use that direct orchestration path.
-
-The scheduler's existing publication executor is idempotent with respect to:
+For a one-off generated occurrence:
 
 ```text
-manual publication winning first
-event cancellation/completion
-event already being published
+immediate
 ```
 
-so a durable recurrence publication action may safely become obsolete before execution.
+still means:
+
+```text
+generate now
++
+publish now
+```
+
+through the existing post-commit publication path.
+
+Scheduled recurring events continue to use ordinary durable `publish_event` actions at their configured publication offsets.
+
+Manual recurring events remain unpublished until an administrator explicitly publishes them.
 
 ### Reason
 
@@ -4190,7 +4168,7 @@ Atomic generation removes that failure window.
 
 ---
 
-## D138 - Recurring materialisation uses a bounded 21-day local-calendar horizon
+## D138 - Recurring materialisation uses a bounded 10-day local-calendar horizon
 
 **Status: Current**
 
@@ -4199,7 +4177,7 @@ Recurring events are materialised through a bounded rolling horizon.
 The initial P1 horizon contains exactly:
 
 ```text
-21 local calendar dates
+10 local calendar dates
 ```
 
 including the template-local current date:
@@ -4207,7 +4185,7 @@ including the template-local current date:
 ```text
 today
 through
-today + 20 days
+today + 9 days
 ```
 
 The horizon is calculated in:
@@ -4218,7 +4196,7 @@ event_templates.timezone
 
 rather than UTC or the application host timezone.
 
-### Why 21 days
+### Why 10 days
 
 Current administrator-facing configuration limits publication, reminders, and role-request opening/closing to at most:
 
@@ -4230,9 +4208,11 @@ Current administrator-facing configuration limits publication, reminders, and ro
 
 before the relevant event reference point.
 
-A 21-day materialisation horizon therefore provides a two-week buffer ahead of the longest normal lead time.
+A 10-day materialisation horizon therefore gives the longest currently-supported lead time three days of generation headroom.
 
-If supported lead-time limits are increased beyond this relationship, the recurrence horizon must be reconsidered at the same time.
+The shorter horizon also reduces the period during which future events have already become independent snapshots and therefore no longer inherit later template edits.
+
+If supported lead-time limits are increased, or if the recurrence sweep cadence changes materially, the horizon must be reconsidered at the same time.
 
 The horizon must not become shorter than work which needs to exist before a generated event.
 
@@ -4308,33 +4288,29 @@ This avoids inventing a fake Discord user identity while preserving the administ
 
 ### Immediate publication
 
-The horizon service itself performs no Discord side effects.
+Immediate publication is intentionally unsupported for automatic recurrence.
 
-Recurring occurrence generation owns durable publication intent.
+The rolling horizon is an internal materialisation mechanism and must not determine when members first see an event.
 
-For an occurrence generated from an `immediate` publication template:
-
-```text
-event snapshot
-+
-recurrence provenance
-+
-due-now publish_event action
-```
-
-are committed together.
-
-The horizon result reports:
+Recurring templates must therefore use:
 
 ```text
-immediatePublicationQueued = true
+manual
 ```
 
-rather than instructing its caller to publish directly.
+or:
 
-The existing durable scheduler is responsible for eventually executing that action and applying its normal retry, stale-lock recovery, attempt-limit, state-revalidation, and audit behaviour.
+```text
+scheduled
+```
 
-This closes the crash window which would otherwise exist between recurrence materialisation and Discord publication.
+publication.
+
+For Scheduled publication, materialisation creates the normal durable publication action for the configured offset.
+
+For Manual publication, the occurrence exists privately until an administrator explicitly publishes it.
+
+Immediate publication remains available for one-off event creation and one-off template generation.
 
 ### Reason
 

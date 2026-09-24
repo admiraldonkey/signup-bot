@@ -2560,6 +2560,16 @@ function formatEditValidationError(
     return "The template local start time cannot be cleared while a recurrence series exists. Recurring occurrences require a reusable local start time.";
   }
 
+  if (reason === "active_recurrence_disallows_immediate_publication") {
+    return [
+      "This template has an active recurrence and cannot use Immediate publication.",
+      "",
+      "Recurring occurrences are generated in advance, so Immediate publication could expose multiple future events at once.",
+      "",
+      "Use Manual or Scheduled publication, or deactivate the recurrence before changing the template to Immediate publication.",
+    ].join("\n");
+  }
+
   return formatCreateValidationError(reason);
 }
 

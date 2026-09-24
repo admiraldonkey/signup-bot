@@ -36,7 +36,7 @@ describe("event template recurrence horizon service", () => {
     await applicationPool.end();
   });
 
-  it("materialises recurrence slots across exactly twenty-one local calendar days", async () => {
+  it("materialises recurrence slots across exactly ten local calendar days", async () => {
     const fixture = await createFixture(pool);
 
     const result = await generateRecurringHorizon({
@@ -57,7 +57,12 @@ describe("event template recurrence horizon service", () => {
 
     expect(result.fromDate).toBe("2099-01-05");
 
-    expect(result.throughDate).toBe("2099-01-25");
+    /*
+     * Ten inclusive local calendar dates:
+     *
+     * 5 January through 14 January.
+     */
+    expect(result.throughDate).toBe("2099-01-14");
 
     expect(
       result.slotResults.map((slot) => ({
@@ -76,11 +81,6 @@ describe("event template recurrence horizon service", () => {
 
         occurrenceDate: "2099-01-12",
       },
-      {
-        kind: "generated",
-
-        occurrenceDate: "2099-01-19",
-      },
     ]);
 
     const stored = await pool.query<{
@@ -89,21 +89,21 @@ describe("event template recurrence horizon service", () => {
       created_by_user_id: string;
     }>(
       `
-              SELECT
-                o."occurrence_date"::text,
+          SELECT
+            o."occurrence_date"::text,
 
-                e."created_by_user_id"
-              FROM
-                "event_recurrence_occurrences" o
-              INNER JOIN
-                "events" e
-                  ON e."id" =
-                    o."event_id"
-              WHERE
-                o."recurrence_id" = $1
-              ORDER BY
-                o."occurrence_date"
-            `,
+            e."created_by_user_id"
+          FROM
+            "event_recurrence_occurrences" o
+          INNER JOIN
+            "events" e
+              ON e."id" =
+                o."event_id"
+          WHERE
+            o."recurrence_id" = $1
+          ORDER BY
+            o."occurrence_date"
+        `,
       [fixture.recurrenceId],
     );
 
@@ -115,11 +115,6 @@ describe("event template recurrence horizon service", () => {
       },
       {
         occurrence_date: "2099-01-12",
-
-        created_by_user_id: ADMIN_USER_ID,
-      },
-      {
-        occurrence_date: "2099-01-19",
 
         created_by_user_id: ADMIN_USER_ID,
       },
@@ -158,7 +153,6 @@ describe("event template recurrence horizon service", () => {
     expect(second.slotResults.map((slot) => slot.kind)).toEqual([
       "already_generated",
       "already_generated",
-      "already_generated",
     ]);
 
     const counts = await pool.query<{
@@ -167,32 +161,34 @@ describe("event template recurrence horizon service", () => {
       occurrence_count: number;
     }>(
       `
+          SELECT
+            (
               SELECT
-                (
-                  SELECT
-                    COUNT(*)::int
-                  FROM "events"
-                  WHERE
-                    "template_id" = $1
-                ) AS "event_count",
+                COUNT(*)::int
+              FROM
+                "events"
+              WHERE
+                "template_id" = $1
+            ) AS "event_count",
 
-                (
-                  SELECT
-                    COUNT(*)::int
-                  FROM
-                    "event_recurrence_occurrences"
-                  WHERE
-                    "recurrence_id" = $2
-                ) AS "occurrence_count"
-            `,
+            (
+              SELECT
+                COUNT(*)::int
+              FROM
+                "event_recurrence_occurrences"
+              WHERE
+                "recurrence_id" = $2
+            ) AS
+              "occurrence_count"
+        `,
       [fixture.templateId, fixture.recurrenceId],
     );
 
     expect(counts.rows).toEqual([
       {
-        event_count: 3,
+        event_count: 2,
 
-        occurrence_count: 3,
+        occurrence_count: 2,
       },
     ]);
   });
@@ -225,10 +221,11 @@ describe("event template recurrence horizon service", () => {
 
     expect(result.fromDate).toBe("2099-07-02");
 
+    expect(result.throughDate).toBe("2099-07-11");
+
     expect(result.slotResults.map((slot) => slot.occurrenceDate)).toEqual([
       "2099-07-02",
       "2099-07-09",
-      "2099-07-16",
     ]);
   });
 
@@ -271,13 +268,6 @@ describe("event template recurrence horizon service", () => {
         kind: "generated",
 
         occurrenceDate: "2099-01-12",
-
-        reason: null,
-      },
-      {
-        kind: "generated",
-
-        occurrenceDate: "2099-01-19",
 
         reason: null,
       },
@@ -326,10 +316,26 @@ describe("event template recurrence horizon service", () => {
     ]);
   });
 
-  it("durably queues immediate publication without performing Discord side effects", async () => {
-    const fixture = await createFixture(pool, {
-      publicationMode: "immediate",
-    });
+  it("defensively refuses horizon generation if persisted recurrence state uses immediate publication", async () => {
+    const fixture = await createFixture(pool);
+
+    /*
+     * Correct mutation services forbid this combination.
+     *
+     * Bypass them to prove automatic horizon execution itself remains safe.
+     */
+    await pool.query(
+      `
+        UPDATE
+          "event_templates"
+        SET
+          "publication_mode" =
+            'immediate'
+        WHERE
+          "id" = $1
+      `,
+      [fixture.templateId],
+    );
 
     const result = await generateRecurringHorizon({
       guildDatabaseId: fixture.guildId,
@@ -339,63 +345,59 @@ describe("event template recurrence horizon service", () => {
       now: new Date("2099-01-05T00:00:00.000Z"),
     });
 
-    expect(result.kind).toBe("processed");
+    expect(result.kind).not.toBe("processed");
 
-    if (result.kind !== "processed") {
-      throw new Error("Expected immediate horizon generation to succeed.");
-    }
+    const counts = await pool.query<{
+      event_count: number;
 
-    expect(result.slotResults).toHaveLength(3);
+      occurrence_count: number;
 
-    for (const slot of result.slotResults) {
-      expect(slot.kind).toBe("generated");
-
-      if (slot.kind !== "generated") {
-        throw new Error("Expected generated immediate-publication slot.");
-      }
-
-      expect(slot.publicationMode).toBe("immediate");
-
-      expect(slot.immediatePublicationQueued).toBe(true);
-    }
-
-    const publishActions = await pool.query<{
-      event_id: number;
-
-      status: string;
-
-      attempt_count: number;
-
-      due_at: Date;
+      publication_action_count: number;
     }>(
       `
+          SELECT
+            (
               SELECT
-                "event_id",
+                COUNT(*)::int
+              FROM
+                "events"
+              WHERE
+                "template_id" = $1
+            ) AS "event_count",
 
-                "status"::text,
+            (
+              SELECT
+                COUNT(*)::int
+              FROM
+                "event_recurrence_occurrences"
+              WHERE
+                "recurrence_id" = $2
+            ) AS
+              "occurrence_count",
 
-                "attempt_count",
-
-                "due_at"
+            (
+              SELECT
+                COUNT(*)::int
               FROM
                 "scheduled_actions"
               WHERE
                 "action_key" =
                   'publish_event'
-              ORDER BY
-                "event_id"
-            `,
+            ) AS
+              "publication_action_count"
+        `,
+      [fixture.templateId, fixture.recurrenceId],
     );
 
-    expect(publishActions.rows).toHaveLength(3);
+    expect(counts.rows).toEqual([
+      {
+        event_count: 0,
 
-    for (const action of publishActions.rows) {
-      expect(action.status).toBe("pending");
+        occurrence_count: 0,
 
-      expect(action.attempt_count).toBe(0);
-
-      expect(action.due_at).toEqual(new Date("2099-01-05T00:00:00.000Z"));
-    }
+        publication_action_count: 0,
+      },
+    ]);
   });
 });
 

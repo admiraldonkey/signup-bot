@@ -5,7 +5,6 @@ import {
   eventRecurrenceOccurrences,
   eventTemplateRecurrences,
   eventTemplates,
-  scheduledActions,
 } from "../db/schema.js";
 import { parseEventDateTime } from "../time/event-date-time.js";
 import {
@@ -69,14 +68,6 @@ export type GenerateRecurringOccurrenceResult =
       occurrenceDate: string;
 
       generation: GeneratedTemplateEvent;
-
-      /*
-       * True means recurrence generation durably queued the ordinary
-       * scheduler publication action inside the same transaction.
-       *
-       * The caller must not perform a second direct publication attempt.
-       */
-      immediatePublicationQueued: boolean;
     }
   | {
       kind: "already_generated";
@@ -89,6 +80,9 @@ export type GenerateRecurringOccurrenceResult =
     }
   | {
       kind: "template_not_found";
+    }
+  | {
+      kind: "immediate_publication_not_supported";
     }
   | {
       kind: "recurrence_not_found";
@@ -172,6 +166,8 @@ async function generateRecurringOccurrenceInTransaction(
 
       localStartTime: eventTemplates.localStartTime,
 
+      publicationMode: eventTemplates.publicationMode,
+
       updatedAt: eventTemplates.updatedAt,
     })
     .from(eventTemplates)
@@ -188,6 +184,12 @@ async function generateRecurringOccurrenceInTransaction(
   if (!template) {
     return {
       kind: "template_not_found",
+    };
+  }
+
+  if (template.publicationMode === "immediate") {
+    return {
+      kind: "immediate_publication_not_supported",
     };
   }
 
@@ -340,33 +342,6 @@ async function generateRecurringOccurrenceInTransaction(
     };
   }
 
-  const immediatePublicationQueued = generation.requiresImmediatePublication;
-
-  if (immediatePublicationQueued) {
-    /*
-     * Recurring materialisation is automatic.
-     *
-     * Unlike administrator-driven one-off /template generate, there is no
-     * reliable process-local caller available to perform immediate Discord
-     * publication after this transaction commits.
-     *
-     * Persist the normal scheduler publication action instead. Because this
-     * insert shares the recurrence transaction, an immediate occurrence can
-     * never commit without its durable publication intent.
-     */
-    await transaction.insert(scheduledActions).values({
-      eventId: generation.event.id,
-
-      actionKey: "publish_event",
-
-      dueAt: input.now ?? new Date(),
-
-      status: "pending",
-
-      attemptCount: 0,
-    });
-  }
-
   /*
    * This insert belongs to the same outer transaction as the generated event.
    *
@@ -388,7 +363,5 @@ async function generateRecurringOccurrenceInTransaction(
     occurrenceDate: input.occurrenceDate,
 
     generation,
-
-    immediatePublicationQueued,
   };
 }

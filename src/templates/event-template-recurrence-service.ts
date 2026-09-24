@@ -33,13 +33,16 @@ export type EventTemplateRecurrenceDetail = EventTemplateRecurrenceRecord & {
 
   templateLocalStartTime: string | null;
 
+  templatePublicationMode: string;
+
   templateActive: boolean;
 };
 
 export type EventTemplateRecurrenceInvalidReason =
   | RecurrenceRuleInvalidReason
   | "invalid_start_date"
-  | "template_missing_local_start_time";
+  | "template_missing_local_start_time"
+  | "immediate_publication_not_supported";
 
 export type CreateEventTemplateRecurrenceInput = {
   guildDatabaseId: number;
@@ -143,7 +146,9 @@ export type SetEventTemplateRecurrenceActiveResult =
   | {
       kind: "invalid_input";
 
-      reason: "template_missing_local_start_time";
+      reason:
+        | "template_missing_local_start_time"
+        | "immediate_publication_not_supported";
     };
 
 const recurrenceSelection = {
@@ -193,6 +198,8 @@ export async function createEventTemplateRecurrence(
         id: eventTemplates.id,
 
         localStartTime: eventTemplates.localStartTime,
+
+        publicationMode: eventTemplates.publicationMode,
       })
       .from(eventTemplates)
       .where(
@@ -216,6 +223,14 @@ export async function createEventTemplateRecurrence(
         kind: "invalid_input",
 
         reason: "template_missing_local_start_time",
+      } as const;
+    }
+
+    if (template.publicationMode === "immediate") {
+      return {
+        kind: "invalid_input",
+
+        reason: "immediate_publication_not_supported",
       } as const;
     }
 
@@ -276,6 +291,8 @@ export async function getEventTemplateRecurrence(
 
         localStartTime: eventTemplates.localStartTime,
 
+        publicationMode: eventTemplates.publicationMode,
+
         active: eventTemplates.active,
       })
       .from(eventTemplates)
@@ -320,6 +337,8 @@ export async function getEventTemplateRecurrence(
 
         templateLocalStartTime: template.localStartTime,
 
+        templatePublicationMode: template.publicationMode,
+
         templateActive: template.active,
       },
     } as const;
@@ -338,6 +357,8 @@ export async function listEventTemplateRecurrences(
       templateTimezone: eventTemplates.timezone,
 
       templateLocalStartTime: eventTemplates.localStartTime,
+
+      templatePublicationMode: eventTemplates.publicationMode,
 
       templateActive: eventTemplates.active,
     })
@@ -400,6 +421,8 @@ export async function editEventTemplateRecurrence(
         id: eventTemplates.id,
 
         localStartTime: eventTemplates.localStartTime,
+
+        publicationMode: eventTemplates.publicationMode,
       })
       .from(eventTemplates)
       .where(
@@ -436,6 +459,14 @@ export async function editEventTemplateRecurrence(
         kind: "invalid_input",
 
         reason: "template_missing_local_start_time",
+      } as const;
+    }
+
+    if (recurrence.active && template.publicationMode === "immediate") {
+      return {
+        kind: "invalid_input",
+
+        reason: "immediate_publication_not_supported",
       } as const;
     }
 
@@ -491,6 +522,8 @@ export async function setEventTemplateRecurrenceActive(
         id: eventTemplates.id,
 
         localStartTime: eventTemplates.localStartTime,
+
+        publicationMode: eventTemplates.publicationMode,
       })
       .from(eventTemplates)
       .where(
@@ -527,6 +560,14 @@ export async function setEventTemplateRecurrenceActive(
         kind: "invalid_input",
 
         reason: "template_missing_local_start_time",
+      } as const;
+    }
+
+    if (input.active && template.publicationMode === "immediate") {
+      return {
+        kind: "invalid_input",
+
+        reason: "immediate_publication_not_supported",
       } as const;
     }
 
