@@ -1,6 +1,7 @@
 import {
   boolean,
   check,
+  date,
   index,
   integer,
   pgEnum,
@@ -917,6 +918,77 @@ export const eventTemplateReminders = pgTable(
 );
 
 /*
+ * Reusable recurrence configuration associated with one event template.
+ *
+ * P1 intentionally supports at most one recurrence series per template.
+ *
+ * Recurrence remains separate from the template's reusable event defaults.
+ * The template owns timezone and normal local start time. This series owns
+ * the recurring calendar rule and the local date from which that rule begins.
+ */
+export const eventTemplateRecurrences = pgTable(
+  "event_template_recurrences",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+
+    templateId: integer("template_id").notNull(),
+
+    /*
+     * RFC 5545-compatible recurrence-rule source.
+     *
+     * Validation and canonicalisation belong in the recurrence service rather
+     * than in the schema. Do not interpret arbitrary rule text directly from
+     * scheduler code.
+     */
+    recurrenceRule: text("recurrence_rule").notNull(),
+
+    /*
+     * Local calendar date anchoring the recurrence.
+     *
+     * This is deliberately DATE rather than TIMESTAMPTZ. The template's
+     * timezone and local start time are applied later when an occurrence is
+     * resolved into an absolute startsAt instant.
+     */
+    startDate: date("start_date", {
+      mode: "string",
+    }).notNull(),
+
+    active: boolean("active").notNull().default(true),
+
+    createdByUserId: text("created_by_user_id").notNull(),
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    foreignKey({
+      name: "evt_tpl_recur_tpl_fk",
+
+      columns: [table.templateId],
+
+      foreignColumns: [eventTemplates.id],
+    }).onDelete("restrict"),
+
+    /*
+     * P1 exposes one recurrence series per reusable template.
+     *
+     * This can be relaxed later without changing recurrence IDs or generated
+     * occurrence provenance if a real multi-series use case appears.
+     */
+    uniqueIndex("evt_tpl_recur_template_uq").on(table.templateId),
+  ],
+);
+
+/*
  * One actual event occurrence.
  *
  * This may have been created from a template or created as a one-off event.
@@ -1025,6 +1097,62 @@ export const events = pgTable(
     index("events_status_starts_at_idx").on(table.status, table.startsAt),
     index("events_template_idx").on(table.templateId),
     index("events_audience_idx").on(table.audienceId),
+  ],
+);
+
+/*
+ * Immutable provenance for events produced by a recurrence series.
+ *
+ * occurrenceDate identifies the original local calendar slot represented by
+ * the generated event. It must not move when events.startsAt is later edited.
+ *
+ * The composite primary key also acts as the authoritative duplicate-
+ * prevention boundary for recurring generation.
+ */
+export const eventRecurrenceOccurrences = pgTable(
+  "event_recurrence_occurrences",
+  {
+    recurrenceId: integer("recurrence_id").notNull(),
+
+    occurrenceDate: date("occurrence_date", {
+      mode: "string",
+    }).notNull(),
+
+    eventId: integer("event_id").notNull(),
+
+    generatedAt: timestamp("generated_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "evt_recur_occ_pk",
+
+      columns: [table.recurrenceId, table.occurrenceDate],
+    }),
+
+    foreignKey({
+      name: "evt_recur_occ_recur_fk",
+
+      columns: [table.recurrenceId],
+
+      foreignColumns: [eventTemplateRecurrences.id],
+    }).onDelete("restrict"),
+
+    foreignKey({
+      name: "evt_recur_occ_event_fk",
+
+      columns: [table.eventId],
+
+      foreignColumns: [events.id],
+    }).onDelete("restrict"),
+
+    /*
+     * One ordinary event may represent at most one recurrence slot.
+     */
+    uniqueIndex("evt_recur_occ_event_uq").on(table.eventId),
   ],
 );
 

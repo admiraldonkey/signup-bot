@@ -3692,6 +3692,171 @@ This preserves the source-snapshot guarantee without teaching the core generator
 
 ---
 
+## D136 - Recurrence is a separate series with immutable local-date occurrence identity
+
+**Status: Current**
+
+Recurring scheduling is modelled separately from reusable event-template defaults.
+
+P1 uses:
+
+```text
+event template
+        |
+        | one recurrence series
+        v
+event_template_recurrences
+        |
+        | local calendar occurrence
+        v
+event_recurrence_occurrences
+        |
+        v
+ordinary event
+```
+
+The initial implementation supports at most:
+
+```text
+one recurrence series per template
+```
+
+This is an intentional P1 product boundary rather than a requirement that the model can never support several series later.
+
+The recurrence series stores:
+
+```text
+template identity
+recurrence rule
+local recurrence start date
+active / inactive state
+audit identity / timestamps
+```
+
+The template continues to own:
+
+```text
+timezone
+normal local start time
+event defaults
+publication defaults
+organiser defaults
+reminders
+role-request preset
+ping roles
+```
+
+A recurring occurrence is identified by:
+
+```text
+recurrence_id
++
+occurrence_date
+```
+
+where `occurrence_date` is the original local calendar date represented by that series slot.
+
+This identity is stored separately from:
+
+```text
+events.starts_at
+```
+
+and must not change when an administrator edits the generated event's current start time.
+
+The occurrence mapping also owns a unique event relationship:
+
+```text
+one event
+    -> at most one recurrence occurrence
+```
+
+Generated recurring events remain ordinary events and continue to retain normal:
+
+```text
+events.template_id
+```
+
+template provenance.
+
+### Calendar-date identity
+
+P1 recurrence is date-based.
+
+The recurrence rule determines which local calendar dates belong to the series.
+
+The template's current timezone and normal local start time resolve each not-yet-generated date into an absolute occurrence instant.
+
+This means a change from:
+
+```text
+20:00
+```
+
+to:
+
+```text
+21:00
+```
+
+does not change the identity of an already-generated Monday occurrence.
+
+Likewise, moving that generated event to another date does not make the original recurrence slot appear absent.
+
+### Duplicate prevention
+
+PostgreSQL enforces:
+
+```text
+PRIMARY KEY (
+    recurrence_id,
+    occurrence_date
+)
+```
+
+on generated occurrence provenance.
+
+Repeated or concurrent generation must rely on this durable identity boundary rather than assuming an in-memory check is sufficient.
+
+A cancelled event remains linked to its recurrence slot and therefore must not be recreated merely because it is cancelled.
+
+### Lifecycle
+
+Recurrence has its own active/inactive lifecycle.
+
+Template lifecycle and recurrence lifecycle remain distinct.
+
+Disabling recurrence stops future recurring generation.
+
+It does not cancel or rewrite events already generated from the series.
+
+An inactive template still prevents generation because recurrence continues to use the established template-generation boundary.
+
+### Deletion
+
+Recurrence and generated-occurrence provenance use restrictive deletion relationships.
+
+Normal administration should use lifecycle state rather than deleting recurrence provenance which existing events may depend on.
+
+### Reason
+
+Separating recurrence from the reusable event-template aggregate keeps three concepts distinct:
+
+```text
+template
+    -> what an event normally looks like
+
+recurrence
+    -> which local calendar slots should exist
+
+event
+    -> one authoritative runtime occurrence
+```
+
+Using immutable local-date occurrence provenance prevents event edits from causing duplicate recurring events while preserving the established event snapshot model.
+
+---
+
 # Summary of Highest-Risk Invariants
 
 The following decisions are especially easy to break during an otherwise well-intentioned refactor.
