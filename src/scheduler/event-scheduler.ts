@@ -28,8 +28,11 @@ import {
 import { refreshAttendanceMessage } from "../events/attendance-refresh.js";
 import { writeAuditLog } from "../audit/audit-log.js";
 import { sendEventCustomMessage } from "../events/event-custom-message.js";
-import { REMINDER_ACTION_PREFIX } from "../reminders/reminder-scheduling.js";
-import { reschedulePendingEventReminders } from "../reminders/reminder-scheduling.js";
+import {
+  buildReminderActionKey,
+  REMINDER_ACTION_PREFIX,
+  reschedulePendingEventReminders,
+} from "../reminders/reminder-scheduling.js";
 import { escalateAfterFailedOrganiserAssignment } from "../organisers/organiser-escalation.js";
 import {
   ORGANISER_COVER_DEADLINE_ACTION_PREFIX,
@@ -388,7 +391,17 @@ async function executeAction(
       throw new Error(`Invalid event reminder action key: ${action.actionKey}`);
     }
 
-    await executeEventReminder(client, action.eventId, reminderId);
+    await executeEventReminder(
+      client,
+
+      action.id,
+
+      action.eventId,
+
+      reminderId,
+
+      action.attemptCount,
+    );
 
     return;
   }
@@ -2809,8 +2822,10 @@ async function handleActionFailure(
 
 async function executeEventReminder(
   client: Client<true>,
+  actionId: number,
   eventId: number,
   reminderId: number,
+  attemptCount: number,
 ): Promise<void> {
   const [reminder] = await db
     .select({
@@ -2837,6 +2852,8 @@ async function executeEventReminder(
       eventName: events.name,
 
       eventStatus: events.status,
+
+      publishedAt: events.publishedAt,
 
       startsAt: events.startsAt,
 
@@ -2892,6 +2909,60 @@ async function executeEventReminder(
    */
   if (referenceTime <= now) {
     await markEventReminderMissed(client, reminder, referenceTime);
+
+    return;
+  }
+
+  /*
+   * Persistent event reminders are public-facing event messages.
+   *
+   * A due reminder must therefore not expose an event which the administrator
+   * has deliberately kept unpublished.
+   *
+   * Park the durable action at the reminder's useful reference boundary.
+   * Successful event publication will wake it earlier if it is still useful.
+   *
+   * Reset attemptCount because waiting for publication is not a failed
+   * Discord delivery attempt.
+   */
+  if (!reminder.publishedAt) {
+    await db
+      .update(scheduledActions)
+      .set({
+        status: "pending",
+
+        dueAt: referenceTime,
+
+        attemptCount: 0,
+
+        lockedAt: null,
+
+        completedAt: null,
+
+        lastError: null,
+
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(scheduledActions.id, actionId),
+
+          eq(scheduledActions.eventId, eventId),
+
+          eq(scheduledActions.actionKey, buildReminderActionKey(reminder.id)),
+
+          /*
+           * Only the worker which still owns this exact processing attempt
+           * may park it.
+           *
+           * If event publication already reset the action to pending, this
+           * stale worker affects zero rows and cannot overwrite the wake-up.
+           */
+          eq(scheduledActions.status, "processing"),
+
+          eq(scheduledActions.attemptCount, attemptCount),
+        ),
+      );
 
     return;
   }

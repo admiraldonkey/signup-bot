@@ -4272,6 +4272,43 @@ The resulting reminder must still be meaningful and valid.
 
 The bot does not intentionally send obsolete reminder text after its purpose has already passed.
 
+## Reminders on unpublished events
+
+Persistent reminders may be configured while an event is still unpublished.
+
+A due reminder does not override the event's publication state.
+
+The normal behaviour is:
+
+```text
+reminder due
++
+event unpublished
++
+reference point still future
+    -> wait for event publication
+```
+
+Waiting is durable.
+
+The reminder's scheduled action is parked at its useful reference boundary without consuming the scheduler delivery-retry budget.
+
+If the event publishes while the reminder is still useful:
+
+```text
+reminder due <= publication < reminder reference point
+```
+
+publication wakes the reminder action immediately.
+
+A genuinely future reminder keeps its existing schedule.
+
+If the event remains unpublished until the reminder's reference point is reached, the reminder is marked missed rather than exposing the private event late.
+
+This applies to ordinary event reminders regardless of whether the event was created manually or generated from a template.
+
+An immediate administrator announcement created with `/event announce` remains a separate explicit action and is not treated as a persistent scheduled reminder.
+
 ---
 
 # `/event reminder-list`

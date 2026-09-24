@@ -402,6 +402,119 @@ describe("event scheduler", () => {
     expect(auditResult.rows).toEqual([]);
   });
 
+  it("parks a due event reminder at its reference boundary while awaiting event publication", async () => {
+    // Arrange
+    const fixture = await createUnpublishedEventWithDueReminder(pool);
+
+    const client = createSchedulerClient();
+
+    // Act
+    startEventScheduler(client);
+
+    /*
+     * A due public reminder must not leak an unpublished event.
+     *
+     * Waiting for publication is deliberate deferral rather than a delivery
+     * failure, so park the durable action at the point where the reminder
+     * would cease to be useful.
+     */
+    await waitForScheduledActionDueAt(pool, fixture.actionId, fixture.startsAt);
+
+    stopEventScheduler();
+
+    // Assert
+    const actionResult = await pool.query<{
+      status: string;
+
+      due_at: Date;
+
+      attempt_count: number;
+
+      locked_at: Date | null;
+
+      completed_at: Date | null;
+
+      last_error: string | null;
+    }>(
+      `
+        SELECT
+          "status",
+          "due_at",
+          "attempt_count",
+          "locked_at",
+          "completed_at",
+          "last_error"
+        FROM "scheduled_actions"
+        WHERE "id" = $1
+      `,
+      [fixture.actionId],
+    );
+
+    expect(actionResult.rows).toEqual([
+      {
+        status: "pending",
+
+        due_at: fixture.startsAt,
+
+        attempt_count: 0,
+
+        locked_at: null,
+
+        completed_at: null,
+
+        last_error: null,
+      },
+    ]);
+
+    const reminderResult = await pool.query<{
+      sent_at: Date | null;
+
+      missed_at: Date | null;
+
+      missed_reason: string | null;
+    }>(
+      `
+        SELECT
+          "sent_at",
+          "missed_at",
+          "missed_reason"
+        FROM "event_reminders"
+        WHERE "id" = $1
+      `,
+      [fixture.reminderId],
+    );
+
+    expect(reminderResult.rows).toEqual([
+      {
+        sent_at: null,
+
+        missed_at: null,
+
+        missed_reason: null,
+      },
+    ]);
+
+    const auditResult = await pool.query<{
+      count: number;
+    }>(
+      `
+        SELECT COUNT(*)::int AS "count"
+        FROM "audit_logs"
+        WHERE
+          "target_type" = 'event'
+          AND "target_id" = $1
+          AND "action" = 'scheduler.event_reminder'
+      `,
+      [String(fixture.eventId)],
+    );
+
+    expect(auditResult.rows).toEqual([
+      {
+        count: 0,
+      },
+    ]);
+  });
+
   it("publishes a due planned role-request group and completes its opening action", async () => {
     // Arrange
     const fixture = await createEventWithDueRoleGroupOpen(pool);
@@ -6719,6 +6832,191 @@ async function waitForScheduledActionAttemptSettled(
   throw new Error(
     `Timed out waiting for scheduled action #${actionId} attempt ${expectedAttemptCount} to settle.`,
   );
+}
+
+async function createUnpublishedEventWithDueReminder(pool: Pool): Promise<{
+  eventId: number;
+
+  reminderId: number;
+
+  actionId: number;
+
+  startsAt: Date;
+}> {
+  const guildResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "discord_guilds" (
+        "discord_guild_id",
+        "name"
+      )
+      VALUES (
+        $1,
+        'Scheduler Reminder Publication Test Guild'
+      )
+      RETURNING "id"
+    `,
+    [DISCORD_GUILD_ID],
+  );
+
+  const guildId = guildResult.rows[0]?.id;
+
+  if (!guildId) {
+    throw new Error(
+      "The reminder-publication integration-test guild was not created.",
+    );
+  }
+
+  const eventTypeResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "event_types" (
+        "owner_guild_id",
+        "code",
+        "name"
+      )
+      VALUES (
+        $1,
+        'naval',
+        'Naval Event'
+      )
+      RETURNING "id"
+    `,
+    [guildId],
+  );
+
+  const eventTypeId = eventTypeResult.rows[0]?.id;
+
+  if (!eventTypeId) {
+    throw new Error(
+      "The reminder-publication integration-test event type was not created.",
+    );
+  }
+
+  /*
+   * The event starts two hours from now.
+   *
+   * A reminder configured for three hours before event start is therefore
+   * already due, while the event-start reference itself is still useful.
+   */
+  const startsAt = new Date(Date.now() + 2 * 60 * 60_000);
+
+  const eventResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "events" (
+        "owner_guild_id",
+        "event_type_id",
+        "name",
+        "starts_at",
+        "signups_enabled",
+        "published_at",
+        "status",
+        "created_by_user_id"
+      )
+      VALUES (
+        $1,
+        $2,
+        'Unpublished Reminder Scheduler Event',
+        $3,
+        false,
+        NULL,
+        'scheduled',
+        $4
+      )
+      RETURNING "id"
+    `,
+    [guildId, eventTypeId, startsAt, ADMIN_USER_ID],
+  );
+
+  const eventId = eventResult.rows[0]?.id;
+
+  if (!eventId) {
+    throw new Error(
+      "The reminder-publication integration-test event was not created.",
+    );
+  }
+
+  const reminderResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "event_reminders" (
+        "event_id",
+        "timing_reference",
+        "minutes_before",
+        "message",
+        "channel_id",
+        "ping_event_roles",
+        "enabled",
+        "created_by_user_id"
+      )
+      VALUES (
+        $1,
+        'event_start',
+        180,
+        'This reminder must wait for event publication.',
+        '300000000000000099',
+        false,
+        true,
+        $2
+      )
+      RETURNING "id"
+    `,
+    [eventId, ADMIN_USER_ID],
+  );
+
+  const reminderId = reminderResult.rows[0]?.id;
+
+  if (!reminderId) {
+    throw new Error(
+      "The reminder-publication integration-test reminder was not created.",
+    );
+  }
+
+  const actionResult = await pool.query<{
+    id: number;
+  }>(
+    `
+      INSERT INTO "scheduled_actions" (
+        "event_id",
+        "action_key",
+        "due_at",
+        "status",
+        "attempt_count"
+      )
+      VALUES (
+        $1,
+        $2,
+        NOW() - INTERVAL '1 minute',
+        'pending',
+        0
+      )
+      RETURNING "id"
+    `,
+    [eventId, `event_reminder:${reminderId}`],
+  );
+
+  const actionId = actionResult.rows[0]?.id;
+
+  if (!actionId) {
+    throw new Error(
+      "The reminder-publication integration-test action was not created.",
+    );
+  }
+
+  return {
+    eventId,
+
+    reminderId,
+
+    actionId,
+
+    startsAt,
+  };
 }
 
 async function createEventWithDueRoleGroupOpen(

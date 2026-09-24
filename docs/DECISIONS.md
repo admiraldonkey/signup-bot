@@ -4481,6 +4481,126 @@ Exact provenance makes that distinction deterministic without weakening snapshot
 
 ---
 
+## D140 - Public event reminders must respect event publication
+
+**Status: Current**
+
+Persistent event reminders are public-facing event messages.
+
+A reminder becoming due is not permission to expose an event which remains unpublished.
+
+The durable rule is:
+
+```text
+reminder due
++
+event published
+    -> normal reminder execution
+
+reminder due
++
+event unpublished
++
+reference point still future
+    -> defer until publication
+
+reminder due
++
+reference point reached or passed
+    -> mark missed
+```
+
+### Durable deferral
+
+Waiting for publication is expected domain state rather than a Discord delivery failure.
+
+A due reminder for an unpublished event is therefore parked at its useful reference boundary.
+
+The action is reset to:
+
+```text
+status = pending
+attempt_count = 0
+locked_at = NULL
+completed_at = NULL
+last_error = NULL
+```
+
+Waiting must not consume the scheduler's delivery-retry budget.
+
+### Publication wake-up
+
+Successful event publication is an authoritative release point for due reminders.
+
+Inside the same PostgreSQL transaction which records:
+
+```text
+events.published_at
+```
+
+publication wakes reminder actions where:
+
+```text
+normal reminder due time <= publishedAt
+<
+useful reminder reference time
+```
+
+The action becomes freshly pending at the publication time.
+
+Future reminders keep their original schedules.
+
+Reminders whose useful reference point has already passed are not revived.
+
+### Scheduler ownership
+
+Publication may race a reminder worker which already observed the event as unpublished.
+
+Publication may therefore replace both:
+
+```text
+pending
+processing
+```
+
+reminder actions with fresh pending state.
+
+The stale scheduler worker remains fenced by the existing combination of:
+
+```text
+scheduled action ID
++
+status = processing
++
+attempt_count
+```
+
+If publication already released the action, the stale worker cannot re-park or complete that newer state.
+
+### Scope
+
+This rule applies to ordinary persistent:
+
+```text
+event_reminders
+```
+
+including reminders snapshotted from event templates.
+
+It does not turn persistent reminders into template-owned runtime state.
+
+Immediate administrator announcements remain a separate explicit workflow.
+
+### Reason
+
+Administrators may deliberately create and configure an event well before members should see it.
+
+Durable scheduled work must preserve that publication intent rather than leaking the event merely because a reminder timestamp arrived first.
+
+At the same time, publication should release still-useful due reminders promptly rather than losing them or waiting until their final reference boundary.
+
+---
+
 # Summary of Highest-Risk Invariants
 
 The following decisions are especially easy to break during an otherwise well-intentioned refactor.
