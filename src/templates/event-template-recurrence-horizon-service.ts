@@ -50,7 +50,7 @@ export type RecurringHorizonSlotResult =
 
       publicationMode: RecurrencePublicationMode;
 
-      requiresImmediatePublication: boolean;
+      immediatePublicationQueued: boolean;
     }
   | {
       kind: "already_generated";
@@ -298,8 +298,7 @@ function classifySlotResult(
 
         publicationMode: result.generation.publicationMode,
 
-        requiresImmediatePublication:
-          result.generation.requiresImmediatePublication,
+        immediatePublicationQueued: result.immediatePublicationQueued,
       };
 
     case "already_generated":

@@ -119,6 +119,112 @@ describe("event template recurrence generation service", () => {
     ]);
   });
 
+  it("atomically queues durable publication for an immediate recurring occurrence", async () => {
+    const fixture = await createFixture(pool, {
+      publicationMode: "immediate",
+    });
+
+    const now = new Date("2099-01-05T00:00:00.000Z");
+
+    const result = await generateRecurringOccurrence({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: fixture.templateId,
+
+      occurrenceDate: "2099-01-05",
+
+      generatedByUserId: ADMIN_USER_ID,
+
+      now,
+    });
+
+    expect(result.kind).toBe("generated");
+
+    if (result.kind !== "generated") {
+      throw new Error(
+        `Expected immediate recurring generation to succeed, received "${result.kind}".`,
+      );
+    }
+
+    expect(result.generation.requiresImmediatePublication).toBe(true);
+
+    expect(result.immediatePublicationQueued).toBe(true);
+
+    const stored = await pool.query<{
+      occurrence_count: number;
+
+      publication_action_count: number;
+
+      publication_due_at: Date | null;
+
+      publication_status: string | null;
+    }>(
+      `
+            SELECT
+              (
+                SELECT
+                  COUNT(*)::int
+                FROM
+                  "event_recurrence_occurrences"
+                WHERE
+                  "recurrence_id" = $1
+                  AND
+                  "occurrence_date" =
+                    '2099-01-05'
+              ) AS "occurrence_count",
+
+              (
+                SELECT
+                  COUNT(*)::int
+                FROM
+                  "scheduled_actions"
+                WHERE
+                  "event_id" = $2
+                  AND
+                  "action_key" =
+                    'publish_event'
+              ) AS "publication_action_count",
+
+              (
+                SELECT
+                  "due_at"
+                FROM
+                  "scheduled_actions"
+                WHERE
+                  "event_id" = $2
+                  AND
+                  "action_key" =
+                    'publish_event'
+              ) AS "publication_due_at",
+
+              (
+                SELECT
+                  "status"::text
+                FROM
+                  "scheduled_actions"
+                WHERE
+                  "event_id" = $2
+                  AND
+                  "action_key" =
+                    'publish_event'
+              ) AS "publication_status"
+          `,
+      [fixture.recurrenceId, result.generation.event.id],
+    );
+
+    expect(stored.rows).toEqual([
+      {
+        occurrence_count: 1,
+
+        publication_action_count: 1,
+
+        publication_due_at: now,
+
+        publication_status: "pending",
+      },
+    ]);
+  });
+
   it("returns the existing event when the same occurrence is generated repeatedly", async () => {
     const fixture = await createFixture(pool);
 
@@ -285,6 +391,8 @@ describe("event template recurrence generation service", () => {
   it("rolls back the generated event when a late preset snapshot fails", async () => {
     const fixture = await createFixture(pool, {
       invalidPreset: true,
+
+      publicationMode: "immediate",
     });
 
     const result = await generateRecurringOccurrence({
@@ -311,6 +419,8 @@ describe("event template recurrence generation service", () => {
       event_count: number;
 
       occurrence_count: number;
+
+      publication_action_count: number;
     }>(
       `
               SELECT
@@ -329,7 +439,17 @@ describe("event template recurrence generation service", () => {
                     "event_recurrence_occurrences"
                   WHERE
                     "recurrence_id" = $2
-                ) AS "occurrence_count"
+                ) AS "occurrence_count",
+
+                                (
+                  SELECT
+                    COUNT(*)::int
+                  FROM
+                    "scheduled_actions"
+                  WHERE
+                    "action_key" =
+                      'publish_event'
+                ) AS "publication_action_count"
             `,
       [fixture.templateId, fixture.recurrenceId],
     );
@@ -339,6 +459,8 @@ describe("event template recurrence generation service", () => {
         event_count: 0,
 
         occurrence_count: 0,
+
+        publication_action_count: 0,
       },
     ]);
   });
@@ -449,6 +571,8 @@ type FixtureOptions = {
   recurrenceStartDate?: string;
 
   invalidPreset?: boolean;
+
+  publicationMode?: "manual" | "immediate";
 };
 
 async function createFixture(
@@ -466,6 +590,8 @@ async function createFixture(
   const recurrenceRule = options.recurrenceRule ?? "FREQ=DAILY";
 
   const recurrenceStartDate = options.recurrenceStartDate ?? "2099-01-01";
+
+  const publicationMode = options.publicationMode ?? "manual";
 
   const guildResult = await pool.query<{
     id: number;
@@ -577,12 +703,19 @@ async function createFixture(
           'Recurring Naval',
           'Europe/London',
           $4,
-          'manual',
-          $5
+            $5,
+            $6
         )
         RETURNING "id"
       `,
-    [guildId, eventTypeId, presetId, localStartTime, ADMIN_USER_ID],
+    [
+      guildId,
+      eventTypeId,
+      presetId,
+      localStartTime,
+      publicationMode,
+      ADMIN_USER_ID,
+    ],
   );
 
   const templateId = requireId(templateResult.rows[0]?.id, "template");

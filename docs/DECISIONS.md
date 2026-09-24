@@ -4116,11 +4116,61 @@ A cancelled or rescheduled event must not be interpreted as a missing recurring 
 
 Discord publication remains outside the recurrence-generation database transaction.
 
-A successful generation may report that immediate publication is required, but this service does not post Discord messages itself.
+Recurring `immediate` publication nevertheless requires durable intent.
 
-Automatic restart-safe handling of immediate publication is part of the later recurrence scheduler design.
+For a recurring event whose snapshotted template publication mode is:
 
-The scheduler must not depend on a non-durable post-commit process-local action which could be lost after a crash.
+```text
+immediate
+```
+
+the same transaction which creates:
+
+```text
+ordinary event
++
+recurrence occurrence provenance
+```
+
+also creates a normal:
+
+```text
+scheduled_actions
+    action_key = publish_event
+    due_at = generation time
+```
+
+row.
+
+The scheduler then performs the Discord side effect through the existing publication executor.
+
+This means the authoritative commit contains everything required to recover after a process crash:
+
+```text
+event exists
++
+occurrence provenance exists
++
+publication intent exists
+```
+
+No process-local post-commit callback is required.
+
+Manual administrator-driven `/template generate` remains different.
+
+That command has an active caller and continues to perform immediate publication directly after its generation transaction commits, reporting any publication failure to the administrator.
+
+Recurring automatic generation must not use that direct orchestration path.
+
+The scheduler's existing publication executor is idempotent with respect to:
+
+```text
+manual publication winning first
+event cancellation/completion
+event already being published
+```
+
+so a durable recurrence publication action may safely become obsolete before execution.
 
 ### Reason
 
@@ -4258,19 +4308,33 @@ This avoids inventing a fake Discord user identity while preserving the administ
 
 ### Immediate publication
 
-The horizon service performs database materialisation only.
+The horizon service itself performs no Discord side effects.
 
-It does not send Discord messages.
+Recurring occurrence generation owns durable publication intent.
 
-For an occurrence generated from an `immediate` publication template, the result explicitly reports:
+For an occurrence generated from an `immediate` publication template:
 
 ```text
-requiresImmediatePublication = true
+event snapshot
++
+recurrence provenance
++
+due-now publish_event action
 ```
 
-Automatic scheduler integration must not simply publish that event through an unpersisted post-commit callback.
+are committed together.
 
-Before automatic recurrence execution is enabled for immediate templates, publication must be represented by durable retryable work so a process crash cannot leave an occurrence permanently unpublished.
+The horizon result reports:
+
+```text
+immediatePublicationQueued = true
+```
+
+rather than instructing its caller to publish directly.
+
+The existing durable scheduler is responsible for eventually executing that action and applying its normal retry, stale-lock recovery, attempt-limit, state-revalidation, and audit behaviour.
+
+This closes the crash window which would otherwise exist between recurrence materialisation and Discord publication.
 
 ### Reason
 

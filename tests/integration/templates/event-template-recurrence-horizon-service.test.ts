@@ -326,7 +326,7 @@ describe("event template recurrence horizon service", () => {
     ]);
   });
 
-  it("surfaces immediate-publication work instead of performing Discord side effects", async () => {
+  it("durably queues immediate publication without performing Discord side effects", async () => {
     const fixture = await createFixture(pool, {
       publicationMode: "immediate",
     });
@@ -356,34 +356,46 @@ describe("event template recurrence horizon service", () => {
 
       expect(slot.publicationMode).toBe("immediate");
 
-      expect(slot.requiresImmediatePublication).toBe(true);
+      expect(slot.immediatePublicationQueued).toBe(true);
     }
 
     const publishActions = await pool.query<{
-      count: number;
+      event_id: number;
+
+      status: string;
+
+      attempt_count: number;
+
+      due_at: Date;
     }>(
       `
               SELECT
-                COUNT(*)::int AS "count"
+                "event_id",
+
+                "status"::text,
+
+                "attempt_count",
+
+                "due_at"
               FROM
                 "scheduled_actions"
               WHERE
                 "action_key" =
                   'publish_event'
+              ORDER BY
+                "event_id"
             `,
     );
 
-    /*
-     * This is deliberate for this slice.
-     *
-     * Restart-safe immediate publication will be added before the automatic
-     * scheduler begins invoking horizon generation.
-     */
-    expect(publishActions.rows).toEqual([
-      {
-        count: 0,
-      },
-    ]);
+    expect(publishActions.rows).toHaveLength(3);
+
+    for (const action of publishActions.rows) {
+      expect(action.status).toBe("pending");
+
+      expect(action.attempt_count).toBe(0);
+
+      expect(action.due_at).toEqual(new Date("2099-01-05T00:00:00.000Z"));
+    }
   });
 });
 
