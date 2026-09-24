@@ -45,10 +45,21 @@ import {
   listGeneratedEventsForTemplate,
   type TemplateGeneratedEventSummary,
 } from "../templates/event-template-generated-events-service.js";
+import {
+  createEventTemplateRecurrence,
+  editEventTemplateRecurrence,
+  getEventTemplateRecurrence,
+  listEventTemplateRecurrences,
+  setEventTemplateRecurrenceActive,
+  type EventTemplateRecurrenceDetail,
+  type EventTemplateRecurrenceInvalidReason,
+} from "../templates/event-template-recurrence-service.js";
 
 import { parseEventDateTime } from "../time/event-date-time.js";
 
 type CachedCommandInteraction = ChatInputCommandInteraction<"cached">;
+
+type TemplateRecurrenceFrequency = "daily" | "weekly" | "monthly" | "yearly";
 
 type GuildConfiguration = NonNullable<
   Awaited<ReturnType<typeof getGuildConfiguration>>
@@ -118,6 +129,51 @@ export async function handleTemplateCommand(
 
     case "generate":
       await generateTemplateOccurrence(interaction, configuration);
+
+      return;
+
+    case "recurrence-create":
+      await createTemplateRecurrence(
+        interaction,
+
+        configuration.guildId,
+      );
+
+      return;
+
+    case "recurrence-list":
+      await listTemplateRecurrences(
+        interaction,
+
+        configuration.guildId,
+      );
+
+      return;
+
+    case "recurrence-show":
+      await showTemplateRecurrence(
+        interaction,
+
+        configuration.guildId,
+      );
+
+      return;
+
+    case "recurrence-edit":
+      await editTemplateRecurrence(
+        interaction,
+
+        configuration.guildId,
+      );
+
+      return;
+
+    case "recurrence-set-active":
+      await setTemplateRecurrenceActive(
+        interaction,
+
+        configuration.guildId,
+      );
 
       return;
 
@@ -805,6 +861,555 @@ async function generateTemplateOccurrence(
       messageUrl: publication?.messageUrl ?? null,
     },
   });
+}
+
+async function createTemplateRecurrence(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const templateId = interaction.options.getInteger("template-id", true);
+
+  const frequency = parseTemplateRecurrenceFrequency(
+    interaction.options.getString("frequency", true),
+  );
+
+  if (!frequency) {
+    await interaction.editReply({
+      content: "The selected recurrence frequency is invalid.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const interval = interaction.options.getInteger("interval") ?? 1;
+
+  if (!Number.isSafeInteger(interval) || interval <= 0) {
+    await interaction.editReply({
+      content: "The recurrence interval must be a positive whole number.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const startDate = interaction.options.getString("start-date", true).trim();
+
+  const recurrenceRule = buildStructuredRecurrenceRule(
+    frequency,
+
+    interval,
+  );
+
+  const result = await createEventTemplateRecurrence({
+    guildDatabaseId,
+
+    templateId,
+
+    recurrenceRule,
+
+    startDate,
+
+    createdByUserId: interaction.user.id,
+  });
+
+  switch (result.kind) {
+    case "created":
+      await interaction.editReply({
+        content: [
+          `✅ Created recurrence #${result.recurrence.id} for event template #${templateId}.`,
+          "",
+          `**Pattern:** ${formatRecurrencePattern(
+            result.recurrence.recurrenceRule,
+          )}`,
+          `**Series anchor date:** \`${result.recurrence.startDate}\``,
+          "**Lifecycle:** Active",
+          "",
+          "Existing generated events remain unchanged.",
+          `Use \`/template show-generated template-id:${templateId}\` to inspect events which already exist.`,
+        ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: guildDatabaseId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "event_template.recurrence.create",
+
+        outcome: "success",
+
+        summary: `Created recurrence #${result.recurrence.id} for event template #${templateId}.`,
+
+        targetType: "event_template",
+
+        targetId: String(templateId),
+
+        details: {
+          recurrenceId: result.recurrence.id,
+
+          recurrenceRule: result.recurrence.recurrenceRule,
+
+          startDate: result.recurrence.startDate,
+
+          active: result.recurrence.active,
+        },
+      });
+
+      return;
+
+    case "recurrence_already_exists":
+      await interaction.editReply({
+        content: [
+          `Event template #${templateId} already has recurrence #${result.recurrence.id}.`,
+          "",
+          `Use \`/template recurrence-show template-id:${templateId}\` to inspect it or \`/template recurrence-edit template-id:${templateId}\` to change it.`,
+        ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "template_not_found":
+      await interaction.editReply({
+        content: `Event template #${templateId} was not found in this server.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "invalid_input":
+      await interaction.editReply({
+        content: formatTemplateRecurrenceValidationError(result.reason),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
+}
+
+async function listTemplateRecurrences(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const recurrences = await listEventTemplateRecurrences(guildDatabaseId);
+
+  if (recurrences.length === 0) {
+    await interaction.editReply({
+      content: "This server has no configured template recurrence series.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const lines = [
+    "## Template recurrences",
+
+    "Use `/template recurrence-show template-id:<id>` to inspect a complete recurrence definition.",
+
+    "",
+  ];
+
+  for (const recurrence of recurrences) {
+    const lifecycleParts = [
+      recurrence.active ? "recurrence active" : "recurrence inactive",
+    ];
+
+    if (!recurrence.templateActive) {
+      lifecycleParts.push("template inactive");
+    }
+
+    lines.push(
+      `• **${recurrence.templateName}** (#${recurrence.templateId}) — ${lifecycleParts.join(
+        " • ",
+      )}`,
+    );
+
+    lines.push(
+      `  ${formatRecurrencePattern(
+        recurrence.recurrenceRule,
+      )} • anchor \`${recurrence.startDate}\` • ${
+        recurrence.templateLocalStartTime ?? "no local start time"
+      } ${recurrence.templateTimezone}`,
+    );
+  }
+
+  await sendEphemeralText(interaction, lines.join("\n"));
+}
+
+async function showTemplateRecurrence(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const templateId = interaction.options.getInteger("template-id", true);
+
+  const result = await getEventTemplateRecurrence({
+    guildDatabaseId,
+
+    templateId,
+  });
+
+  switch (result.kind) {
+    case "found":
+      await sendEphemeralText(
+        interaction,
+
+        formatTemplateRecurrenceDetails(result.recurrence),
+      );
+
+      return;
+
+    case "template_not_found":
+      await interaction.editReply({
+        content: `Event template #${templateId} was not found in this server.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "recurrence_not_found":
+      await interaction.editReply({
+        content: `Event template #${templateId} does not have a recurrence series.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
+}
+
+async function editTemplateRecurrence(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const templateId = interaction.options.getInteger("template-id", true);
+
+  const frequencyText = interaction.options.getString("frequency");
+
+  const startDateText = interaction.options.getString("start-date");
+
+  const interval = interaction.options.getInteger("interval");
+
+  if (frequencyText === null && startDateText === null && interval === null) {
+    await interaction.editReply({
+      content: "No recurrence changes were supplied.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  if (interval !== null && frequencyText === null) {
+    await interaction.editReply({
+      content: [
+        "To change the recurrence interval, also choose `frequency`.",
+        "",
+        "Supplying a frequency makes replacement of the complete recurrence pattern explicit and avoids silently discarding advanced stored rule components.",
+      ].join("\n"),
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const frequency =
+    frequencyText === null
+      ? null
+      : parseTemplateRecurrenceFrequency(frequencyText);
+
+  if (frequencyText !== null && !frequency) {
+    await interaction.editReply({
+      content: "The selected recurrence frequency is invalid.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const resolvedInterval = interval ?? 1;
+
+  if (
+    frequency !== null &&
+    (!Number.isSafeInteger(resolvedInterval) || resolvedInterval <= 0)
+  ) {
+    await interaction.editReply({
+      content: "The recurrence interval must be a positive whole number.",
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  const recurrenceRule =
+    frequency === null
+      ? undefined
+      : buildStructuredRecurrenceRule(
+          frequency,
+
+          resolvedInterval,
+        );
+
+  const result = await editEventTemplateRecurrence({
+    guildDatabaseId,
+
+    templateId,
+
+    recurrenceRule,
+
+    startDate: startDateText?.trim(),
+  });
+
+  switch (result.kind) {
+    case "updated":
+      await interaction.editReply({
+        content: [
+          `✅ Updated recurrence #${result.recurrence.id} for event template #${templateId}.`,
+          "",
+          `**Pattern:** ${formatRecurrencePattern(
+            result.recurrence.recurrenceRule,
+          )}`,
+          `**Series anchor date:** \`${result.recurrence.startDate}\``,
+          `**Lifecycle:** ${result.recurrence.active ? "Active" : "Inactive"}`,
+          "",
+          "The updated recurrence source applies to future materialisation only.",
+          "Existing generated events remain unchanged.",
+          `Use \`/template show-generated template-id:${templateId}\` to inspect events which already exist.`,
+        ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: guildDatabaseId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "event_template.recurrence.edit",
+
+        outcome: "success",
+
+        summary: `Updated recurrence #${result.recurrence.id} for event template #${templateId}.`,
+
+        targetType: "event_template",
+
+        targetId: String(templateId),
+
+        details: {
+          recurrenceId: result.recurrence.id,
+
+          recurrenceRule: result.recurrence.recurrenceRule,
+
+          startDate: result.recurrence.startDate,
+
+          active: result.recurrence.active,
+        },
+      });
+
+      return;
+
+    case "unchanged":
+      await interaction.editReply({
+        content: `Recurrence #${result.recurrence.id} for event template #${templateId} already has those values. No changes were made.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "template_not_found":
+      await interaction.editReply({
+        content: `Event template #${templateId} was not found in this server.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "recurrence_not_found":
+      await interaction.editReply({
+        content: `Event template #${templateId} does not have a recurrence series.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "invalid_input":
+      await interaction.editReply({
+        content:
+          result.reason === "no_changes_requested"
+            ? "No recurrence changes were supplied."
+            : formatTemplateRecurrenceValidationError(result.reason),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
+}
+
+async function setTemplateRecurrenceActive(
+  interaction: CachedCommandInteraction,
+  guildDatabaseId: number,
+): Promise<void> {
+  const templateId = interaction.options.getInteger("template-id", true);
+
+  const active = interaction.options.getBoolean("active", true);
+
+  const result = await setEventTemplateRecurrenceActive({
+    guildDatabaseId,
+
+    templateId,
+
+    active,
+  });
+
+  switch (result.kind) {
+    case "updated":
+      await interaction.editReply({
+        content: [
+          `✅ Recurrence #${result.recurrence.id} for event template #${templateId} is now ${
+            result.recurrence.active ? "active" : "inactive"
+          }.`,
+          "",
+          result.recurrence.active
+            ? "The recurrence is eligible for future recurring materialisation while its template is also active."
+            : "No new recurring occurrences should be materialised while the recurrence is inactive.",
+          "Existing generated events remain unchanged.",
+          `Use \`/template show-generated template-id:${templateId}\` to inspect events which already exist.`,
+        ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      await writeAuditLog({
+        guildId: guildDatabaseId,
+
+        guild: interaction.guild,
+
+        actorUserId: interaction.user.id,
+
+        action: "event_template.recurrence.active.set",
+
+        outcome: "success",
+
+        summary: `Set recurrence #${result.recurrence.id} for event template #${templateId} active=${result.recurrence.active}.`,
+
+        targetType: "event_template",
+
+        targetId: String(templateId),
+
+        details: {
+          recurrenceId: result.recurrence.id,
+
+          active: result.recurrence.active,
+        },
+      });
+
+      return;
+
+    case "unchanged":
+      await interaction.editReply({
+        content: `Recurrence #${result.recurrence.id} for event template #${templateId} is already ${
+          result.recurrence.active ? "active" : "inactive"
+        }. No changes were made.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "template_not_found":
+      await interaction.editReply({
+        content: `Event template #${templateId} was not found in this server.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "recurrence_not_found":
+      await interaction.editReply({
+        content: `Event template #${templateId} does not have a recurrence series.`,
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+
+    case "invalid_input":
+      await interaction.editReply({
+        content: formatTemplateRecurrenceValidationError(result.reason),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+  }
 }
 
 async function editTemplate(
@@ -2880,6 +3485,129 @@ function formatGeneratedEventTemplateRevision(
 
     case "unknown":
       return "Revision unknown (generated before exact template-revision tracking)";
+  }
+}
+
+function parseTemplateRecurrenceFrequency(
+  value: string | null,
+): TemplateRecurrenceFrequency | null {
+  switch (value) {
+    case "daily":
+    case "weekly":
+    case "monthly":
+    case "yearly":
+      return value;
+
+    default:
+      return null;
+  }
+}
+
+function buildStructuredRecurrenceRule(
+  frequency: TemplateRecurrenceFrequency,
+  interval: number,
+): string {
+  const storedFrequency = frequency.toUpperCase();
+
+  return interval === 1
+    ? `FREQ=${storedFrequency}`
+    : `FREQ=${storedFrequency};INTERVAL=${interval}`;
+}
+
+function formatRecurrencePattern(recurrenceRule: string): string {
+  const match = /^FREQ=(DAILY|WEEKLY|MONTHLY|YEARLY)(?:;INTERVAL=(\d+))?$/.exec(
+    recurrenceRule,
+  );
+
+  if (!match) {
+    return "Custom stored recurrence pattern";
+  }
+
+  const frequency = match[1];
+
+  const interval = Number(match[2] ?? "1");
+
+  const unit =
+    frequency === "DAILY"
+      ? "day"
+      : frequency === "WEEKLY"
+        ? "week"
+        : frequency === "MONTHLY"
+          ? "month"
+          : "year";
+
+  return interval === 1 ? `Every ${unit}` : `Every ${interval} ${unit}s`;
+}
+
+function formatTemplateRecurrenceDetails(
+  recurrence: EventTemplateRecurrenceDetail,
+): string {
+  return [
+    `## Recurrence for ${recurrence.templateName} (#${recurrence.templateId})`,
+
+    `**Recurrence ID:** #${recurrence.id}`,
+
+    `**Recurrence lifecycle:** ${recurrence.active ? "Active" : "Inactive"}`,
+
+    `**Template lifecycle:** ${
+      recurrence.templateActive ? "Active" : "Inactive"
+    }`,
+
+    `**Pattern:** ${formatRecurrencePattern(recurrence.recurrenceRule)}`,
+
+    `**Stored rule:** \`${recurrence.recurrenceRule}\``,
+
+    `**Series anchor date:** \`${recurrence.startDate}\``,
+
+    `**Local start:** ${
+      recurrence.templateLocalStartTime ?? "Not configured"
+    } ${recurrence.templateTimezone}`,
+
+    `**Publication:** ${formatPublicationMode(
+      recurrence.templatePublicationMode,
+    )}`,
+
+    "",
+
+    "The recurrence source controls future recurring materialisation only.",
+
+    "Events already generated from this template remain independent snapshots.",
+
+    `Use \`/template show-generated template-id:${recurrence.templateId}\` to inspect those generated events.`,
+  ].join("\n");
+}
+
+function formatTemplateRecurrenceValidationError(
+  reason: EventTemplateRecurrenceInvalidReason,
+): string {
+  switch (reason) {
+    case "invalid_rule":
+      return "The recurrence pattern is invalid.";
+
+    case "unsupported_rule_component":
+      return "The recurrence pattern contains a component which is not supported.";
+
+    case "unsupported_frequency":
+      return "The recurrence frequency is not supported.";
+
+    case "invalid_start_date":
+      return "The recurrence start date must be a real calendar date in `YYYY-MM-DD` format.";
+
+    case "template_missing_local_start_time":
+      return [
+        "This template cannot use recurrence until it has a reusable local start time.",
+        "",
+        "Set `local-time` with `/template edit` first.",
+      ].join("\n");
+
+    case "immediate_publication_not_supported":
+      return [
+        "Automatic recurrence cannot use Immediate publication.",
+        "",
+        "Recurring events are materialised in advance, so Immediate publication could expose future occurrences too early.",
+        "",
+        "Change the template to Manual or Scheduled publication first.",
+      ].join("\n");
   }
 }
 
