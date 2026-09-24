@@ -1003,6 +1003,20 @@ export const events = pgTable(
       onDelete: "restrict",
     }),
 
+    /*
+     * Exact reusable-template parent revision snapshotted when this event was
+     * generated.
+     *
+     * Null means either:
+     * - the event was not generated from a template, or
+     * - it predates exact template-revision provenance.
+     *
+     * Do not infer a missing historical revision from event creation time.
+     */
+    templateSourceUpdatedAt: timestamp("template_source_updated_at", {
+      withTimezone: true,
+    }),
+
     ownerGuildId: integer("owner_guild_id")
       .notNull()
       .references(() => discordGuilds.id, { onDelete: "restrict" }),

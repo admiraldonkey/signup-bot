@@ -1,0 +1,1 @@
+ALTER TABLE "events" ADD COLUMN "template_source_updated_at" timestamp with time zone;

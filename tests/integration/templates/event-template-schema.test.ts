@@ -135,6 +135,28 @@ describe("event-template schema reconciliation", () => {
         (column) => column.column_name === "source_template_role_option_id",
       ),
     ).toBe(false);
+
+    const eventColumns = await pool.query<{
+      column_name: string;
+      is_nullable: "YES" | "NO";
+    }>(`
+      SELECT
+        "column_name",
+        "is_nullable"
+      FROM "information_schema"."columns"
+      WHERE
+        "table_schema" = 'public'
+        AND "table_name" = 'events'
+        AND "column_name" = 'template_source_updated_at'
+    `);
+
+    expect(eventColumns.rows).toEqual([
+      {
+        column_name: "template_source_updated_at",
+
+        is_nullable: "YES",
+      },
+    ]);
   });
 
   it("uses the intended ownership behaviour for template foreign keys", async () => {

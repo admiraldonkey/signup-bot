@@ -53,6 +53,23 @@ describe("event template generation service", () => {
     // Arrange
     const fixture = await createTemplateFixture(pool);
 
+    const templateRevisionResult = await pool.query<{
+      updated_at: Date;
+    }>(
+      `
+        SELECT "updated_at"
+        FROM "event_templates"
+        WHERE "id" = $1
+      `,
+      [fixture.templateId],
+    );
+
+    const templateRevision = templateRevisionResult.rows[0]?.updated_at;
+
+    if (!templateRevision) {
+      throw new Error("Expected template fixture revision to exist.");
+    }
+
     const startsAt = futureStart();
 
     const expectedEndsAt = addMinutes(startsAt, 90);
@@ -90,6 +107,8 @@ describe("event template generation service", () => {
     const event = await pool.query<{
       template_id: number | null;
 
+      template_source_updated_at: Date | null;
+
       owner_guild_id: number;
 
       event_type_id: number;
@@ -125,6 +144,7 @@ describe("event template generation service", () => {
       `
         SELECT
           "template_id",
+          "template_source_updated_at",
           "owner_guild_id",
           "event_type_id",
           "audience_id",
@@ -150,6 +170,8 @@ describe("event template generation service", () => {
     expect(event.rows).toEqual([
       {
         template_id: fixture.templateId,
+
+        template_source_updated_at: templateRevision,
 
         owner_guild_id: fixture.guildId,
 

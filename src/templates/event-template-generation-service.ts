@@ -695,6 +695,8 @@ async function generateEventFromTemplateCoreInTransaction(
 
       templateId: template.id,
 
+      templateSourceUpdatedAt: template.updatedAt,
+
       eventTypeId: template.eventTypeId,
 
       audienceId: template.audienceId,

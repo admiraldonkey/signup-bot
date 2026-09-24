@@ -26,6 +26,13 @@ export type CreateStoredEventInput = {
 
   templateId: number | null;
 
+  /*
+   * Exact source-template revision used when this event was generated.
+   *
+   * Ordinary manually-created events omit this and store null.
+   */
+  templateSourceUpdatedAt?: Date | null;
+
   eventTypeId: number;
 
   audienceId: number | null;
@@ -177,6 +184,8 @@ export async function createStoredEventInTransaction(
     .insert(events)
     .values({
       templateId: input.templateId,
+
+      templateSourceUpdatedAt: input.templateSourceUpdatedAt ?? null,
 
       ownerGuildId: input.guildDatabaseId,
 
