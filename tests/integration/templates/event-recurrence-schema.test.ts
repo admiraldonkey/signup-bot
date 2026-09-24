@@ -66,7 +66,8 @@ describe("event recurrence schema", () => {
               'evt_tpl_recur_tpl_fk',
               'evt_recur_occ_pk',
               'evt_recur_occ_recur_fk',
-              'evt_recur_occ_event_fk'
+              'evt_recur_occ_event_fk',
+              'evt_tpl_recur_sweep_outcome_chk'
             )
             ORDER BY "conname"
           `);
@@ -91,6 +92,87 @@ describe("event recurrence schema", () => {
     );
 
     expect(definitions.get("evt_recur_occ_pk")).toContain("PRIMARY KEY");
+
+    const sweepColumns = await pool.query<{
+      column_name: string;
+
+      is_nullable: string;
+    }>(`
+      SELECT
+        "column_name",
+        "is_nullable"
+      FROM
+        "information_schema"."columns"
+      WHERE
+        "table_schema" = 'public'
+        AND "table_name" = 'event_template_recurrences'
+        AND "column_name" IN (
+          'next_sweep_at',
+          'sweep_claim_token',
+          'last_sweep_started_at',
+          'last_sweep_completed_at',
+          'last_sweep_outcome',
+          'last_sweep_diagnostic'
+        )
+      ORDER BY
+        "column_name"
+    `);
+
+    expect(sweepColumns.rows).toEqual([
+      {
+        column_name: "last_sweep_completed_at",
+
+        is_nullable: "YES",
+      },
+      {
+        column_name: "last_sweep_diagnostic",
+
+        is_nullable: "YES",
+      },
+      {
+        column_name: "last_sweep_outcome",
+
+        is_nullable: "YES",
+      },
+      {
+        column_name: "last_sweep_started_at",
+
+        is_nullable: "YES",
+      },
+      {
+        column_name: "next_sweep_at",
+
+        is_nullable: "NO",
+      },
+      {
+        column_name: "sweep_claim_token",
+
+        is_nullable: "YES",
+      },
+    ]);
+
+    const sweepIndex = await pool.query<{
+      indexname: string;
+    }>(`
+      SELECT
+        "indexname"
+      FROM
+        "pg_indexes"
+      WHERE
+        "schemaname" = 'public'
+        AND "tablename" = 'event_template_recurrences'
+        AND "indexname" = 'evt_tpl_recur_active_sweep_idx'
+    `);
+
+    expect(sweepIndex.rows).toEqual([
+      {
+        indexname: "evt_tpl_recur_active_sweep_idx",
+      },
+    ]);
+
+    expect(definitions.get("evt_tpl_recur_sweep_outcome_chk")).toContain(
+      "CHECK",
+    );
   });
 
   it("enforces one recurrence per template and immutable recurrence-slot identity", async () => {
@@ -123,6 +205,66 @@ describe("event recurrence schema", () => {
     if (!recurrenceId) {
       throw new Error("Expected recurrence fixture creation to return an ID.");
     }
+
+    const sweepState = await pool.query<{
+      next_sweep_at: Date;
+
+      sweep_claim_token: string | null;
+
+      last_sweep_started_at: Date | null;
+
+      last_sweep_completed_at: Date | null;
+
+      last_sweep_outcome: string | null;
+
+      last_sweep_diagnostic: string | null;
+    }>(
+      `
+        SELECT
+          "next_sweep_at",
+          "sweep_claim_token",
+          "last_sweep_started_at",
+          "last_sweep_completed_at",
+          "last_sweep_outcome",
+          "last_sweep_diagnostic"
+        FROM
+          "event_template_recurrences"
+        WHERE
+          "id" = $1
+      `,
+      [recurrenceId],
+    );
+
+    expect(sweepState.rows).toEqual([
+      {
+        next_sweep_at: expect.any(Date),
+
+        sweep_claim_token: null,
+
+        last_sweep_started_at: null,
+
+        last_sweep_completed_at: null,
+
+        last_sweep_outcome: null,
+
+        last_sweep_diagnostic: null,
+      },
+    ]);
+
+    await expect(
+      pool.query(
+        `
+          UPDATE "event_template_recurrences"
+          SET
+            "last_sweep_outcome" = 'definitely_not_a_real_outcome'
+          WHERE
+            "id" = $1
+        `,
+        [recurrenceId],
+      ),
+    ).rejects.toMatchObject({
+      code: "23514",
+    });
 
     await expect(
       pool.query(

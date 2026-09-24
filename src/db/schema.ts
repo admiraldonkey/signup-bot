@@ -955,6 +955,56 @@ export const eventTemplateRecurrences = pgTable(
 
     active: boolean("active").notNull().default(true),
 
+    /*
+     * Durable automatic-materialisation scheduling state.
+     *
+     * Recurrence sweeping is not event-owned work, so it does not belong in
+     * scheduled_actions, whose rows require an event ID.
+     *
+     * New recurrence series are immediately eligible for their first sweep.
+     */
+    nextSweepAt: timestamp("next_sweep_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    /*
+     * Identifies the worker which currently owns this recurrence sweep.
+     *
+     * A later claim replaces the token after the previous lease becomes stale.
+     * Completion must still hold the matching token before it may publish its
+     * operational result.
+     */
+    sweepClaimToken: text("sweep_claim_token"),
+
+    lastSweepStartedAt: timestamp("last_sweep_started_at", {
+      withTimezone: true,
+    }),
+
+    lastSweepCompletedAt: timestamp("last_sweep_completed_at", {
+      withTimezone: true,
+    }),
+
+    /*
+     * Current values:
+     *
+     * success
+     * partial_failure
+     * failure
+     * skipped
+     */
+    lastSweepOutcome: varchar("last_sweep_outcome", {
+      length: 32,
+    }),
+
+    /*
+     * Human-readable durable diagnostic for the latest completed sweep.
+     *
+     * Null means the latest sweep completed without a noteworthy diagnostic.
+     */
+    lastSweepDiagnostic: text("last_sweep_diagnostic"),
+
     createdByUserId: text("created_by_user_id").notNull(),
 
     createdAt: timestamp("created_at", {
@@ -985,6 +1035,13 @@ export const eventTemplateRecurrences = pgTable(
      * occurrence provenance if a real multi-series use case appears.
      */
     uniqueIndex("evt_tpl_recur_template_uq").on(table.templateId),
+
+    index("evt_tpl_recur_active_sweep_idx").on(table.active, table.nextSweepAt),
+
+    check(
+      "evt_tpl_recur_sweep_outcome_chk",
+      sql`${table.lastSweepOutcome} IS NULL OR ${table.lastSweepOutcome} IN ('success', 'partial_failure', 'failure', 'skipped')`,
+    ),
   ],
 );
 

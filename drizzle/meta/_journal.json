@@ -169,6 +169,13 @@
       "when": 1790285154620,
       "tag": "0023_add-event-provenance-update-tracking",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1790292954610,
+      "tag": "0024_add-recurrence-sweep-state",
+      "breakpoints": true
     }
   ]
 }

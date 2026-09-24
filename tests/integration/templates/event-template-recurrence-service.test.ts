@@ -283,6 +283,93 @@ describe("event template recurrence service", () => {
     });
   });
 
+  it("makes edited recurrence source immediately sweepable and clears stale sweep state", async () => {
+    const fixture = await createRecurrenceFixture(pool);
+
+    await pool.query(
+      `
+        UPDATE "event_template_recurrences"
+        SET
+          "next_sweep_at" = '2099-01-01T00:00:00Z',
+          "sweep_claim_token" = 'old-claim',
+          "last_sweep_started_at" = NOW() - INTERVAL '2 minutes',
+          "last_sweep_completed_at" = NOW() - INTERVAL '1 minute',
+          "last_sweep_outcome" = 'failure',
+          "last_sweep_diagnostic" = 'Old failure'
+        WHERE
+          "id" = $1
+      `,
+      [fixture.recurrenceId],
+    );
+
+    const beforeEdit = new Date();
+
+    const result = await editEventTemplateRecurrence({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: fixture.templateId,
+
+      startDate: "2026-10-12",
+    });
+
+    const afterEdit = new Date();
+
+    expect(result.kind).toBe("updated");
+
+    const stored = await pool.query<{
+      next_sweep_at: Date;
+
+      sweep_claim_token: string | null;
+
+      last_sweep_started_at: Date | null;
+
+      last_sweep_completed_at: Date | null;
+
+      last_sweep_outcome: string | null;
+
+      last_sweep_diagnostic: string | null;
+    }>(
+      `
+        SELECT
+          "next_sweep_at",
+          "sweep_claim_token",
+          "last_sweep_started_at",
+          "last_sweep_completed_at",
+          "last_sweep_outcome",
+          "last_sweep_diagnostic"
+        FROM
+          "event_template_recurrences"
+        WHERE
+          "id" = $1
+      `,
+      [fixture.recurrenceId],
+    );
+
+    const recurrence = stored.rows[0];
+
+    expect(recurrence).toBeDefined();
+
+    expect(recurrence!.next_sweep_at.getTime()).toBeGreaterThanOrEqual(
+      beforeEdit.getTime(),
+    );
+
+    expect(recurrence!.next_sweep_at.getTime()).toBeLessThanOrEqual(
+      afterEdit.getTime(),
+    );
+
+    expect(recurrence).toMatchObject({
+      sweep_claim_token: null,
+
+      last_sweep_started_at: null,
+
+      last_sweep_completed_at: null,
+
+      last_sweep_outcome: null,
+
+      last_sweep_diagnostic: null,
+    });
+  });
+
   it("supports reversible recurrence lifecycle without changing the template lifecycle", async () => {
     const fixture = await createRecurrenceFixture(pool);
 
@@ -321,6 +408,78 @@ describe("event template recurrence service", () => {
     });
 
     expect(repeated.kind).toBe("unchanged");
+  });
+
+  it("makes a reactivated recurrence immediately eligible for sweeping", async () => {
+    const fixture = await createRecurrenceFixture(pool);
+
+    const deactivated = await setEventTemplateRecurrenceActive({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: fixture.templateId,
+
+      active: false,
+    });
+
+    expect(deactivated.kind).toBe("updated");
+
+    await pool.query(
+      `
+        UPDATE "event_template_recurrences"
+        SET
+          "next_sweep_at" = '2099-01-01T00:00:00Z',
+          "sweep_claim_token" = 'obsolete-claim'
+        WHERE
+          "id" = $1
+      `,
+      [fixture.recurrenceId],
+    );
+
+    const beforeReactivation = new Date();
+
+    const reactivated = await setEventTemplateRecurrenceActive({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: fixture.templateId,
+
+      active: true,
+    });
+
+    const afterReactivation = new Date();
+
+    expect(reactivated.kind).toBe("updated");
+
+    const stored = await pool.query<{
+      active: boolean;
+
+      next_sweep_at: Date;
+
+      sweep_claim_token: string | null;
+    }>(
+      `
+        SELECT
+          "active",
+          "next_sweep_at",
+          "sweep_claim_token"
+        FROM
+          "event_template_recurrences"
+        WHERE
+          "id" = $1
+      `,
+      [fixture.recurrenceId],
+    );
+
+    expect(stored.rows[0]?.active).toBe(true);
+
+    expect(stored.rows[0]!.next_sweep_at.getTime()).toBeGreaterThanOrEqual(
+      beforeReactivation.getTime(),
+    );
+
+    expect(stored.rows[0]!.next_sweep_at.getTime()).toBeLessThanOrEqual(
+      afterReactivation.getTime(),
+    );
+
+    expect(stored.rows[0]?.sweep_claim_token).toBeNull();
   });
 
   it("refuses to reactivate recurrence while the template uses immediate publication", async () => {

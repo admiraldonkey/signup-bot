@@ -19,6 +19,16 @@ export type EventTemplateRecurrenceRecord = {
 
   active: boolean;
 
+  nextSweepAt: Date;
+
+  lastSweepStartedAt: Date | null;
+
+  lastSweepCompletedAt: Date | null;
+
+  lastSweepOutcome: string | null;
+
+  lastSweepDiagnostic: string | null;
+
   createdByUserId: string;
 
   createdAt: Date;
@@ -161,6 +171,16 @@ const recurrenceSelection = {
   startDate: eventTemplateRecurrences.startDate,
 
   active: eventTemplateRecurrences.active,
+
+  nextSweepAt: eventTemplateRecurrences.nextSweepAt,
+
+  lastSweepStartedAt: eventTemplateRecurrences.lastSweepStartedAt,
+
+  lastSweepCompletedAt: eventTemplateRecurrences.lastSweepCompletedAt,
+
+  lastSweepOutcome: eventTemplateRecurrences.lastSweepOutcome,
+
+  lastSweepDiagnostic: eventTemplateRecurrences.lastSweepDiagnostic,
 
   createdByUserId: eventTemplateRecurrences.createdByUserId,
 
@@ -487,6 +507,8 @@ export async function editEventTemplateRecurrence(
       } as const;
     }
 
+    const updatedAt = new Date();
+
     const [updated] = await transaction
       .update(eventTemplateRecurrences)
       .set({
@@ -494,7 +516,25 @@ export async function editEventTemplateRecurrence(
 
         startDate,
 
-        updatedAt: new Date(),
+        /*
+         * Source changes should be reconsidered immediately.
+         *
+         * Clearing the claim token also fences completion from a sweep which
+         * began against the previous source definition.
+         */
+        nextSweepAt: updatedAt,
+
+        sweepClaimToken: null,
+
+        lastSweepStartedAt: null,
+
+        lastSweepCompletedAt: null,
+
+        lastSweepOutcome: null,
+
+        lastSweepDiagnostic: null,
+
+        updatedAt,
       })
       .where(eq(eventTemplateRecurrences.id, recurrence.id))
       .returning(recurrenceSelection);
@@ -579,12 +619,31 @@ export async function setEventTemplateRecurrenceActive(
       } as const;
     }
 
+    const updatedAt = new Date();
+
     const [updated] = await transaction
       .update(eventTemplateRecurrences)
       .set({
         active: input.active,
 
-        updatedAt: new Date(),
+        /*
+         * Reactivation should not wait for an old future sweep timestamp.
+         */
+        ...(input.active
+          ? {
+              nextSweepAt: updatedAt,
+            }
+          : {}),
+
+        /*
+         * Lifecycle mutation supersedes any previously-claimed sweep.
+         *
+         * A stale worker may still finish its current code path, but its
+         * completion token will no longer match.
+         */
+        sweepClaimToken: null,
+
+        updatedAt,
       })
       .where(eq(eventTemplateRecurrences.id, recurrence.id))
       .returning(recurrenceSelection);
