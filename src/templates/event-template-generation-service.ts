@@ -168,31 +168,53 @@ export async function generateEventFromTemplate(
 ): Promise<GenerateEventFromTemplateResult> {
   try {
     return await db.transaction((transaction) =>
-      generateEventFromTemplateInTransaction(transaction, input),
+      generateEventFromTemplateCoreInTransaction(transaction, input),
     );
   } catch (error) {
-    /*
-     * Preset application can return a normal domain failure after event,
-     * reminder and other snapshot state has already been created inside this
-     * transaction.
-     *
-     * Throwing the internal abort signal is therefore intentional: PostgreSQL
-     * must roll the entire generated event back before we convert the failure
-     * into a normal generation result.
-     */
-    if (error instanceof PresetApplicationAbortError) {
-      return {
-        kind: "preset_application_failed",
+    const abortedResult = resultFromPresetApplicationAbort(error);
 
-        result: error.result,
-      };
+    if (abortedResult) {
+      return abortedResult;
     }
 
     throw error;
   }
 }
 
-async function generateEventFromTemplateInTransaction(
+/**
+ * Generates one event snapshot inside a caller-owned transaction.
+ *
+ * A nested transaction/savepoint is intentional.
+ *
+ * Preset application can discover a normal domain failure after event,
+ * reminder and scheduled-action rows have already been written. Returning
+ * that failure directly from the caller's transaction would commit partial
+ * generated state.
+ *
+ * The savepoint lets that late failure roll back the complete event snapshot
+ * before it is converted back into a normal domain result. The caller's
+ * surrounding transaction then remains usable for its own authoritative state.
+ */
+export async function generateEventFromTemplateInTransaction(
+  transaction: DatabaseTransaction,
+  input: GenerateEventFromTemplateInput,
+): Promise<GenerateEventFromTemplateResult> {
+  try {
+    return await transaction.transaction((savepoint) =>
+      generateEventFromTemplateCoreInTransaction(savepoint, input),
+    );
+  } catch (error) {
+    const abortedResult = resultFromPresetApplicationAbort(error);
+
+    if (abortedResult) {
+      return abortedResult;
+    }
+
+    throw error;
+  }
+}
+
+async function generateEventFromTemplateCoreInTransaction(
   transaction: DatabaseTransaction,
   input: GenerateEventFromTemplateInput,
 ): Promise<GenerateEventFromTemplateResult> {
@@ -792,6 +814,20 @@ async function generateEventFromTemplateInTransaction(
 
     requiresImmediatePublication: template.publicationMode === "immediate",
   };
+}
+
+function resultFromPresetApplicationAbort(
+  error: unknown,
+): GenerateEventFromTemplateResult | null {
+  if (error instanceof PresetApplicationAbortError) {
+    return {
+      kind: "preset_application_failed",
+
+      result: error.result,
+    };
+  }
+
+  return null;
 }
 
 function isTemplatePublicationMode(

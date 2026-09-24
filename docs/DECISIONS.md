@@ -3956,6 +3956,190 @@ Using immutable local-date occurrence provenance prevents event edits from causi
 
 ---
 
+## D137 - Recurring occurrence generation atomically couples event snapshot and immutable provenance
+
+**Status: Current**
+
+One recurring occurrence is generated through one authoritative PostgreSQL transaction.
+
+The persistence boundary is:
+
+```text
+lock template source
+        |
+        v
+lock recurrence series
+        |
+        v
+validate requested local calendar slot
+        |
+        v
+check existing occurrence provenance
+        |
+        v
+resolve local date + template local time + timezone
+        |
+        v
+generate ordinary event snapshot
+        |
+        v
+insert event_recurrence_occurrences
+        |
+        v
+commit
+```
+
+The ordinary event and its immutable recurrence provenance must never commit independently.
+
+The authoritative occurrence identity remains:
+
+```text
+recurrence_id
++
+occurrence_date
+```
+
+and is protected by the PostgreSQL primary key on:
+
+```text
+event_recurrence_occurrences
+```
+
+### Lock ordering
+
+Recurring generation uses the same parent-first ordering as recurrence administration:
+
+```text
+event_templates
+        |
+        v
+event_template_recurrences
+```
+
+Generation takes:
+
+```text
+event_templates
+    -> FOR SHARE
+
+event_template_recurrences
+    -> FOR UPDATE
+```
+
+Recurrence mutation takes:
+
+```text
+event_templates
+    -> FOR UPDATE
+
+event_template_recurrences
+    -> FOR UPDATE
+```
+
+This avoids lock-order inversion while allowing unrelated template readers where safe.
+
+The recurrence-row exclusive lock also serialises competing generators for the same series.
+
+After the lock is acquired, a repeated generator observes existing occurrence provenance and returns the already-generated event instead of creating another one.
+
+The database uniqueness rule remains the final correctness boundary even though the service performs the idempotency read first.
+
+### Slot validation
+
+A caller cannot create recurrence provenance for an arbitrary date.
+
+The requested `occurrence_date` is re-evaluated against the locked recurrence rule and recurrence start date before generation.
+
+Only a calendar date belonging to the stored series may proceed.
+
+### Wall-clock resolution
+
+The immutable recurrence slot is a local calendar date.
+
+Generation combines:
+
+```text
+occurrence_date
++
+event_templates.local_start_time
++
+event_templates.timezone
+```
+
+through the shared Luxon-based event date/time parser.
+
+The resulting absolute instant is then supplied to the ordinary template-generation boundary.
+
+Impossible or daylight-saving-ambiguous local times are not guessed.
+
+They return an explicit recurrence-generation failure for that slot.
+
+### Template snapshot reuse
+
+Recurring generation does not implement a second event snapshot mechanism.
+
+It calls the same template-generation domain boundary used by one-off generation.
+
+The template generator therefore exposes a caller-owned transaction variant.
+
+A nested PostgreSQL savepoint protects the generator's late-failure path.
+
+This is necessary because role-request preset application may discover a normal domain failure after event/reminder state has already been inserted.
+
+The savepoint ensures that such partial template-generation state is rolled back before the failure is returned to the surrounding recurrence transaction.
+
+### Individual event independence
+
+Once generation commits:
+
+```text
+recurrence
+    -> immutable slot provenance
+
+event
+    -> independent runtime snapshot
+```
+
+Editing or cancelling the generated event does not alter its recurrence slot.
+
+The slot therefore remains occupied even when:
+
+```text
+events.starts_at
+```
+
+is later moved.
+
+A cancelled or rescheduled event must not be interpreted as a missing recurring occurrence.
+
+### Discord side effects
+
+Discord publication remains outside the recurrence-generation database transaction.
+
+A successful generation may report that immediate publication is required, but this service does not post Discord messages itself.
+
+Automatic restart-safe handling of immediate publication is part of the later recurrence scheduler design.
+
+The scheduler must not depend on a non-durable post-commit process-local action which could be lost after a crash.
+
+### Reason
+
+A recurring generator may run repeatedly, concurrently, or after process restarts.
+
+If ordinary event creation and recurrence provenance were separate commits, a crash between them could leave:
+
+```text
+event exists
++
+occurrence provenance missing
+```
+
+A later generator would then treat the recurrence slot as absent and create a duplicate event.
+
+Atomic generation removes that failure window.
+
+---
+
 # Summary of Highest-Risk Invariants
 
 The following decisions are especially easy to break during an otherwise well-intentioned refactor.
