@@ -604,6 +604,44 @@ describe("/template command", () => {
     );
   });
 
+  it("explains why an active recurring template cannot use immediate publication", async () => {
+    templateServiceMocks.editEventTemplate.mockResolvedValue({
+      kind: "invalid_input",
+
+      reason: "active_recurrence_disallows_immediate_publication",
+    });
+
+    const interaction = createInteraction({
+      subcommand: "edit",
+
+      strings: {
+        "publication-mode": "immediate",
+      },
+
+      integers: {
+        "template-id": 7,
+      },
+
+      booleans: {
+        "clear-publish-schedule": true,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    const content = readFirstReplyContent(interaction.editReply);
+
+    expect(content).toContain(
+      "This template has an active recurrence and cannot use Immediate publication.",
+    );
+
+    expect(content).toContain("Recurring occurrences are generated in advance");
+
+    expect(content).toContain("Use Manual or Scheduled publication");
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
   it("rejects contradictory template edit clear options before calling the service", async () => {
     const interaction = createInteraction({
       subcommand: "edit",

@@ -345,7 +345,9 @@ describe("event template recurrence horizon service", () => {
       now: new Date("2099-01-05T00:00:00.000Z"),
     });
 
-    expect(result.kind).not.toBe("processed");
+    expect(result).toEqual({
+      kind: "immediate_publication_not_supported",
+    });
 
     const counts = await pool.query<{
       event_count: number;

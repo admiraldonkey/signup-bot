@@ -459,7 +459,11 @@ describe("event template administration service", () => {
     });
 
     // Assert
-    expect(blocked.kind).toBe("invalid_input");
+    expect(blocked).toEqual({
+      kind: "invalid_input",
+
+      reason: "active_recurrence_disallows_immediate_publication",
+    });
 
     const unchanged = await pool.query<{
       publication_mode: string;

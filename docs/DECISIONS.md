@@ -3054,25 +3054,43 @@ This also keeps the stored representation standards-oriented without making ever
 
 ---
 
-## D122 - Recurring events should use a rolling generation horizon
+## D122 - Recurrence should use a bounded rolling generation horizon
 
-**Status: Planned**
+**Status: Superseded by D138**
 
-Do not generate an effectively unlimited future series.
+This decision established the durable requirement that automatic recurrence use a bounded rolling horizon rather than materialising an effectively unlimited future series.
 
-A working design target has been approximately several weeks, with around 21 days discussed as a reasonable initial horizon.
+An early design candidate of approximately:
 
-The exact horizon may remain configurable.
+```text
+21 days
+```
 
-### Reason
+was discussed before the recurrence-generation boundary and administrator-facing lead-time requirements were fully reconciled.
 
-A rolling horizon:
+D138 supersedes that numeric candidate with the implemented P1 policy of exactly:
 
-- avoids excessive speculative rows
-- makes template edits easier to reason about
-- supports future cancellation cleanly
-- limits unnecessary scheduled actions
-- naturally separates generated from not-yet-generated occurrences
+```text
+10 local calendar dates
+```
+
+including:
+
+```text
+today
+through
+today + 9 days
+```
+
+The durable principle retained from this decision is:
+
+```text
+recurring generation
+    -> bounded rolling horizon
+    -> never unlimited future materialisation
+```
+
+The current horizon value, rationale, local-calendar semantics, and reconsideration conditions are defined by D138.
 
 ---
 

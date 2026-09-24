@@ -149,7 +149,11 @@ describe("event template recurrence service", () => {
       createdByUserId: ADMIN_USER_ID,
     });
 
-    expect(result.kind).toBe("invalid_input");
+    expect(result).toEqual({
+      kind: "invalid_input",
+
+      reason: "immediate_publication_not_supported",
+    });
 
     const stored = await pool.query<{
       count: number;
@@ -358,7 +362,11 @@ describe("event template recurrence service", () => {
       active: true,
     });
 
-    expect(reactivated.kind).toBe("invalid_input");
+    expect(reactivated).toEqual({
+      kind: "invalid_input",
+
+      reason: "immediate_publication_not_supported",
+    });
 
     const stored = await pool.query<{
       active: boolean;

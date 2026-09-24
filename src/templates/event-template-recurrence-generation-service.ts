@@ -120,9 +120,11 @@ export type GenerateRecurringOccurrenceResult =
  *
  * The event snapshot and its recurrence provenance commit atomically.
  *
- * Discord publication remains outside this service. In particular,
- * requiresImmediatePublication on a successful generation result is only an
- * instruction to the post-commit caller.
+ * Automatic recurrence deliberately rejects Immediate-publication templates.
+ * Scheduled publication remains ordinary durable event-owned scheduler state,
+ * while Manual occurrences remain unpublished until explicit administration.
+ *
+ * This service performs no Discord side effects.
  */
 export async function generateRecurringOccurrence(
   input: GenerateRecurringOccurrenceInput,

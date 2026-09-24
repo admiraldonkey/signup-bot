@@ -154,9 +154,9 @@ describe("event template recurrence generation service", () => {
       now: new Date("2099-01-05T00:00:00.000Z"),
     });
 
-    expect(result.kind).not.toBe("generated");
-
-    expect(result.kind).not.toBe("already_generated");
+    expect(result).toEqual({
+      kind: "immediate_publication_not_supported",
+    });
 
     const counts = await pool.query<{
       event_count: number;
