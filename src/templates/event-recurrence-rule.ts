@@ -1,5 +1,22 @@
+import { createRequire } from "node:module";
+
 import { DateTime } from "luxon";
-import { RRule } from "rrule";
+
+/*
+ * rrule 2.8.1 publishes its Node entry point as a CommonJS/webpack bundle.
+ *
+ * Node's native ESM loader cannot reliably synthesise the package's named
+ * RRule export from that bundle, even though the package's TypeScript
+ * declarations describe RRule as a named export.
+ *
+ * Load this legacy CommonJS dependency explicitly instead of relying on
+ * synthetic named-export detection.
+ */
+const requireFromHere = createRequire(import.meta.url);
+
+const rruleModule = requireFromHere("rrule") as typeof import("rrule");
+
+const { RRule } = rruleModule;
 
 const RECURRENCE_DATE_FORMAT = "yyyy-MM-dd";
 
