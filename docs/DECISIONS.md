@@ -3717,9 +3717,9 @@ Normal template lifecycle therefore favours active/inactive state rather than de
 
 Recurrence is not part of the one-off template source aggregate.
 
-The one-off administrator workflow is now established.
+Recurring generation is implemented as a separate layer which reuses the existing template-generation boundary rather than turning the one-off template aggregate into a runtime series model.
 
-Recurring generation remains a separate P1 layer which must reuse the existing template-generation boundary rather than turning the one-off template aggregate into a runtime series model.
+Generated recurring occurrences therefore become ordinary event snapshots rather than a separate recurring-event runtime type.
 
 ### Reason
 
@@ -3761,7 +3761,7 @@ into an instant itself.
 
 Administrator-driven one-off generation resolves local wall-clock input in the command/application adapter through the shared named-timezone parser.
 
-Future recurrence should likewise resolve recurrence-local wall-clock occurrences before entering the generation persistence boundary.
+Recurring generation follows the same boundary: recurrence supplies the local calendar date, the template supplies timezone and local start time, and the occurrence is resolved to an absolute instant before entering the generation persistence boundary.
 
 ### Source revision
 
@@ -3793,7 +3793,7 @@ Template parent and child mutation services update the parent revision.
 
 ### Reason
 
-Keeping calendar interpretation outside the persistence service gives one-off administration and future recurrence a common event-generation boundary.
+Keeping calendar interpretation outside the core template-generation persistence service gives one-off administration and recurring generation a common event-generation boundary.
 
 The revision guard prevents that separation from allowing:
 

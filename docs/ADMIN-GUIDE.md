@@ -4135,7 +4135,7 @@ to inspect the ordinary events which already exist.
 
 # `/template recurrence-edit`
 
-Edits future recurrence source state.
+Edits recurrence source state for not-yet-generated occurrences.
 
 Supported administrator-facing changes are:
 

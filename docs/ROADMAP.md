@@ -39,20 +39,38 @@ Real operational problems, regressions, or newly discovered architectural depend
 
 The foundational event-management platform is established.
 
-Implemented areas include persistent event lifecycle, publication, attendance, organiser workflows, reminders, event-level role requests, reusable role-request presets, one-off event templates, durable scheduling, recovery behaviour, audit logging, and PostgreSQL-backed reliability testing.
+Implemented areas include persistent event lifecycle, publication, attendance, organiser workflows, reminders, event-level role requests, reusable role-request presets, reusable event templates, one-off template generation, recurring event generation, durable scheduling and recovery, audit logging, and PostgreSQL-backed reliability testing.
 
-The one-off event-template administrator workflow is complete.
+The P1 template and recurrence milestone is complete.
 
-The next major development phase is:
+Recurring event generation now includes:
 
 ```text
-P1
-Recurring Event Generation
+bounded ten-day materialisation
+immutable recurrence-slot identity
+idempotent/concurrent generation
+reversible recurrence lifecycle
+durable recurrence sweep claiming
+restart and stale-claim recovery
+administrator recurrence inspection
+Manual and Scheduled publication semantics
 ```
+
+Completed implementation detail belongs in `ARCHITECTURE.md`, `CURRENT-WORK.md`, and `DECISIONS.md` rather than remaining in this roadmap.
+
+The next substantial P1 workflow candidate is:
+
+```text
+Confirmed Organiser Unavailability
+```
+
+Remaining server-level feature controls are also still P1 work.
+
+Template Preview remains an optional administrator UX improvement.
 
 Reliability remains an ongoing engineering requirement rather than a separate broad rewrite phase.
 
-New work should preserve existing concurrency, snapshot, scheduler, recovery, timezone, and authoritative-state guarantees as it is introduced.
+New work must preserve existing concurrency, snapshot, scheduler, recovery, timezone, and authoritative-state guarantees.
 
 ---
 
@@ -81,283 +99,6 @@ Useful preview information could include:
 This is an optional administrator UX improvement.
 
 It should not duplicate the generation service or become a second source of domain validation.
-
----
-
-## P1.13 — Administrator-facing one-off generation
-
-Expose the implemented one-off generation service through an administrator-facing workflow.
-
-The adapter must:
-
-- resolve the requested occurrence date/time into an absolute `startsAt`
-- preserve the template timezone/local-time semantics
-- authorise the administrator
-- validate Discord-specific role/channel inputs where relevant
-- call the reusable generation service
-- handle service results clearly
-- audit successful generation
-- perform immediate publication only after the generation transaction commits
-- avoid reproducing generation persistence logic in the command handler
-
-Command-adapter tests should verify Discord parsing/result handling.
-
-PostgreSQL integration tests remain authoritative for generation correctness.
-
-Update `ADMIN-GUIDE.md` when this administrator-facing workflow is introduced.
-
----
-
-# P1 — Recurring Event Generation
-
-## Objective
-
-Generate future ordinary event occurrences from reusable templates.
-
-Do not model a recurring series as one event row whose date repeatedly changes.
-
-The intended shape is:
-
-```text
-template / series
-        |
-        v
-recurrence calculation
-        |
-        v
-ordinary persistent event occurrences
-```
-
-One-off template generation should be stable before recurrence becomes authoritative.
-
----
-
-## P1.14 — Standards-based recurrence representation
-
-Prefer a recognised recurrence model such as RFC 5545 RRULE where practical.
-
-Example:
-
-```text
-FREQ=WEEKLY
-BYDAY=MO
-```
-
-Evaluate a mature recurrence library rather than implementing calendar recurrence arithmetic manually.
-
-Required concerns include:
-
-- weekly schedules
-- named timezone context
-- daylight-saving changes
-- exclusions
-- start/end bounds
-- occurrence counting
-
----
-
-## P1.15 — Rolling generation horizon
-
-Do not materialise an unlimited future series.
-
-Generate occurrences within a bounded rolling horizon.
-
-A working design candidate discussed so far is approximately:
-
-```text
-21 days
-```
-
-This is not yet a fixed product requirement.
-
-The final horizon may be configurable or changed after operational experience.
-
-Benefits of bounded generation include:
-
-- manageable database size
-- bounded scheduled-action volume
-- easier template edits
-- easier series changes
-- fewer unnecessary hypothetical events
-- natural future-only application of template changes
-
----
-
-## P1.16 — Generate before public announcement
-
-A recurring occurrence should normally exist before publication time.
-
-Preferred sequence:
-
-```text
-occurrence enters generation horizon
-        |
-        v
-persistent event created
-        |
-        +---- organisers snapshotted
-        |
-        +---- role-request configuration snapshotted
-        |
-        +---- reminders created
-        |
-        +---- scheduled actions created
-        |
-        +---- administrator can inspect/edit
-        |
-        v
-normal publication time arrives
-```
-
-Do not wait until publication time to create the event for the first time.
-
-This gives administrators time to inspect or customise a particular occurrence before Discord presentation becomes public.
-
----
-
-## P1.17 — Immutable occurrence identity
-
-A recurring occurrence needs an immutable schedule identity separate from mutable event timing.
-
-Do not use:
-
-```text
-event.startsAt
-```
-
-as the sole occurrence identity.
-
-Example failure:
-
-```text
-Monday occurrence generated
-        |
-        v
-administrator moves it to Tuesday
-        |
-        v
-generator runs again
-        |
-        v
-original Monday slot appears absent
-        |
-        v
-duplicate generated
-```
-
-A moved event must remain recognisable as the occurrence originally generated for that schedule slot.
-
----
-
-## P1.18 — Idempotent occurrence generation
-
-Running generation repeatedly for the same horizon must not create duplicates.
-
-Use a durable uniqueness rule based on the series/template identity and immutable occurrence identity.
-
-Conceptually:
-
-```text
-series
-+
-occurrence key
-=
-one generated occurrence
-```
-
-Cover concurrent generators with deterministic PostgreSQL-backed tests.
-
----
-
-## P1.19 — Individual occurrence edits remain local
-
-Editing one generated event must not rewrite:
-
-- the template
-- recurrence rule
-- neighbouring occurrences
-- already-generated future occurrences unless an explicit bulk action exists
-
-A moved occurrence remains associated with its original series slot through immutable occurrence identity.
-
----
-
-## P1.20 — Individual occurrence cancellation
-
-Administrators must be able to cancel one generated event without cancelling the recurring series.
-
-A cancelled event remains the occurrence record for that slot.
-
-The generator must not interpret cancellation as:
-
-```text
-occurrence missing
-    -> regenerate it
-```
-
----
-
-## P1.21 — Series/template disable behaviour
-
-Disabling recurrence should normally mean:
-
-```text
-stop future generation
-    |
-    v
-already-generated events remain intact
-```
-
-Do not automatically cancel existing generated events unless an administrator explicitly requests that separate action.
-
----
-
-## P1.22 — Recurrence schedule changes
-
-When recurrence configuration changes:
-
-- already-generated events should normally remain unchanged
-- not-yet-generated occurrence calculation should use the new rule
-
-If future regeneration or reconciliation becomes useful, make it an explicit scoped operation.
-
----
-
-## P1.23 — Daylight-saving behaviour
-
-Recurring local event times must preserve intended local wall-clock meaning.
-
-Example:
-
-```text
-Every Monday at 20:00 Europe/London
-```
-
-should remain a 20:00 London event across daylight-saving transitions.
-
-Do not implement recurrence by repeatedly adding fixed UTC durations where that changes the intended local time.
-
----
-
-## P1.24 — Recurrence scheduler architecture
-
-Decide how rolling occurrence generation is triggered.
-
-Possible approaches include:
-
-- periodic durable scheduler work
-- startup plus periodic sweep
-- dedicated recurrence-generation scheduled actions
-
-The selected design must be:
-
-- restart-safe
-- idempotent
-- bounded
-- concurrency-safe
-- observable
-- deterministic in tests
-- independent from arbitrary wall-clock sleeps
 
 ---
 

@@ -5,7 +5,7 @@ A PostgreSQL-backed Discord event management bot for organised gaming communitie
 The project replaces reaction based signups and manual event coordination with persistent event state, attendance tracking, organiser workflows, role requests, reusable configuration, reminders, audit logging, and durable scheduled work.
 
 > **Project status:** actively developed and used for real community workflows.
-> Current major development phase: **Event Templates (P1)**.
+> Current major milestone: **P1 reusable event templates and recurring generation**.
 
 ---
 
@@ -370,11 +370,38 @@ Administrators can build and maintain reusable event templates covering:
 - reusable reminder definitions
 - an optional role-request preset
 
-The `/template` command supports creation, inspection, editing, lifecycle management, reminder administration, and one-off event generation.
+The `/template` command supports creation, inspection, editing, lifecycle management, reminder administration, one-off generation, recurrence administration, and inspection of generated occurrences.
 
-Generated occurrences become ordinary independent events. Later template changes affect future generation rather than rewriting events that already exist.
+One-off generation resolves the requested occurrence in the template timezone and snapshots the complete reusable source graph transactionally.
 
-One-off generation resolves the occurrence in the template timezone, snapshots the complete reusable source graph transactionally, and uses the normal event publication path after commit where immediate publication is requested.
+Generated occurrences become ordinary independent events. Later template, preset, recurrence, or guild-default changes do not rewrite state already snapshotted into existing events.
+
+Templates may also own one active or inactive recurrence series.
+
+Recurring generation uses a constrained RFC 5545 recurrence representation and materialises only a bounded rolling horizon:
+
+```text
+today
+through
+today + 9 template-local calendar days
+```
+
+Each generated recurrence slot receives immutable occurrence provenance separate from the event's mutable start time.
+
+This means an administrator may later move, edit, publish, or cancel a generated event without making its original recurrence slot appear missing.
+
+Automatic recurrence is restart-safe and PostgreSQL-authoritative.
+
+The runtime poll merely discovers durable recurrence work. Series-level sweep eligibility, claim ownership, stale recovery, and the latest operational result are stored in PostgreSQL.
+
+Recurring templates support:
+
+```text
+Manual publication
+Scheduled publication
+```
+
+Automatic recurrence deliberately does not support Immediate publication because recurring occurrences are materialised in advance.
 
 ---
 
@@ -496,6 +523,7 @@ npm run test:integration
 npm run test:coverage
 npm run typecheck
 npm run typecheck:test
+npm run build
 git diff --check
 ```
 
@@ -511,6 +539,7 @@ Manual Discord smoke testing is reserved for behaviour that genuinely depends on
 - DMs
 - deleted Discord objects
 - end-to-end button flows
+- automatic recurrence materialisation and scheduler lifecycle
 
 See [docs/TESTING-GUIDE.md](docs/TESTING-GUIDE.md).
 
@@ -638,16 +667,16 @@ See [docs/ADMIN-GUIDE.md](docs/ADMIN-GUIDE.md) for the full operational referenc
 
 Current top-level commands include:
 
-| Command        | Purpose                                                  |
-| -------------- | -------------------------------------------------------- |
-| `/ping`        | Basic bot response check                                 |
-| `/dbcheck`     | Administrative PostgreSQL connectivity check             |
-| `/setup`       | Initialise and configure guild event management          |
-| `/event`       | Create, publish, edit, and administer events             |
-| `/role-preset` | Manage reusable role-request presets                     |
-| `/template`    | Manage reusable event templates and generate occurrences |
-| `/attendance`  | Record and analyse actual attendance                     |
-| `/audit`       | Inspect recent administrative audit activity             |
+| Command        | Purpose                                                          |
+| -------------- | ---------------------------------------------------------------- |
+| `/ping`        | Basic bot response check                                         |
+| `/dbcheck`     | Administrative PostgreSQL connectivity check                     |
+| `/setup`       | Initialise and configure guild event management                  |
+| `/event`       | Create, publish, edit, and administer events                     |
+| `/role-preset` | Manage reusable role-request presets                             |
+| `/template`    | Manage reusable templates, recurrence, and generated occurrences |
+| `/attendance`  | Record and analyse actual attendance                             |
+| `/audit`       | Inspect recent administrative audit activity                     |
 
 `/event` contains most event-specific administration, including organiser, reminder, attendance-response, publication, and event-level role-request workflows.
 
@@ -755,63 +784,77 @@ Non-obvious concurrency and lifecycle behaviour should be protected by tests so 
 
 # Current development phase
 
-The core event-management, reusable role-request, and one-off event-template workflows are established.
+The core event-management, reusable role-request, event-template, and recurring-generation workflows are established.
 
-The completed one-off template milestone includes:
+The completed P1 template and recurrence milestone includes:
 
 - reusable template creation and inspection
-- active/inactive lifecycle
-- core template editing
+- active/inactive template lifecycle
+- core and child-source template editing
 - ordered ping-role replacement
 - primary/backup organiser defaults
 - reusable reminder administration
 - optional role-request preset configuration
-- manual, scheduled, and immediate publication intent
 - administrator-facing one-off generation
+- manual, scheduled, and immediate one-off publication intent
 - shared named-timezone local date/time parsing
-- post-commit immediate publication
-- source-template provenance
+- exact template-source revision provenance
 - generated-event snapshot independence
 - deterministic source-lock concurrency coverage
-- optimistic source-revision protection during occurrence preparation
+- optimistic source-revision protection during administrator occurrence preparation
+- reusable recurrence administration
+- constrained RFC 5545 recurrence rules
+- immutable recurrence occurrence identity
+- exact ten-day template-local generation horizon
+- idempotent and concurrent recurring generation
+- reversible recurrence lifecycle
+- automatic recurrence sweeping
+- durable recurrence claim and stale-recovery state
+- administrator-visible recurrence health
+- Manual and Scheduled recurring publication semantics
+- runtime Node ESM compatibility coverage for the recurrence library
+- real Discord end-to-end recurrence smoke testing
 
-The current major development area is now:
+The recurring-generation implementation produces ordinary event snapshots rather than introducing a second runtime event model.
 
-```text
-Recurring Event Generation
-```
+The remaining P1 roadmap now contains separate administrator and workflow improvements rather than unfinished recurrence infrastructure.
 
-Recurrence will reuse the established one-off generation boundary to create bounded ordinary event occurrences rather than introducing a separate mutable runtime event model.
-
-See [`CURRENT-WORK.md`](docs/CURRENT-WORK.md) and [`ROADMAP.md`](docs/ROADMAP.md).
+See [`CURRENT-WORK.md`](docs/CURRENT-WORK.md) for the exact current checkpoint and [`ROADMAP.md`](docs/ROADMAP.md) for unfinished work.
 
 ---
 
-# Implemented template generation model
+# Implemented template and recurrence model
 
-The current high-level shape is:
+The high-level generation shape is:
 
 ```text
 template
     |
-    | atomic generation
+    +---- optional recurrence source
+    |
+    v
+atomic occurrence generation
+    |
     v
 ordinary persistent event
 ```
 
-Generation snapshots reusable source configuration into ordinary event-owned state.
+Generation snapshots reusable configuration into ordinary event-owned state.
 
-After commit:
+After generation:
 
 ```text
 template
     -> reusable source / provenance
 
+recurrence
+    -> future schedule intent / immutable slot provenance
+
 generated event
     -> authoritative runtime state
 ```
 
-Generated events do not continuously consult their source template.
+Generated events do not continuously consult either their source template or recurrence.
 
 Later changes to:
 
@@ -822,13 +865,45 @@ template organiser defaults
 template reminders
 referenced role-request presets
 guild default channels
+recurrence rule
+recurrence lifecycle
 ```
 
-do not rewrite state already snapshotted into an existing generated event.
+do not rewrite state already snapshotted into an existing event.
 
-Generation uses the established event, organiser, reminder, role-request, publication, and durable scheduler architectures rather than creating template-specific runtime equivalents.
+Recurring occurrence identity is stored independently from:
 
-Recurrence remains a later concern and should generate bounded ordinary occurrences rather than maintaining one mutable special event row.
+```text
+events.starts_at
+```
+
+so moving or otherwise editing a generated event does not cause its original recurrence slot to be regenerated.
+
+Automatic recurrence uses a bounded horizon and durable series-owned sweep state.
+
+Conceptually:
+
+```text
+disposable runtime poll
+        |
+        v
+PostgreSQL next_sweep_at
+        |
+        v
+conditional recurrence claim
+        |
+        v
+ten-day local horizon
+        |
+        v
+ordinary occurrence generation
+```
+
+The runtime timer is discovery infrastructure rather than authoritative scheduling state.
+
+Event-owned future work continues to use ordinary durable scheduled actions.
+
+Generation reuses the established event, organiser, reminder, role-request, publication, and scheduler architectures rather than creating template-specific runtime equivalents.
 
 ---
 
