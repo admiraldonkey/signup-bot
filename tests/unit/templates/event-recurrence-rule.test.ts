@@ -105,6 +105,60 @@ describe("event recurrence rules", () => {
     });
   });
 
+  it("anchors a simple daily recurrence at the configured start date", () => {
+    expect(
+      enumerateRecurrenceOccurrenceDates({
+        recurrenceRule: "FREQ=DAILY",
+
+        startDate: "2026-10-05",
+
+        fromDate: "2026-10-03",
+
+        throughDate: "2026-10-08",
+      }),
+    ).toEqual({
+      ok: true,
+
+      occurrenceDates: ["2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08"],
+    });
+  });
+
+  it("anchors a simple monthly recurrence to the start-date day of month", () => {
+    expect(
+      enumerateRecurrenceOccurrenceDates({
+        recurrenceRule: "FREQ=MONTHLY",
+
+        startDate: "2026-01-31",
+
+        fromDate: "2026-01-31",
+
+        throughDate: "2026-05-31",
+      }),
+    ).toEqual({
+      ok: true,
+
+      occurrenceDates: ["2026-01-31", "2026-03-31", "2026-05-31"],
+    });
+  });
+
+  it("anchors a simple yearly recurrence at the configured start date", () => {
+    expect(
+      enumerateRecurrenceOccurrenceDates({
+        recurrenceRule: "FREQ=YEARLY",
+
+        startDate: "2026-10-05",
+
+        fromDate: "2026-10-05",
+
+        throughDate: "2027-10-05",
+      }),
+    ).toEqual({
+      ok: true,
+
+      occurrenceDates: ["2026-10-05", "2027-10-05"],
+    });
+  });
+
   it("rejects reversed or excessively large enumeration windows", () => {
     expect(
       enumerateRecurrenceOccurrenceDates({

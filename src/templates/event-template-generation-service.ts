@@ -65,7 +65,7 @@ export type GenerateEventFromTemplateInput = {
   templateId: number;
 
   /*
-   * The calling command or future recurrence service resolves the occurrence's
+   * One-off command handling and recurrence generation resolve the occurrence's
    * local date/time into an absolute instant before entering this persistence
    * boundary.
    */
@@ -106,8 +106,8 @@ export type GenerateEventFromTemplateResult =
        * Immediate publication is deliberately post-commit because Discord
        * posting is an external side effect.
        *
-       * A future adapter must call the normal publication service after this
-       * generation transaction has committed.
+       * A caller requesting Immediate publication must call the normal
+       * publication service after this generation transaction has committed.
        */
       requiresImmediatePublication: boolean;
     }
