@@ -403,6 +403,19 @@ async function completeRecurrenceSweepClaim(
   classification: RecurrenceSweepClassification,
 ): Promise<boolean> {
   /*
+   * Use the actual completion instant in production.
+   *
+   * Deterministic tests may intentionally supply a synthetic future "now".
+   * Clamp against the claim start so completedAt can never precede startedAt
+   * merely because the test clock is ahead of the host clock.
+   */
+  const observedCompletionAt = new Date();
+
+  const completedAt =
+    observedCompletionAt.getTime() >= claim.startedAt.getTime()
+      ? observedCompletionAt
+      : claim.startedAt;
+  /*
    * Completion is fenced by the exact claim token.
    *
    * If an administrator edited/deactivated this recurrence, or a later worker
@@ -414,7 +427,7 @@ async function completeRecurrenceSweepClaim(
     .set({
       sweepClaimToken: null,
 
-      lastSweepCompletedAt: claim.startedAt,
+      lastSweepCompletedAt: completedAt,
 
       lastSweepOutcome: classification.outcome,
 

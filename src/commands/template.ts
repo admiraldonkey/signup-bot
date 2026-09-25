@@ -1044,6 +1044,12 @@ async function listTemplateRecurrences(
       lifecycleParts.push("template inactive");
     }
 
+    if (recurrence.lastSweepOutcome === "failure") {
+      lifecycleParts.push("last sweep failed");
+    } else if (recurrence.lastSweepOutcome === "partial_failure") {
+      lifecycleParts.push("last sweep partially failed");
+    }
+
     lines.push(
       `• **${recurrence.templateName}** (#${recurrence.templateId}) — ${lifecycleParts.join(
         " • ",
@@ -3542,7 +3548,7 @@ function formatRecurrencePattern(recurrenceRule: string): string {
 function formatTemplateRecurrenceDetails(
   recurrence: EventTemplateRecurrenceDetail,
 ): string {
-  return [
+  const lines = [
     `## Recurrence for ${recurrence.templateName} (#${recurrence.templateId})`,
 
     `**Recurrence ID:** #${recurrence.id}`,
@@ -3569,12 +3575,91 @@ function formatTemplateRecurrenceDetails(
 
     "",
 
+    "### Automatic materialisation",
+  ];
+
+  if (!recurrence.active) {
+    lines.push("**Scheduler:** Paused because this recurrence is inactive.");
+  } else if (!recurrence.templateActive) {
+    lines.push(
+      "**Scheduler:** Paused because the reusable template is inactive.",
+    );
+  } else {
+    lines.push(
+      "**Scheduler:** Active",
+
+      `**Next sweep:** ${formatDiscordDateTime(recurrence.nextSweepAt)}`,
+    );
+  }
+
+  if (
+    recurrence.lastSweepCompletedAt === null ||
+    recurrence.lastSweepOutcome === null
+  ) {
+    lines.push(
+      "**Last sweep:** No completed automatic sweep has been recorded yet.",
+    );
+  } else {
+    lines.push(
+      `**Last sweep:** ${formatRecurrenceSweepOutcome(
+        recurrence.lastSweepOutcome,
+      )} • ${formatDiscordDateTime(recurrence.lastSweepCompletedAt)}`,
+    );
+  }
+
+  if (recurrence.lastSweepDiagnostic) {
+    lines.push(
+      `**Diagnostic:** ${formatRecurrenceSweepDiagnostic(
+        recurrence.lastSweepDiagnostic,
+      )}`,
+    );
+  }
+
+  lines.push(
+    "",
+
     "The recurrence source controls future recurring materialisation only.",
 
     "Events already generated from this template remain independent snapshots.",
 
     `Use \`/template show-generated template-id:${recurrence.templateId}\` to inspect those generated events.`,
-  ].join("\n");
+  );
+
+  return lines.join("\n");
+}
+
+function formatRecurrenceSweepOutcome(value: string): string {
+  switch (value) {
+    case "success":
+      return "Success";
+
+    case "partial_failure":
+      return "Partial failure";
+
+    case "failure":
+      return "Failure";
+
+    case "skipped":
+      return "Skipped";
+
+    default:
+      return value;
+  }
+}
+
+function formatRecurrenceSweepDiagnostic(value: string): string {
+  const singleLine = value.replace(/\s+/g, " ").trim().replaceAll("`", "'");
+
+  const truncated =
+    singleLine.length <= 500 ? singleLine : `${singleLine.slice(0, 499)}…`;
+
+  return `\`${truncated}\``;
+}
+
+function formatDiscordDateTime(value: Date): string {
+  const unix = Math.floor(value.getTime() / 1000);
+
+  return `<t:${unix}:F> (<t:${unix}:R>)`;
 }
 
 function formatTemplateRecurrenceValidationError(

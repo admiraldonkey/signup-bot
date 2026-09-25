@@ -4601,6 +4601,216 @@ At the same time, publication should release still-useful due reminders promptly
 
 ---
 
+## D141 - Recurrence sweeping is durable series-owned leased work
+
+**Status: Current**
+
+Automatic recurrence must survive:
+
+```text
+process restart
+deployment
+temporary database outage
+multiple bot workers
+partial horizon failure
+```
+
+without treating an in-memory JavaScript timer as authoritative state.
+
+### Recurrence scheduling state belongs to the series
+
+Ordinary:
+
+```text
+scheduled_actions
+```
+
+are event-owned and require:
+
+```text
+event_id
+```
+
+A recurrence sweep exists before the next event exists.
+
+Automatic recurrence scheduling therefore belongs to:
+
+```text
+event_template_recurrences
+```
+
+through durable operational fields including:
+
+```text
+next_sweep_at
+sweep_claim_token
+last_sweep_started_at
+last_sweep_completed_at
+last_sweep_outcome
+last_sweep_diagnostic
+```
+
+The in-process polling interval merely discovers due database state.
+
+It is not itself durable scheduling state.
+
+### Polling and durable cadence are separate
+
+The process polls frequently enough to discover newly-due recurrence work promptly.
+
+Each successful claim advances:
+
+```text
+next_sweep_at
+```
+
+independently of that polling interval.
+
+The current implementation uses approximately:
+
+```text
+15-second local discovery polling
+5-minute durable recurrence sweep cadence
+```
+
+These exact intervals are implementation policy rather than public API.
+
+The invariant is:
+
+```text
+frequent disposable polling
++
+durable database-owned eligibility
+```
+
+### Claim ownership
+
+Discovery is not ownership.
+
+Several workers may read the same due recurrence.
+
+Ownership is established only by a conditional PostgreSQL update which:
+
+```text
+moves next_sweep_at forward
++
+writes a unique sweep_claim_token
++
+records last_sweep_started_at
+```
+
+A competing worker which loses that update performs no recurrence work for that candidate.
+
+This avoids introducing a recurrence-first row-lock order which could conflict with the established:
+
+```text
+template
+    -> recurrence
+```
+
+mutation/generation lock hierarchy.
+
+### Stale recovery
+
+A process may disappear after claiming recurrence work.
+
+Claims therefore have a bounded stale lease.
+
+A later worker may recover recurrence work whose claim has exceeded that lease.
+
+Individual occurrence generation remains idempotent through:
+
+```text
+recurrence_id
++
+occurrence_date
+```
+
+so stale recovery must not create duplicate events.
+
+### Completion fencing
+
+A worker may lose ownership while processing because:
+
+- an administrator edits the recurrence
+- an administrator changes recurrence lifecycle
+- another worker legitimately recovers a stale claim
+
+Sweep completion therefore requires the exact current:
+
+```text
+sweep_claim_token
+```
+
+A stale worker cannot overwrite newer recurrence operational state.
+
+### Source edits and lifecycle changes
+
+A recurrence source edit:
+
+```text
+makes the series immediately sweepable
+clears old operational outcome/diagnostic state
+supersedes an older claim
+```
+
+Deactivation supersedes any existing claim.
+
+Reactivation makes the recurrence immediately eligible again.
+
+Previously-generated events remain unchanged in every case.
+
+### Failure isolation and observability
+
+One recurrence failure must not abort unrelated due recurrence work.
+
+The sweep runner processes claimed series independently.
+
+The latest completed result is persisted as:
+
+```text
+success
+partial_failure
+failure
+skipped
+```
+
+with an optional human-readable diagnostic.
+
+Administrator inspection surfaces this persisted state through recurrence commands.
+
+Console logging remains useful operational presentation, but it is not the sole source of failure history.
+
+### Scheduler lifecycle
+
+The recurrence scheduler:
+
+```text
+runs once immediately at startup
+polls for later due work
+does not overlap local ticks
+stops new polling during shutdown
+waits for an in-flight tick before PostgreSQL is closed
+```
+
+This preserves the same shutdown invariant as the ordinary event scheduler:
+
+```text
+stop new work
+    ->
+drain active work
+    ->
+close shared resources
+```
+
+### Reason
+
+Recurring materialisation is important future work, but it is not attached to an event until generation succeeds.
+
+Giving the recurrence series its own durable lease state preserves restart safety and multi-worker ownership without distorting the event-owned scheduled-action model.
+
+---
+
 # Summary of Highest-Risk Invariants
 
 The following decisions are especially easy to break during an otherwise well-intentioned refactor.

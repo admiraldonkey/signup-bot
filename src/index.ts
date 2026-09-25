@@ -13,6 +13,10 @@ import {
   startEventScheduler,
   stopEventScheduler,
 } from "./scheduler/event-scheduler.js";
+import {
+  startRecurrenceScheduler,
+  stopRecurrenceScheduler,
+} from "./scheduler/recurrence-scheduler.js";
 import { handleOrganiserButton } from "./interactions/organiser-button.js";
 import { handleRoleRequestButton } from "./interactions/role-request-button.js";
 
@@ -38,6 +42,8 @@ client.once(Events.ClientReady, async (readyClient) => {
   }
 
   startEventScheduler(readyClient);
+
+  startRecurrenceScheduler();
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
@@ -171,10 +177,13 @@ async function shutDown(signal: string): Promise<void> {
   console.log(`Received ${signal}; shutting down cleanly.`);
 
   /*
-   * Stop scheduling new work and allow any tick which is already using
-   * PostgreSQL or Discord to finish before those shared resources are closed.
+   * Stop discovering new work and allow any scheduler tick which is already
+   * using PostgreSQL or Discord to finish before those shared resources are
+   * closed.
+   *
+   * Stop both timers immediately, then wait for both active ticks together.
    */
-  await stopEventScheduler();
+  await Promise.all([stopEventScheduler(), stopRecurrenceScheduler()]);
 
   client.destroy();
 

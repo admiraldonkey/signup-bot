@@ -1470,6 +1470,16 @@ describe("/template command", () => {
 
         active: true,
 
+        nextSweepAt: new Date(),
+
+        lastSweepStartedAt: new Date(),
+
+        lastSweepCompletedAt: new Date(),
+
+        lastSweepOutcome: "failure",
+
+        lastSweepDiagnostic: "invalid_template_timezone",
+
         createdByUserId: ADMIN_USER_ID,
 
         createdAt: new Date(),
@@ -1497,6 +1507,16 @@ describe("/template command", () => {
         startDate: "2026-10-12",
 
         active: false,
+
+        nextSweepAt: new Date(),
+
+        lastSweepStartedAt: null,
+
+        lastSweepCompletedAt: null,
+
+        lastSweepOutcome: null,
+
+        lastSweepDiagnostic: null,
 
         createdByUserId: ADMIN_USER_ID,
 
@@ -1534,6 +1554,8 @@ describe("/template command", () => {
 
     expect(content).toContain("Every week");
 
+    expect(content).toContain("last sweep failed");
+
     expect(content).toContain("**Monthly Training** (#8)");
 
     expect(content).toContain("Every 2 months");
@@ -1559,6 +1581,16 @@ describe("/template command", () => {
         startDate: "2026-10-05",
 
         active: true,
+
+        nextSweepAt: new Date("2099-01-05T12:05:00.000Z"),
+
+        lastSweepStartedAt: new Date("2099-01-05T12:00:00.000Z"),
+
+        lastSweepCompletedAt: new Date("2099-01-05T12:00:03.000Z"),
+
+        lastSweepOutcome: "partial_failure",
+
+        lastSweepDiagnostic: "2099-01-07: invalid_local_occurrence_time",
 
         createdByUserId: ADMIN_USER_ID,
 
@@ -1611,6 +1643,16 @@ describe("/template command", () => {
     expect(content).toContain("**Local start:** 20:00 Europe/London");
 
     expect(content).toContain("**Publication:** Scheduled");
+
+    expect(content).toContain("### Automatic materialisation");
+
+    expect(content).toContain("**Scheduler:** Active");
+
+    expect(content).toContain("**Last sweep:** Partial failure");
+
+    expect(content).toContain("invalid_local_occurrence_time");
+
+    expect(content).toContain("**Next sweep:**");
 
     expect(content).toContain("/template show-generated template-id:7");
 
