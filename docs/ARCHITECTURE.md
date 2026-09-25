@@ -57,7 +57,7 @@ Major areas in this document include:
 - recovery and Discord error handling
 - audit and timezone handling
 - P1 event-template architecture
-- planned recurrence
+- P1 recurrence architecture
 - portability and future integration
 - architectural invariants
 
@@ -99,9 +99,9 @@ The P0 foundation and focused reliability work are complete.
 
 ## Current development phase
 
-The one-off P1 event-template workflow is implemented end-to-end.
+The P1 reusable-template and recurring-generation workflow is implemented end-to-end.
 
-Implemented template infrastructure now includes:
+Implemented template infrastructure includes:
 
 ```text
 reconciled reusable source model
@@ -114,42 +114,56 @@ Discord /template administration
 atomic one-off generation
 timezone-aware administrator occurrence resolution
 optimistic template-revision validation
+exact source-revision provenance
 generated-event snapshot independence
 template source-lock concurrency protection
 post-commit immediate publication
+generated-event inspection
 ```
 
-One-off generation creates ordinary event-owned state for:
+Implemented recurrence infrastructure includes:
 
 ```text
-core event
-publication state
-ping roles
-optional organiser assignments
-reminders
-role-request preset snapshots
-durable scheduled actions
+one recurrence series per template
+constrained RFC 5545 recurrence representation
+template-local calendar recurrence
+immutable recurrence occurrence identity
+ten-day rolling materialisation horizon
+idempotent and concurrent occurrence generation
+reversible recurrence lifecycle
+Manual and Scheduled recurring publication
+durable recurrence sweep ownership
+stale-claim recovery
+automatic runtime polling
+administrator-visible sweep health
 ```
 
-inside one authoritative PostgreSQL transaction.
+One-off and recurring generation both produce ordinary event-owned state.
 
-The Discord `/template generate` adapter resolves local date/time using the template timezone before entering that persistence boundary.
+The runtime event model remains:
 
-Immediate Discord publication occurs only after generation commits.
+```text
+ordinary persistent event
+```
 
-The current architecture task is now recurring event generation using the established one-off template-generation boundary.
+rather than introducing a parallel recurring-event type.
+
+Immediate publication remains supported for one-off generation.
+
+Automatic recurrence deliberately supports only Manual and Scheduled publication because recurring occurrences are materialised in advance.
 
 ## Planned areas
 
-Current planned areas include:
+Current unfinished areas include:
 
-- event templates
-- recurring event generation
-- richer participation context for actual attendance
+- non-mutating template preview
 - confirmed-organiser unavailability/replacement
+- remaining server-level feature controls
+- richer participation context for actual attendance
+- later event-level role-request editing improvements
 - possible future web or external-bot integration
 
-Schema presence must not be interpreted as proof that the corresponding administrator-facing feature is complete.
+Schema presence must not be interpreted as proof that unrelated planned administrator-facing features are complete.
 
 ---
 
@@ -235,7 +249,13 @@ A `draft` event status is not required merely to indicate that the public messag
 
 Authoritative future work must not depend only on JavaScript timers or the current process remaining alive.
 
-Persistent scheduled actions are used for work including:
+Event-owned future work uses persistent:
+
+```text
+scheduled_actions
+```
+
+for work including:
 
 - event publication
 - attendance closure
@@ -248,6 +268,18 @@ Persistent scheduled actions are used for work including:
 - missing-organiser-at-start checks
 - role-request group opening
 - role-request group closing
+
+Automatic recurrence is also durable, but recurrence sweeping exists before the next event does.
+
+Its scheduling and claim state therefore belongs to:
+
+```text
+event_template_recurrences
+```
+
+rather than being forced into event-owned `scheduled_actions`.
+
+The recurrence runtime timer merely discovers due database state.
 
 Short-lived UI concerns may use in-memory timing where losing them on restart is harmless.
 
@@ -3387,7 +3419,7 @@ They should not be confused with event publication itself.
 
 # Durable Scheduler
 
-The scheduler is centred on:
+Event-owned durable scheduling is centred on:
 
 ```text
 scheduled_actions
@@ -3398,6 +3430,10 @@ and:
 ```text
 src/scheduler/event-scheduler.ts
 ```
+
+This scheduler owns future work which already belongs to an event.
+
+Automatic recurrence uses a separate recurrence-owned durable sweep boundary described in the recurrence architecture section because recurrence work may exist before an event ID exists.
 
 An action stores concepts including:
 
@@ -3938,6 +3974,8 @@ event_templates
 event_template_ping_roles
 event_template_organiser_defaults
 event_template_reminders
+event_template_recurrences
+event_recurrence_occurrences
 ```
 
 Templates may also reference:
@@ -3952,17 +3990,32 @@ through:
 event_templates.role_request_preset_id
 ```
 
-Generated events may retain:
+Generated events retain template provenance through:
 
 ```text
 events.template_id
+events.template_source_updated_at
 ```
 
-as source provenance.
+Recurring events additionally retain immutable series-slot provenance through:
 
-This is the implemented persistence foundation for P1 templates.
+```text
+event_recurrence_occurrences
+```
 
-It is not evidence that template generation or administrator-facing template commands are already implemented.
+The recurrence slot identity is based on:
+
+```text
+recurrence_id
++
+occurrence_date
+```
+
+and is independent from mutable event start time.
+
+`event_template_recurrences` also stores durable recurrence sweep eligibility, ownership, and latest operational-result state.
+
+This is implemented runtime architecture, not merely schema scaffolding.
 
 ## Reusable role-request presets
 
@@ -4040,7 +4093,7 @@ The latter is now used by one-off template generation so the event, its ordinary
 
 Discord command parsing, Discord entity resolution, immediate publication, and user-facing output remain adapter concerns.
 
-Future recurrence should reuse the same template-generation and event-creation boundaries rather than recreating event persistence in a recurrence-specific path.
+Recurring generation reuses the same template-generation and event-creation boundaries rather than recreating event persistence in a recurrence-specific path.
 
 ---
 
@@ -4276,7 +4329,7 @@ Generation atomically creates ordinary event-owned state using the existing even
 
 The `/template` surface supports source creation, inspection, lifecycle, editing, child-source administration and one-off generation.
 
-Recurrence remains deliberately separate and is the next major P1 architecture area.
+Recurrence remains deliberately separate from the reusable template source aggregate and is implemented through its own series, occurrence-provenance, bounded-generation, and durable-sweep boundaries.
 
 ---
 
@@ -4377,7 +4430,7 @@ Provenance is useful for:
 - administrator inspection
 - debugging
 - reporting
-- future recurrence identity
+- identifying the reusable source template for one-off and recurring generated events
 - tracing how an event was generated
 
 `template_id` is **not** a live runtime configuration relationship.
@@ -4436,7 +4489,7 @@ before calling the generation service.
 
 This parser rejects malformed, impossible and daylight-saving-ambiguous local times.
 
-Future recurrence remains responsible for producing the same kind of absolute occurrence instant while preserving intended local wall-clock semantics.
+Recurring generation follows the same wall-clock boundary: each recurrence-local calendar date is combined with the template timezone and local start time, then resolved to an absolute occurrence instant before ordinary template generation proceeds.
 
 The normal template duration default is:
 
@@ -4939,128 +4992,452 @@ The one-off administration, editing and Discord generation layers have since bee
 
 ---
 
-# Planned Recurrence
+# P1 Recurrence Architecture
 
-Recurring event generation comes after one-off template generation is stable.
+Recurring generation extends the established template-generation model.
 
-The intended high-level architecture is:
+The implemented high-level architecture is:
 
 ```text
-template
-    |
-    +---- recurrence definition
-              |
-              v
-       bounded generator
-              |
-              v
-       ordinary event occurrences
+event template
+      |
+      +---- recurrence source
+      |
+      v
+bounded local-calendar horizon
+      |
+      v
+per-slot recurring generator
+      |
+      v
+ordinary event occurrence
 ```
 
-Recurrence must generate ordinary events.
+Recurrence does not create a separate runtime event type.
 
-It must not create a parallel runtime event type.
+Once generated, a recurring occurrence is an ordinary event snapshot.
 
 ---
 
 # Recurrence Representation
 
-The current intended direction is an RFC 5545-compatible recurrence-rule representation.
+Recurring source state is stored in:
 
-A mature recurrence library should be evaluated rather than implementing calendar recurrence rules manually.
+```text
+event_template_recurrences
+```
 
-The recurrence rule describes future schedule intent.
+P1 allows one recurrence series per template.
 
-Generated events remain normal persistent events.
+The rule uses a constrained RFC 5545-compatible representation.
+
+Current supported rule components are:
+
+```text
+FREQ
+INTERVAL
+BYDAY
+BYMONTHDAY
+BYMONTH
+WKST
+```
+
+Supported frequencies are:
+
+```text
+DAILY
+WEEKLY
+MONTHLY
+YEARLY
+```
+
+The recurrence rule represents calendar-date intent only.
+
+Clock time and timezone remain template source fields:
+
+```text
+event_templates.timezone
+event_templates.local_start_time
+```
+
+This separation means a recurring event intended for:
+
+```text
+20:00 Europe/London
+```
+
+continues to mean 20:00 London local time across daylight-saving changes rather than being implemented as repeated fixed UTC duration arithmetic.
+
+Administrator-facing recurrence commands expose the simpler frequency/interval/start-date model while retaining the canonical stored rule internally.
 
 ---
 
 # Rolling Generation Horizon
 
-Recurring events should be generated using a rolling future horizon rather than materialising an unlimited series.
-
-A design target of roughly:
+Automatic recurrence uses an exact horizon of:
 
 ```text
-21 days
+10 template-local calendar days
 ```
 
-has been discussed.
+The current local date is included:
 
-That is a candidate rather than a fixed invariant.
+```text
+today
+through
+today + 9
+```
 
-The final value may remain configurable or otherwise revisitable.
+The horizon is calculated using the template timezone rather than the host or UTC calendar date.
 
-A rolling horizon helps:
+Ten days gives the currently permitted seven-day publication/reminder/role-request lead times three days of materialisation headroom.
 
-- avoid excessive speculative event rows
-- reduce unnecessary scheduled actions
-- make template edits easier to reason about
-- keep future cancellation manageable
-- separate generated occurrences from not-yet-generated occurrences
+The horizon captures one logical current time for the sweep.
+
+Each occurrence is still generated in its own transaction.
+
+This keeps recurrence work bounded and prevents an unlimited future series from being materialised.
 
 ---
 
 # Immutable Recurrence Occurrence Identity
 
-A recurring occurrence needs immutable series identity separate from its mutable event start time.
+Recurring occurrences have immutable schedule identity separate from mutable event time.
+
+The provenance table is:
+
+```text
+event_recurrence_occurrences
+```
+
+with logical identity:
+
+```text
+recurrence_id
++
+occurrence_date
+```
+
+`occurrence_date` represents the original recurrence-local calendar slot.
 
 Do not use:
 
 ```text
-events.startsAt
+events.starts_at
 ```
 
-as the sole occurrence key.
+as recurrence identity.
 
-Otherwise:
+A generated event can therefore be moved without making its original slot appear absent.
+
+Conceptually:
 
 ```text
-generate Monday occurrence
+generate Monday slot
+        |
+        v
+event linked to Monday occurrence_date
         |
         v
 administrator moves event to Tuesday
         |
         v
-generator checks Monday slot
+Monday provenance still exists
         |
         v
-Monday appears missing
-        |
-        v
-duplicate occurrence created
+later sweep does not duplicate it
 ```
 
-The occurrence therefore needs identity derived from its original recurrence slot or another immutable series key.
+The occurrence table also maintains unique linkage to the generated event.
 
-Moving the generated event must not change that identity.
+---
 
-Generation must also be idempotent and concurrency-safe.
+# Per-Occurrence Generation
+
+Per-slot generation is implemented in:
+
+```text
+src/templates/event-template-recurrence-generation-service.ts
+```
+
+through:
+
+```text
+generateRecurringOccurrence(...)
+```
+
+The authoritative lock order is:
+
+```text
+event_templates
+    FOR SHARE
+        |
+        v
+event_template_recurrences
+    FOR UPDATE
+```
+
+This preserves the established template-first hierarchy and avoids introducing a recurrence-first lock inversion.
+
+While holding authoritative source state, the service re-enumerates the requested occurrence date to prove that it still belongs to the current recurrence rule.
+
+It then calls the ordinary template-generation transaction boundary.
+
+Event creation and occurrence provenance are committed atomically.
+
+The occurrence uniqueness constraint is the final duplicate-prevention boundary.
+
+---
+
+# Recurrence Horizon Service
+
+Rolling generation is implemented in:
+
+```text
+src/templates/event-template-recurrence-horizon-service.ts
+```
+
+The horizon service:
+
+1. validates template and recurrence lifecycle
+2. validates local timing and timezone state
+3. calculates the exact ten-day template-local date window
+4. enumerates matching recurrence slots
+5. generates each slot sequentially through the per-occurrence boundary
+6. classifies generated, already-generated, skipped, and failed results
+
+Expected source changes or same-day stale slots do not require aborting unrelated future occurrence work.
+
+Repeated horizon execution is idempotent.
+
+---
+
+# Recurring Publication Semantics
+
+Automatic recurrence supports:
+
+```text
+Manual
+Scheduled
+```
+
+publication modes.
+
+Manual recurrence creates ordinary unpublished events.
+
+Scheduled recurrence creates the same ordinary durable:
+
+```text
+publish_event
+```
+
+action used by non-recurring scheduled events.
+
+Automatic recurrence rejects:
+
+```text
+Immediate
+```
+
+publication.
+
+The rejection applies when:
+
+```text
+creating an active recurrence on an Immediate template
+
+activating recurrence while template publication is Immediate
+
+changing an active recurring template to Immediate
+```
+
+An inactive recurrence may coexist with an Immediate template.
+
+It cannot be reactivated until the template returns to Manual or Scheduled publication.
+
+This rule avoids creating a recurrence-specific immediate-publication side-effect path.
+
+---
+
+# Durable Recurrence Sweeping
+
+Pre-event recurrence sweeping is not represented through:
+
+```text
+scheduled_actions
+```
+
+because those rows are event-owned and require:
+
+```text
+event_id
+```
+
+A recurrence sweep may exist before any corresponding event exists.
+
+Durable sweep state therefore lives directly on:
+
+```text
+event_template_recurrences
+```
+
+Representative fields are:
+
+```text
+next_sweep_at
+sweep_claim_token
+last_sweep_started_at
+last_sweep_completed_at
+last_sweep_outcome
+last_sweep_diagnostic
+```
+
+The durable sweep service is:
+
+```text
+src/templates/event-template-recurrence-sweep-service.ts
+```
+
+The process-local polling adapter is:
+
+```text
+src/scheduler/recurrence-scheduler.ts
+```
+
+---
+
+# Recurrence Sweep Claiming
+
+Discovery is not ownership.
+
+Several workers may observe the same due recurrence.
+
+Ownership is established only by a conditional PostgreSQL update which:
+
+```text
+moves next_sweep_at forward
+writes a unique sweep_claim_token
+records last_sweep_started_at
+```
+
+A competing worker which loses that conditional update performs no recurrence work for the candidate.
+
+This preserves multi-worker safety without taking a recurrence-first row lock.
+
+The currently implemented policy is:
+
+```text
+15-second process-local discovery polling
+5-minute durable sweep cadence
+15-minute stale-claim threshold
+maximum 10 claimed recurrences per run
+```
+
+These are operational policy values rather than recurrence identity.
+
+---
+
+# Stale Sweep Recovery and Fencing
+
+A process may disappear after claiming a recurrence.
+
+Claims older than the stale threshold may therefore be recovered.
+
+Individual occurrence generation remains idempotent, so recovering a sweep cannot create duplicate recurrence slots.
+
+Completion is fenced by:
+
+```text
+recurrence id
++
+exact sweep_claim_token
+```
+
+If an administrator edits/deactivates the recurrence or a newer worker recovers the claim, an older worker cannot overwrite the newer operational state.
+
+---
+
+# Recurrence Lifecycle and Source Mutation
+
+Template lifecycle and recurrence lifecycle are distinct.
+
+Automatic sweeping requires both the template and recurrence to be active.
+
+Deactivating recurrence means:
+
+```text
+stop future automatic materialisation
+```
+
+It does not cancel already-generated events.
+
+Editing recurrence source state:
+
+```text
+updates future schedule intent
+makes the series immediately sweepable
+clears superseded operational result state
+invalidates an older claim
+```
+
+Reactivation similarly makes the series immediately due for another sweep.
+
+Already-generated events remain independent snapshots.
+
+---
+
+# Recurrence Operational Observability
+
+The latest completed sweep records one of:
+
+```text
+success
+partial_failure
+failure
+skipped
+```
+
+plus an optional diagnostic.
+
+One bad recurrence does not abort processing of unrelated due series.
+
+Administrator inspection surfaces this state through:
+
+```text
+/template recurrence-list
+/template recurrence-show
+```
+
+The claim token itself remains internal ownership state and is not exposed as administrator configuration.
 
 ---
 
 # Independent Recurring Occurrences
 
-Once generated, a recurring occurrence should behave exactly like another generated template event.
+Once generated, a recurring occurrence behaves like any other generated template event.
 
-Administrators should be able to:
+Administrators may independently:
 
 - change its time
 - change its description
 - change organisers
 - change reminders
 - change role-request configuration
-- publish it manually where allowed
-- cancel it independently
+- publish it where allowed
+- cancel it
 
 without rewriting:
 
 - the template
 - recurrence definition
 - earlier occurrences
-- later generated occurrences
+- neighbouring generated occurrences
 
-This extends the same snapshot philosophy already proven by reusable role-request presets.
+Cancellation also does not remove immutable recurrence-slot provenance.
+
+A cancelled event therefore remains the generated occurrence for that original slot rather than being recreated by a later sweep.
+
+This extends the same snapshot philosophy used by reusable role-request presets and one-off template generation.
 
 ---
 
@@ -5232,14 +5609,26 @@ The following invariants are particularly important.
 - Templates are reusable source configuration.
 - Generated events become ordinary event-owned runtime state.
 - Existing generated events do not track later template edits by default.
-- Template organiser defaults become ordinary dormant organiser assignments.
+- Exact template-source revision provenance is stored when known.
+- Template organiser defaults become ordinary dormant organiser assignments when organiser functionality is enabled.
+- Organiser functionality being disabled must not prevent template creation or generation.
 - Template reminders become ordinary event reminders.
-- Template role requests must reuse the established role-request preset/snapshot architecture.
-- P1.1 established the current template source schema through `event_templates` and its reusable child collections.
-- A template may reference zero or one reusable role-request preset, which must snapshot into ordinary event-owned state during generation.
-- Template organiser defaults are optional and must not prevent generation when guild organiser functionality is disabled.
-- Recurring occurrences need immutable series identity separate from mutable event start time.
-- Recurrence generation must be idempotent and bounded.
+- Template role requests reuse the established reusable-preset snapshot architecture.
+- One-off generation may use Manual, Scheduled, or Immediate publication.
+- Automatic recurrence supports Manual and Scheduled publication only.
+- P1 supports one recurrence series per template.
+- Template lifecycle and recurrence lifecycle are independent.
+- Recurrence uses template-local calendar semantics rather than repeated fixed UTC durations.
+- The automatic generation horizon is exactly ten template-local calendar days.
+- Recurring occurrence identity is `(recurrence_id, occurrence_date)`, not mutable event start time.
+- Repeated or concurrent recurrence generation must be idempotent.
+- Moving, editing, publishing, or cancelling a generated occurrence does not erase its original recurrence identity.
+- Disabling recurrence does not cancel existing generated events.
+- Editing recurrence affects not-yet-generated schedule intent rather than rewriting existing events.
+- Pre-event recurrence sweep ownership is durable PostgreSQL state on the recurrence row.
+- Runtime polling is discovery only and must not become authoritative recurrence state.
+- Sweep completion is fenced by the exact durable claim token.
+- Stale recurrence claims are recoverable.
 
 ## Scheduler
 
@@ -5263,42 +5652,36 @@ The following invariants are particularly important.
 
 # Development Direction
 
-The foundational platform, P1.1 template schema reconciliation, transaction-aware generation services, and atomic one-off template generation are complete.
+The foundational platform and the main P1 template/recurrence architecture are implemented.
 
-The current architectural sequence is:
+The completed architectural sequence is:
 
 ```text
 P0 foundation and reliability
         |
-        | complete
         v
 P1.1 template schema reconciliation
         |
-        | complete
         v
-transaction-aware generation boundaries
+transaction-aware reusable generation boundaries
         |
-        | complete
         v
 one-off template generation
         |
-        | complete
         v
-template administration / lifecycle services
+template administration and editing
         |
         v
-template editing and Discord administration
+immutable recurrence identity
         |
         v
-recurring event generation
+bounded recurring generation
         |
         v
-later P2 / P3 product work
+durable automatic recurrence sweeping
 ```
 
-The immediate architecture task is the reusable template administration service layer.
-
-Template mutation must preserve the established source-lock contract:
+The template source-lock contract remains:
 
 ```text
 generation
@@ -5308,37 +5691,36 @@ template mutation
     -> template parent FOR UPDATE
 ```
 
-A mutation that changes child reusable state must first lock the owning template parent.
-
-This ensures generation observes either:
+Recurrence generation extends this ordering:
 
 ```text
-complete old template graph
+template
+    -> recurrence
 ```
 
-or:
+and must not introduce a recurrence-first lock inversion.
 
-```text
-complete new template graph
-```
+Discord commands remain adapters over reusable services rather than becoming persistence or domain boundaries.
 
-never a partial edit.
-
-Discord commands should remain adapters over these services rather than becoming the template domain boundary.
-
-Template development must continue preserving:
+Future work must continue preserving:
 
 - PostgreSQL authority
 - guild ownership
 - snapshot independence
 - event creation semantics
 - organiser feature controls
-- reminder scheduling
+- reminder publication safety
 - role-request preset guarantees
 - durable scheduler behaviour
+- recurrence occurrence identity
+- recurrence claim fencing
 - deterministic concurrency testing
 
-Recurrence remains subsequent work after administrator-usable one-off templates are established.
+The remaining P1 product areas are tracked in `ROADMAP.md`.
+
+The next substantial candidate is confirmed-organiser unavailability/replacement, followed by remaining server-level feature controls as priorities permit.
+
+A non-mutating template preview remains an optional administrator UX improvement.
 
 ---
 

@@ -1,6 +1,6 @@
 # Testing Guide
 
-**Last reconciled:** 24 September 2026
+**Last reconciled:** 25 September 2026
 
 ## Purpose
 
@@ -3050,6 +3050,9 @@ Useful candidates include:
 - organiser safety deadline
 - role-request group opening
 - role-request group closing
+- automatic recurrence materialisation
+
+For recurrence, the meaningful assertion is that due work is rediscovered from durable `next_sweep_at` / claim state after restart rather than depending on the old process-local polling timer.
 
 The purpose is to confirm that important future work is database-backed rather than tied to one process lifetime.
 
@@ -3125,6 +3128,16 @@ After a substantial deployment, choose the relevant subset of this checklist.
 - [ ] Immediate template occurrence generation publishes after generation
 - [ ] Occurrence-specific time override does not edit the source template
 - [ ] Generated event snapshots contain expected reminders/organisers/role requests
+- [ ] Recurrence can be created and inspected
+- [ ] Automatic recurrence materialises the expected bounded future slots
+- [ ] Repeated recurrence sweeping does not create duplicate occurrences
+- [ ] Recurrence deactivation preserves existing generated events
+- [ ] Recurrence editing changes future source intent without rewriting existing occurrences
+- [ ] Inactive recurrence may coexist with Immediate publication
+- [ ] Recurrence activation against Immediate publication is rejected
+- [ ] `/template recurrence-show` exposes automatic sweep health
+- [ ] Generated recurrence provenance remains stable after event edits
+- [ ] Both event and recurrence schedulers stop cleanly during shutdown
 - [ ] Reminder scheduling works
 - [ ] Immediate announcement works
 - [ ] Actual attendance can be recorded
@@ -3160,6 +3173,7 @@ npm run test:integration
 npm run test:coverage
 npm run typecheck
 npm run typecheck:test
+npm run build
 ```
 
 Then:
@@ -3167,6 +3181,10 @@ Then:
 ```bash
 git diff --check
 ```
+
+`npm run build` is part of the normal pre-PR gate.
+
+TypeScript typechecking does not by itself prove that third-party module exports will load correctly under the production Node ESM runtime.
 
 ---
 
@@ -3443,6 +3461,24 @@ The suite already contains substantial coverage in these areas and future change
 - preset no-op semantics
 - preset snapshot independence
 - preset application/edit concurrency
+- template source-lock generation concurrency
+- template source-revision preparation race
+- exact template-source provenance
+- reminder deferral until event publication
+- recurrence-rule normalisation and bounded enumeration
+- recurrence daylight-saving calendar behaviour
+- immutable recurrence occurrence identity
+- concurrent recurrence generation
+- repeated-horizon idempotency
+- recurrence lifecycle independence
+- recurrence source-edit independence
+- ten-day template-local recurrence horizon
+- durable recurrence sweep claims
+- stale recurrence claim recovery
+- recurrence sweep failure isolation
+- recurrence scheduler overlap prevention
+- recurrence scheduler shutdown draining
+- real Node ESM loading of the recurrence library
 
 This list is representative rather than an exhaustive test catalogue.
 
@@ -3811,7 +3847,7 @@ template_changed
 no event created
 ```
 
-Recurrence will require additional duplicate/idempotency concurrency coverage once occurrence identity exists.
+Recurring generation extends this with immutable occurrence identity and conditional durable sweep claims, covered by the recurrence integration suites described below.
 
 ## Discord adapters
 
@@ -3859,39 +3895,164 @@ Unit coverage verifies:
 - nonexistent daylight-saving local times
 - ambiguous daylight-saving overlap times
 
-Future recurrence must build on the same wall-clock correctness requirements.
+Recurring generation now builds on the same wall-clock principle by treating the recurrence as local calendar dates and resolving each occurrence through the template timezone/local-time configuration.
 
 ---
 
-# P1 Recurrence Testing Expectations
+# P1 Recurrence Testing Baseline
 
-Recurring generation requires especially strong PostgreSQL-backed and calendar-focused integration coverage.
+Recurring generation is implemented.
 
-Test:
+Its permanent verification model spans:
 
-- recurrence-rule parsing
-- timezone interpretation
-- daylight-saving transitions
-- ambiguous local times
-- invalid local times
-- rolling generation horizon
-- no generation outside the intended horizon
-- idempotent repeated generation
-- concurrent generators
-- immutable occurrence identity
-- moved occurrence not regenerated
-- edited occurrence not duplicated
-- cancelled occurrence not recreated unintentionally
-- template deactivation
-- recurrence deactivation
-- recurrence-rule edit
-- already-generated event independence
-- future not-yet-generated occurrences following updated template state
-- bounded scheduled-action creation
-- restart-safe generation
-- retry-safe generation
+```text
+rule parsing
+calendar enumeration
+PostgreSQL schema constraints
+recurrence administration
+per-slot generation
+immutable provenance
+bounded horizon generation
+concurrent/idempotent behaviour
+durable sweep claims
+stale-claim recovery
+runtime scheduler lifecycle
+Discord command adapters
+real Node module loading
+manual Discord smoke testing
+```
 
-The critical identity regression is:
+PostgreSQL-backed tests remain authoritative for persistence, locking, claim ownership, and duplicate prevention.
+
+---
+
+## Recurrence-rule tests
+
+Unit coverage lives in:
+
+```text
+tests/unit/templates/event-recurrence-rule.test.ts
+```
+
+It covers behaviour including:
+
+- canonical rule normalisation
+- supported frequencies
+- supported rule components
+- unsupported time/count components
+- exact recurrence-local dates
+- weekly interval arithmetic
+- daylight-saving calendar semantics
+- bounded enumeration
+- invalid/reversed ranges
+
+Recurrence rules are intentionally calendar-date configuration.
+
+They do not contain the template's event timezone or local clock time.
+
+---
+
+## Runtime module compatibility
+
+Manual `npm run dev` testing exposed a Node ESM interoperability regression which ordinary Vitest execution and TypeScript checking did not expose.
+
+Permanent coverage lives in:
+
+```text
+tests/unit/templates/event-recurrence-runtime.test.ts
+```
+
+The test launches the recurrence module through the actual Node executable with the `tsx` loader and proves that rule normalisation works through that runtime path.
+
+This protects against reintroducing unsafe named-import assumptions for the CommonJS `rrule` package.
+
+---
+
+## Recurrence schema
+
+Direct PostgreSQL-backed schema coverage lives in:
+
+```text
+tests/integration/templates/event-recurrence-schema.test.ts
+```
+
+It verifies recurrence source and occurrence-provenance constraints plus durable sweep state.
+
+Important database guarantees include:
+
+```text
+one recurrence series per template
+
+(recurring series, occurrence date)
+    -> one logical generated slot
+
+event_id
+    -> unique recurrence occurrence linkage
+
+validated sweep outcome values
+
+durable next_sweep_at state
+```
+
+PostgreSQL identifier names must continue respecting PostgreSQL's 63-byte identifier limit.
+
+---
+
+## Recurrence administration
+
+Service coverage lives in:
+
+```text
+tests/integration/templates/event-template-recurrence-service.test.ts
+```
+
+Relevant behaviour includes:
+
+- guild ownership
+- one recurrence per template
+- canonical rule/date normalisation
+- required reusable local start time
+- Immediate-publication rejection
+- reversible recurrence lifecycle
+- recurrence lifecycle independence from template lifecycle
+- reactivation validation
+- recurrence source editing without changing recurrence identity
+- source edits becoming immediately sweepable
+- source edits superseding stale sweep state
+- reactivation becoming immediately sweepable
+
+Discord adapter coverage lives in:
+
+```text
+tests/unit/commands/template.test.ts
+```
+
+The command suite verifies the simplified administrator recurrence model, validation, response formatting, lifecycle operations, and automatic-materialisation health presentation.
+
+---
+
+## Per-occurrence generation
+
+PostgreSQL-backed coverage lives in:
+
+```text
+tests/integration/templates/event-template-recurrence-generation-service.test.ts
+```
+
+The service must preserve:
+
+```text
+template-first lock order
+recurrence membership revalidation
+atomic event + provenance creation
+immutable occurrence identity
+idempotent repeat generation
+concurrent duplicate prevention
+guild ownership
+source lifecycle validation
+```
+
+The critical identity invariant is:
 
 ```text
 original recurrence slot
@@ -3900,19 +4061,146 @@ original recurrence slot
 occurrence generated
         |
         v
-administrator moves event
+event time later changes
         |
         v
-generator runs again
+original slot provenance remains
         |
         v
-same original slot recognised
-        |
-        v
-no duplicate
+same recurrence slot is not generated again
 ```
 
-Do not use mutable `events.startsAt` as the only generated-occurrence identity.
+Mutable `events.startsAt` must never become the sole recurrence identity.
+
+---
+
+## Rolling horizon
+
+Coverage lives in:
+
+```text
+tests/integration/templates/event-template-recurrence-horizon-service.test.ts
+```
+
+The current horizon must remain exactly:
+
+```text
+10 template-local calendar days
+```
+
+Tests protect:
+
+- template-local current date rather than UTC date
+- exact ten-day bounds
+- repeated-horizon idempotency
+- same-day stale occurrence handling
+- later valid slot generation
+- inactive recurrence no-op behaviour
+- defensive persisted-Immediate rejection
+- expected source-change classification
+
+If the horizon policy intentionally changes later, update both the durable decision/documentation and the exact regression.
+
+---
+
+## Durable recurrence sweeping
+
+Coverage lives in:
+
+```text
+tests/integration/templates/event-template-recurrence-sweep-service.test.ts
+```
+
+The sweep suite protects:
+
+- conditional durable claim ownership
+- two workers discovering the same recurrence but only one claiming it
+- ordinary occurrence idempotency beneath stale recovery
+- one bad recurrence not blocking another
+- persisted failure diagnostics
+- disabled guild exclusion
+- fresh claims not being stolen
+- stale claims becoming recoverable
+- fenced completion state
+
+Do not weaken these into process-local mutex tests.
+
+The PostgreSQL conditional update is the multi-worker ownership boundary.
+
+---
+
+## Runtime recurrence scheduler
+
+Unit coverage lives in:
+
+```text
+tests/unit/scheduler/recurrence-scheduler.test.ts
+```
+
+It verifies:
+
+- immediate startup polling
+- duplicate `start` calls do not create duplicate timers
+- local recurrence ticks do not overlap
+- one failed poll does not terminate later polling
+- recorded recurrence failures are surfaced operationally
+- shutdown waits for an in-flight sweep before shared resources close
+
+The timer itself is intentionally not authoritative state.
+
+---
+
+## Publication interaction
+
+Recurring events use the same ordinary event publication and reminder architecture as one-off events.
+
+Relevant integration coverage includes:
+
+```text
+tests/integration/events/event-publication.test.ts
+tests/integration/scheduler/event-scheduler.test.ts
+tests/integration/scheduler/scheduler-retry.test.ts
+```
+
+Particular attention belongs to long-lived unpublished generated events.
+
+A due reminder must not leak publicly merely because its event already exists.
+
+Publication wakes still-valid due reminder work through authoritative database state.
+
+---
+
+## Manual Discord recurrence smoke test
+
+The implemented recurrence workflow has been exercised through the real development Discord environment.
+
+The smoke path verifies:
+
+```text
+/template recurrence-create
+/template recurrence-list
+/template recurrence-show
+/template recurrence-edit
+/template recurrence-set-active
+/template show-generated
+```
+
+The established manual scenario also verifies:
+
+- expected automatic occurrence dates
+- Manual recurring events remain unpublished
+- repeated sweeps do not duplicate slots
+- deactivation preserves generated events
+- recurrence-source changes preserve older generated occurrence identity
+- inactive recurrence can coexist with Immediate publication
+- activation while Immediate is rejected
+- returning to Manual allows reactivation
+- edited recurrence source generates future not-yet-created slots
+- template revision provenance remains inspectable
+- template deactivation pauses automatic materialisation
+- event and recurrence scheduler shutdown drains cleanly
+
+Manual testing supplements rather than replaces the permanent PostgreSQL and unit regressions.
 
 ---
 
@@ -3934,6 +4222,8 @@ Combined coverage run completes
 Production typecheck is green
 
 Test typecheck is green
+
+Production build is green
 
 Relevant manual Discord smoke test is complete
 

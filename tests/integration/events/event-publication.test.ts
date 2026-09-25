@@ -21,6 +21,7 @@ vi.mock("../../../src/events/organiser-notification.js", () => ({
 
 import { pool as applicationPool } from "../../../src/db/client.js";
 import { publishStoredEvent } from "../../../src/events/event-publication.js";
+import { buildReminderActionKey } from "../../../src/reminders/reminder-scheduling.js";
 import {
   createIntegrationPool,
   resetIntegrationDatabase,
@@ -522,6 +523,261 @@ describe("event publication organiser feature", () => {
     const description = sentPayload?.embeds?.[0]?.toJSON().description ?? "";
 
     expect(description).not.toContain(`<@${ORGANISER_USER_ID}>`);
+  });
+
+  it("resumes due deferred reminders when the event publishes without pulling future reminders forward", async () => {
+    // Arrange
+    const fixture = await createPublicationFixture(pool, {
+      organisersEnabled: false,
+
+      signupsEnabled: false,
+
+      startsInMinutes: 120,
+    });
+
+    /*
+     * The first reminder was due one hour before publication but its event
+     * start is still two hours away.
+     *
+     * The second reminder is not due until thirty minutes before event start.
+     */
+    const dueReminderDueAt = new Date(
+      fixture.startsAt.getTime() - 180 * 60_000,
+    );
+
+    const futureReminderDueAt = new Date(
+      fixture.startsAt.getTime() - 30 * 60_000,
+    );
+
+    expect(dueReminderDueAt.getTime()).toBeLessThan(Date.now());
+
+    expect(futureReminderDueAt.getTime()).toBeGreaterThan(Date.now());
+
+    const reminderResult = await pool.query<{
+      id: number;
+
+      message: string;
+    }>(
+      `
+        INSERT INTO "event_reminders" (
+          "event_id",
+          "timing_reference",
+          "minutes_before",
+          "message",
+          "channel_id",
+          "ping_event_roles",
+          "enabled",
+          "created_by_user_id"
+        )
+        VALUES
+          (
+            $1,
+            'event_start',
+            180,
+            'Deferred reminder',
+            $2,
+            false,
+            true,
+            $3
+          ),
+          (
+            $1,
+            'event_start',
+            30,
+            'Future reminder',
+            $2,
+            false,
+            true,
+            $3
+          )
+        RETURNING
+          "id",
+          "message"
+      `,
+      [fixture.eventId, CHANNEL_ID, ADMIN_USER_ID],
+    );
+
+    const dueReminder = reminderResult.rows.find(
+      (reminder) => reminder.message === "Deferred reminder",
+    );
+
+    const futureReminder = reminderResult.rows.find(
+      (reminder) => reminder.message === "Future reminder",
+    );
+
+    if (!dueReminder || !futureReminder) {
+      throw new Error(
+        "Failed to create both reminder-publication test reminders.",
+      );
+    }
+
+    /*
+     * Model a due reminder already claimed by a scheduler worker while the
+     * event was unpublished.
+     *
+     * Publication must be authoritative even if it races that worker.
+     */
+    await pool.query(
+      `
+        INSERT INTO "scheduled_actions" (
+          "event_id",
+          "action_key",
+          "due_at",
+          "status",
+          "attempt_count",
+          "locked_at"
+        )
+        VALUES
+          (
+            $1,
+            $2,
+            $3,
+            'processing',
+            1,
+            NOW()
+          ),
+          (
+            $1,
+            $4,
+            $5,
+            'pending',
+            0,
+            NULL
+          )
+      `,
+      [
+        fixture.eventId,
+
+        buildReminderActionKey(dueReminder.id),
+
+        fixture.startsAt,
+
+        buildReminderActionKey(futureReminder.id),
+
+        futureReminderDueAt,
+      ],
+    );
+
+    const { guild } = createPublicationDiscordGuild();
+
+    // Act
+    const result = await publishStoredEvent(guild, fixture.eventId);
+
+    // Assert
+    expect(result).toMatchObject({
+      ok: true,
+
+      eventId: fixture.eventId,
+    });
+
+    const eventResult = await pool.query<{
+      published_at: Date | null;
+    }>(
+      `
+        SELECT "published_at"
+        FROM "events"
+        WHERE "id" = $1
+      `,
+      [fixture.eventId],
+    );
+
+    const publishedAt = eventResult.rows[0]?.published_at;
+
+    expect(publishedAt).toBeInstanceOf(Date);
+
+    if (!publishedAt) {
+      throw new Error(
+        "The event was not published during the reminder resumption test.",
+      );
+    }
+
+    const actionResult = await pool.query<{
+      action_key: string;
+
+      status: string;
+
+      due_at: Date;
+
+      attempt_count: number;
+
+      locked_at: Date | null;
+
+      completed_at: Date | null;
+
+      last_error: string | null;
+    }>(
+      `
+        SELECT
+          "action_key",
+          "status",
+          "due_at",
+          "attempt_count",
+          "locked_at",
+          "completed_at",
+          "last_error"
+        FROM "scheduled_actions"
+        WHERE
+          "event_id" = $1
+          AND "action_key" IN (
+            $2,
+            $3
+          )
+        ORDER BY "action_key"
+      `,
+      [
+        fixture.eventId,
+
+        buildReminderActionKey(dueReminder.id),
+
+        buildReminderActionKey(futureReminder.id),
+      ],
+    );
+
+    const dueAction = actionResult.rows.find(
+      (action) => action.action_key === buildReminderActionKey(dueReminder.id),
+    );
+
+    const futureAction = actionResult.rows.find(
+      (action) =>
+        action.action_key === buildReminderActionKey(futureReminder.id),
+    );
+
+    expect(dueAction).toEqual({
+      action_key: buildReminderActionKey(dueReminder.id),
+
+      status: "pending",
+
+      due_at: publishedAt,
+
+      attempt_count: 0,
+
+      locked_at: null,
+
+      completed_at: null,
+
+      last_error: null,
+    });
+
+    /*
+     * Publication only releases reminders which were already due.
+     *
+     * A genuinely future reminder must retain its normal schedule.
+     */
+    expect(futureAction).toEqual({
+      action_key: buildReminderActionKey(futureReminder.id),
+
+      status: "pending",
+
+      due_at: futureReminderDueAt,
+
+      attempt_count: 0,
+
+      locked_at: null,
+
+      completed_at: null,
+
+      last_error: null,
+    });
   });
 
   it("resumes a due deferred role-request opening when the event publishes without pulling future groups forward", async () => {

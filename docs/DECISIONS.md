@@ -2941,39 +2941,156 @@ Schema presence must not force the implementation to preserve an older incomplet
 
 ---
 
-## D121 - Recurrence should use a standards-based representation where practical
+## D121 - Recurrence uses an RFC 5545 rule representation behind a constrained domain adapter
 
-**Status: Planned**
+**Status: Current**
 
-The current intended direction is an RFC 5545 compatible recurrence rule representation.
+Recurring series store an RFC 5545-compatible recurrence-rule string.
+
+The implementation uses the `rrule` library for calendar recurrence parsing and bounded occurrence calculation.
+
+The library is not exposed directly as the application's recurrence contract.
+
+P1 accepts a deliberately constrained rule subset:
+
+```text
+FREQ
+INTERVAL
+BYDAY
+BYMONTHDAY
+BYMONTH
+WKST
+```
+
+Supported frequencies are:
+
+```text
+DAILY
+WEEKLY
+MONTHLY
+YEARLY
+```
+
+Clock and timezone components are deliberately excluded.
+
+In particular, P1 recurrence rules do not own:
+
+```text
+DTSTART
+TZID
+BYHOUR
+BYMINUTE
+BYSECOND
+```
+
+The event template remains authoritative for:
+
+```text
+timezone
+normal local start time
+```
+
+The recurrence layer answers:
+
+```text
+Which local calendar dates belong to this series?
+```
+
+A later occurrence-generation layer combines each local date with the template's local start time and timezone to resolve an absolute event start instant.
+
+The initial P1 recurrence-rule adapter also does not yet expose:
+
+```text
+COUNT
+UNTIL
+RDATE
+EXDATE
+EXRULE
+```
+
+Those features may be added deliberately when their product semantics, mutation behaviour, and occurrence-identity effects are defined.
+
+### Bounded enumeration
+
+Recurrence calculation always receives an explicit bounded date window.
+
+The shared recurrence-rule adapter refuses excessively large enumeration windows rather than permitting accidental unlimited materialisation.
+
+The rolling production-generation horizon is a separate policy and may be substantially smaller than the adapter's safety bound.
+
+### Timezone boundary
+
+The recurrence library is used as a calendar-date engine.
+
+Synthetic UTC `Date` values are used internally only to provide stable year/month/day arithmetic to the library.
+
+Those values are not event instants.
+
+Named-timezone conversion remains the responsibility of the existing Luxon-based event date/time boundary.
 
 ### Reason
 
-Recurrence has many edge cases.
+RFC recurrence rules have enough calendar edge cases that using an established implementation is preferable to inventing weekly/monthly arithmetic.
 
-Using a well-established rule model is preferable to inventing an ad hoc collection of weekly/monthly flags.
+At the same time, third-party recurrence libraries have their own date and timezone semantics.
+
+Keeping a constrained adapter between the library and the application preserves the project's clearer domain model:
+
+```text
+recurrence
+    -> local calendar dates
+
+template
+    -> timezone + local time
+
+occurrence preparation
+    -> absolute instant
+
+generation
+    -> ordinary event snapshot
+```
+
+This also keeps the stored representation standards-oriented without making every capability of one dependency an accidental permanent product feature.
 
 ---
 
-## D122 - Recurring events should use a rolling generation horizon
+## D122 - Recurrence should use a bounded rolling generation horizon
 
-**Status: Planned**
+**Status: Superseded by D138**
 
-Do not generate an effectively unlimited future series.
+This decision established the durable requirement that automatic recurrence use a bounded rolling horizon rather than materialising an effectively unlimited future series.
 
-A working design target has been approximately several weeks, with around 21 days discussed as a reasonable initial horizon.
+An early design candidate of approximately:
 
-The exact horizon may remain configurable.
+```text
+21 days
+```
 
-### Reason
+was discussed before the recurrence-generation boundary and administrator-facing lead-time requirements were fully reconciled.
 
-A rolling horizon:
+D138 supersedes that numeric candidate with the implemented P1 policy of exactly:
 
-- avoids excessive speculative rows
-- makes template edits easier to reason about
-- supports future cancellation cleanly
-- limits unnecessary scheduled actions
-- naturally separates generated from not-yet-generated occurrences
+```text
+10 local calendar dates
+```
+
+including:
+
+```text
+today
+through
+today + 9 days
+```
+
+The durable principle retained from this decision is:
+
+```text
+recurring generation
+    -> bounded rolling horizon
+    -> never unlimited future materialisation
+```
+
+The current horizon value, rationale, local-calendar semantics, and reconsideration conditions are defined by D138.
 
 ---
 
@@ -3600,9 +3717,9 @@ Normal template lifecycle therefore favours active/inactive state rather than de
 
 Recurrence is not part of the one-off template source aggregate.
 
-The one-off administrator workflow is now established.
+Recurring generation is implemented as a separate layer which reuses the existing template-generation boundary rather than turning the one-off template aggregate into a runtime series model.
 
-Recurring generation remains a separate P1 layer which must reuse the existing template-generation boundary rather than turning the one-off template aggregate into a runtime series model.
+Generated recurring occurrences therefore become ordinary event snapshots rather than a separate recurring-event runtime type.
 
 ### Reason
 
@@ -3644,7 +3761,7 @@ into an instant itself.
 
 Administrator-driven one-off generation resolves local wall-clock input in the command/application adapter through the shared named-timezone parser.
 
-Future recurrence should likewise resolve recurrence-local wall-clock occurrences before entering the generation persistence boundary.
+Recurring generation follows the same boundary: recurrence supplies the local calendar date, the template supplies timezone and local start time, and the occurrence is resolved to an absolute instant before entering the generation persistence boundary.
 
 ### Source revision
 
@@ -3676,7 +3793,7 @@ Template parent and child mutation services update the parent revision.
 
 ### Reason
 
-Keeping calendar interpretation outside the persistence service gives one-off administration and future recurrence a common event-generation boundary.
+Keeping calendar interpretation outside the core template-generation persistence service gives one-off administration and recurring generation a common event-generation boundary.
 
 The revision guard prevents that separation from allowing:
 
@@ -3689,6 +3806,1008 @@ new template source graph
 to produce one incoherent occurrence.
 
 This preserves the source-snapshot guarantee without teaching the core generator about Discord command input or recurrence-rule syntax.
+
+---
+
+## D136 - Recurrence is a separate series with immutable local-date occurrence identity
+
+**Status: Current**
+
+Recurring scheduling is modelled separately from reusable event-template defaults.
+
+P1 uses:
+
+```text
+event template
+        |
+        | one recurrence series
+        v
+event_template_recurrences
+        |
+        | local calendar occurrence
+        v
+event_recurrence_occurrences
+        |
+        v
+ordinary event
+```
+
+The initial implementation supports at most:
+
+```text
+one recurrence series per template
+```
+
+This is an intentional P1 product boundary rather than a requirement that the model can never support several series later.
+
+The recurrence series stores:
+
+```text
+template identity
+recurrence rule
+local recurrence start date
+active / inactive state
+audit identity / timestamps
+```
+
+The template continues to own:
+
+```text
+timezone
+normal local start time
+event defaults
+publication defaults
+organiser defaults
+reminders
+role-request preset
+ping roles
+```
+
+A recurring occurrence is identified by:
+
+```text
+recurrence_id
++
+occurrence_date
+```
+
+where `occurrence_date` is the original local calendar date represented by that series slot.
+
+This identity is stored separately from:
+
+```text
+events.starts_at
+```
+
+and must not change when an administrator edits the generated event's current start time.
+
+The occurrence mapping also owns a unique event relationship:
+
+```text
+one event
+    -> at most one recurrence occurrence
+```
+
+Generated recurring events remain ordinary events and continue to retain normal:
+
+```text
+events.template_id
+```
+
+template provenance.
+
+### Calendar-date identity
+
+P1 recurrence is date-based.
+
+The recurrence rule determines which local calendar dates belong to the series.
+
+The template's current timezone and normal local start time resolve each not-yet-generated date into an absolute occurrence instant.
+
+This means a change from:
+
+```text
+20:00
+```
+
+to:
+
+```text
+21:00
+```
+
+does not change the identity of an already-generated Monday occurrence.
+
+Likewise, moving that generated event to another date does not make the original recurrence slot appear absent.
+
+### Duplicate prevention
+
+PostgreSQL enforces:
+
+```text
+PRIMARY KEY (
+    recurrence_id,
+    occurrence_date
+)
+```
+
+on generated occurrence provenance.
+
+Repeated or concurrent generation must rely on this durable identity boundary rather than assuming an in-memory check is sufficient.
+
+A cancelled event remains linked to its recurrence slot and therefore must not be recreated merely because it is cancelled.
+
+### Lifecycle
+
+Recurrence has its own active/inactive lifecycle.
+
+Template lifecycle and recurrence lifecycle remain distinct.
+
+Disabling recurrence stops future recurring generation.
+
+It does not cancel or rewrite events already generated from the series.
+
+An inactive template still prevents generation because recurrence continues to use the established template-generation boundary.
+
+### Deletion
+
+Recurrence and generated-occurrence provenance use restrictive deletion relationships.
+
+Normal administration should use lifecycle state rather than deleting recurrence provenance which existing events may depend on.
+
+### Reason
+
+Separating recurrence from the reusable event-template aggregate keeps three concepts distinct:
+
+```text
+template
+    -> what an event normally looks like
+
+recurrence
+    -> which local calendar slots should exist
+
+event
+    -> one authoritative runtime occurrence
+```
+
+Using immutable local-date occurrence provenance prevents event edits from causing duplicate recurring events while preserving the established event snapshot model.
+
+---
+
+## D137 - Recurring occurrence generation atomically couples event snapshot and immutable provenance
+
+**Status: Current**
+
+One recurring occurrence is generated through one authoritative PostgreSQL transaction.
+
+The persistence boundary is:
+
+```text
+lock template source
+        |
+        v
+lock recurrence series
+        |
+        v
+validate requested local calendar slot
+        |
+        v
+check existing occurrence provenance
+        |
+        v
+resolve local date + template local time + timezone
+        |
+        v
+generate ordinary event snapshot
+        |
+        v
+insert event_recurrence_occurrences
+        |
+        v
+commit
+```
+
+The ordinary event and its immutable recurrence provenance must never commit independently.
+
+The authoritative occurrence identity remains:
+
+```text
+recurrence_id
++
+occurrence_date
+```
+
+and is protected by the PostgreSQL primary key on:
+
+```text
+event_recurrence_occurrences
+```
+
+### Lock ordering
+
+Recurring generation uses the same parent-first ordering as recurrence administration:
+
+```text
+event_templates
+        |
+        v
+event_template_recurrences
+```
+
+Generation takes:
+
+```text
+event_templates
+    -> FOR SHARE
+
+event_template_recurrences
+    -> FOR UPDATE
+```
+
+Recurrence mutation takes:
+
+```text
+event_templates
+    -> FOR UPDATE
+
+event_template_recurrences
+    -> FOR UPDATE
+```
+
+This avoids lock-order inversion while allowing unrelated template readers where safe.
+
+The recurrence-row exclusive lock also serialises competing generators for the same series.
+
+After the lock is acquired, a repeated generator observes existing occurrence provenance and returns the already-generated event instead of creating another one.
+
+The database uniqueness rule remains the final correctness boundary even though the service performs the idempotency read first.
+
+### Slot validation
+
+A caller cannot create recurrence provenance for an arbitrary date.
+
+The requested `occurrence_date` is re-evaluated against the locked recurrence rule and recurrence start date before generation.
+
+Only a calendar date belonging to the stored series may proceed.
+
+### Wall-clock resolution
+
+The immutable recurrence slot is a local calendar date.
+
+Generation combines:
+
+```text
+occurrence_date
++
+event_templates.local_start_time
++
+event_templates.timezone
+```
+
+through the shared Luxon-based event date/time parser.
+
+The resulting absolute instant is then supplied to the ordinary template-generation boundary.
+
+Impossible or daylight-saving-ambiguous local times are not guessed.
+
+They return an explicit recurrence-generation failure for that slot.
+
+### Template snapshot reuse
+
+Recurring generation does not implement a second event snapshot mechanism.
+
+It calls the same template-generation domain boundary used by one-off generation.
+
+The template generator therefore exposes a caller-owned transaction variant.
+
+A nested PostgreSQL savepoint protects the generator's late-failure path.
+
+This is necessary because role-request preset application may discover a normal domain failure after event/reminder state has already been inserted.
+
+The savepoint ensures that such partial template-generation state is rolled back before the failure is returned to the surrounding recurrence transaction.
+
+### Individual event independence
+
+Once generation commits:
+
+```text
+recurrence
+    -> immutable slot provenance
+
+event
+    -> independent runtime snapshot
+```
+
+Editing or cancelling the generated event does not alter its recurrence slot.
+
+The slot therefore remains occupied even when:
+
+```text
+events.starts_at
+```
+
+is later moved.
+
+A cancelled or rescheduled event must not be interpreted as a missing recurring occurrence.
+
+### Discord side effects
+
+Discord publication remains outside the recurrence-generation database transaction.
+
+Automatic recurrence does not support templates whose publication mode is:
+
+```text
+immediate
+```
+
+Recurrence materialises future occurrences ahead of their public lifecycle.
+
+Treating materialisation time as "publish immediately" would make the internal rolling-generation horizon visible to administrators and members, potentially publishing several future events at once.
+
+The recurrence service therefore rejects Immediate-publication templates.
+
+Manual administrator-driven `/template generate` remains different.
+
+For a one-off generated occurrence:
+
+```text
+immediate
+```
+
+still means:
+
+```text
+generate now
++
+publish now
+```
+
+through the existing post-commit publication path.
+
+Scheduled recurring events continue to use ordinary durable `publish_event` actions at their configured publication offsets.
+
+Manual recurring events remain unpublished until an administrator explicitly publishes them.
+
+### Reason
+
+A recurring generator may run repeatedly, concurrently, or after process restarts.
+
+If ordinary event creation and recurrence provenance were separate commits, a crash between them could leave:
+
+```text
+event exists
++
+occurrence provenance missing
+```
+
+A later generator would then treat the recurrence slot as absent and create a duplicate event.
+
+Atomic generation removes that failure window.
+
+---
+
+## D138 - Recurring materialisation uses a bounded 10-day local-calendar horizon
+
+**Status: Current**
+
+Recurring events are materialised through a bounded rolling horizon.
+
+The initial P1 horizon contains exactly:
+
+```text
+10 local calendar dates
+```
+
+including the template-local current date:
+
+```text
+today
+through
+today + 9 days
+```
+
+The horizon is calculated in:
+
+```text
+event_templates.timezone
+```
+
+rather than UTC or the application host timezone.
+
+### Why 10 days
+
+Current administrator-facing configuration limits publication, reminders, and role-request opening/closing to at most:
+
+```text
+10,080 minutes
+=
+7 days
+```
+
+before the relevant event reference point.
+
+A 10-day materialisation horizon therefore gives the longest currently-supported lead time three days of generation headroom.
+
+The shorter horizon also reduces the period during which future events have already become independent snapshots and therefore no longer inherit later template edits.
+
+If supported lead-time limits are increased, or if the recurrence sweep cadence changes materially, the horizon must be reconsidered at the same time.
+
+The horizon must not become shorter than work which needs to exist before a generated event.
+
+### Per-occurrence transactions
+
+A complete horizon is not generated inside one large PostgreSQL transaction.
+
+Instead:
+
+```text
+enumerate bounded local dates
+        |
+        +--> generate occurrence A atomically
+        |
+        +--> generate occurrence B atomically
+        |
+        +--> generate occurrence C atomically
+```
+
+Each occurrence continues to use the atomic event-plus-provenance boundary established by D137.
+
+This means failure of one occurrence does not roll back successful sibling occurrences.
+
+Repeated horizon execution is safe because individual occurrence generation is idempotent.
+
+### Consistent clock
+
+One horizon run captures one current instant and passes it through every occurrence-generation call.
+
+This prevents a long-running horizon pass from evaluating neighbouring slots against subtly different definitions of "now".
+
+Normal production callers use the real current instant.
+
+Tests and explicit recovery tooling may inject a deterministic current time.
+
+### Same-day stale slots
+
+The template-local current date is included in the horizon.
+
+This permits a recurrence first enabled earlier on the same day to create an event which is still usable.
+
+If that day's occurrence has already passed, or its signup deadline has already passed, it is classified as a non-retryable skipped slot for that horizon run.
+
+It is not treated as a broken recurrence series.
+
+Future valid slots continue processing.
+
+### Source changes during a horizon run
+
+The horizon first enumerates from one recurrence snapshot.
+
+Each occurrence then revalidates its requested date against the authoritative locked recurrence source before generation.
+
+A concurrent recurrence-rule edit may therefore make one enumerated slot no longer valid.
+
+Such a slot is classified as skipped due to source change.
+
+The next horizon run re-enumerates the new rule and creates any newly-introduced valid slots.
+
+Already-generated occurrences remain independent snapshots.
+
+### Automated creator provenance
+
+Automatic recurrence materialisation has no human actively pressing a command.
+
+`events.created_by_user_id` nevertheless remains non-null.
+
+Generated recurring events therefore retain the recurrence creator's user ID as their source creator provenance.
+
+System-triggered audit records may still use a null audit actor where appropriate.
+
+This avoids inventing a fake Discord user identity while preserving the administrator whose reusable schedule caused the events to exist.
+
+### Immediate publication
+
+Immediate publication is intentionally unsupported for automatic recurrence.
+
+The rolling horizon is an internal materialisation mechanism and must not determine when members first see an event.
+
+Recurring templates must therefore use:
+
+```text
+manual
+```
+
+or:
+
+```text
+scheduled
+```
+
+publication.
+
+For Scheduled publication, materialisation creates the normal durable publication action for the configured offset.
+
+For Manual publication, the occurrence exists privately until an administrator explicitly publishes it.
+
+Immediate publication remains available for one-off event creation and one-off template generation.
+
+### Reason
+
+A rolling horizon provides enough future materialisation for existing publication/reminder/role-request lead times without creating an unbounded number of events.
+
+Using local calendar dates preserves recurrence semantics across timezone and daylight-saving changes.
+
+Using independent idempotent occurrence transactions makes horizon execution safe to repeat after scheduler ticks, process restarts, or partial failures.
+
+---
+
+## D139 - Generated events retain exact template-revision provenance
+
+**Status: Current**
+
+Template-generated events retain both their reusable source identity and the exact source revision used for generation.
+
+The authoritative provenance is:
+
+```text
+events.template_id
++
+events.template_source_updated_at
+```
+
+For a newly-generated event:
+
+```text
+events.template_source_updated_at
+    =
+the locked event_templates.updated_at
+used by generation
+```
+
+This timestamp is part of the generated-event provenance.
+
+It is not live configuration.
+
+### Existing events remain independent
+
+Generation still follows:
+
+```text
+template source
+    |
+    | snapshot
+    v
+ordinary event-owned state
+```
+
+A later template edit changes:
+
+```text
+event_templates.updated_at
+```
+
+but does not rewrite:
+
+```text
+events.template_source_updated_at
+```
+
+or any other generated-event snapshot.
+
+This allows administration to distinguish an event generated from the current reusable definition from one generated before a later template change.
+
+### Historical unknown state
+
+`template_source_updated_at` is nullable deliberately.
+
+A null value may mean:
+
+```text
+non-template event
+```
+
+or:
+
+```text
+template-generated event predating exact revision provenance
+```
+
+For an event which still has a `template_id`, inspection reports a null source revision as:
+
+```text
+Revision unknown
+```
+
+The application must not fabricate historical provenance by comparing or backfilling unrelated creation timestamps.
+
+### Administrator inspection
+
+`/template show-generated` provides the template-to-event inspection boundary.
+
+By default it lists generated events whose current:
+
+```text
+events.starts_at
+```
+
+has not yet passed.
+
+An explicit `include-past:true` option includes historical generated events.
+
+The command reads runtime information from ordinary event-owned state.
+
+Relevant state includes:
+
+```text
+events
+event_recurrence_occurrences
+scheduled_actions[action_key = publish_event]
+```
+
+The current template is read only for:
+
+```text
+guild ownership
+template identity/name
+current revision comparison
+```
+
+It is not used to reconstruct the generated event's runtime configuration.
+
+### Recurrence identity remains separate
+
+For automatically-recurring events:
+
+```text
+event_recurrence_occurrences.occurrence_date
+```
+
+continues to represent the immutable original recurrence calendar slot.
+
+The mutable:
+
+```text
+events.starts_at
+```
+
+represents the event's current scheduled start.
+
+`/template show-generated` may therefore display both without treating them as interchangeable.
+
+### Reason
+
+Template snapshot independence is difficult for administrators to manage if they cannot identify which events already exist or whether those events came from an older source revision.
+
+Exact provenance makes that distinction deterministic without weakening snapshot independence or making events continue following reusable source configuration.
+
+---
+
+## D140 - Public event reminders must respect event publication
+
+**Status: Current**
+
+Persistent event reminders are public-facing event messages.
+
+A reminder becoming due is not permission to expose an event which remains unpublished.
+
+The durable rule is:
+
+```text
+reminder due
++
+event published
+    -> normal reminder execution
+
+reminder due
++
+event unpublished
++
+reference point still future
+    -> defer until publication
+
+reminder due
++
+reference point reached or passed
+    -> mark missed
+```
+
+### Durable deferral
+
+Waiting for publication is expected domain state rather than a Discord delivery failure.
+
+A due reminder for an unpublished event is therefore parked at its useful reference boundary.
+
+The action is reset to:
+
+```text
+status = pending
+attempt_count = 0
+locked_at = NULL
+completed_at = NULL
+last_error = NULL
+```
+
+Waiting must not consume the scheduler's delivery-retry budget.
+
+### Publication wake-up
+
+Successful event publication is an authoritative release point for due reminders.
+
+Inside the same PostgreSQL transaction which records:
+
+```text
+events.published_at
+```
+
+publication wakes reminder actions where:
+
+```text
+normal reminder due time <= publishedAt
+<
+useful reminder reference time
+```
+
+The action becomes freshly pending at the publication time.
+
+Future reminders keep their original schedules.
+
+Reminders whose useful reference point has already passed are not revived.
+
+### Scheduler ownership
+
+Publication may race a reminder worker which already observed the event as unpublished.
+
+Publication may therefore replace both:
+
+```text
+pending
+processing
+```
+
+reminder actions with fresh pending state.
+
+The stale scheduler worker remains fenced by the existing combination of:
+
+```text
+scheduled action ID
++
+status = processing
++
+attempt_count
+```
+
+If publication already released the action, the stale worker cannot re-park or complete that newer state.
+
+### Scope
+
+This rule applies to ordinary persistent:
+
+```text
+event_reminders
+```
+
+including reminders snapshotted from event templates.
+
+It does not turn persistent reminders into template-owned runtime state.
+
+Immediate administrator announcements remain a separate explicit workflow.
+
+### Reason
+
+Administrators may deliberately create and configure an event well before members should see it.
+
+Durable scheduled work must preserve that publication intent rather than leaking the event merely because a reminder timestamp arrived first.
+
+At the same time, publication should release still-useful due reminders promptly rather than losing them or waiting until their final reference boundary.
+
+---
+
+## D141 - Recurrence sweeping is durable series-owned leased work
+
+**Status: Current**
+
+Automatic recurrence must survive:
+
+```text
+process restart
+deployment
+temporary database outage
+multiple bot workers
+partial horizon failure
+```
+
+without treating an in-memory JavaScript timer as authoritative state.
+
+### Recurrence scheduling state belongs to the series
+
+Ordinary:
+
+```text
+scheduled_actions
+```
+
+are event-owned and require:
+
+```text
+event_id
+```
+
+A recurrence sweep exists before the next event exists.
+
+Automatic recurrence scheduling therefore belongs to:
+
+```text
+event_template_recurrences
+```
+
+through durable operational fields including:
+
+```text
+next_sweep_at
+sweep_claim_token
+last_sweep_started_at
+last_sweep_completed_at
+last_sweep_outcome
+last_sweep_diagnostic
+```
+
+The in-process polling interval merely discovers due database state.
+
+It is not itself durable scheduling state.
+
+### Polling and durable cadence are separate
+
+The process polls frequently enough to discover newly-due recurrence work promptly.
+
+Each successful claim advances:
+
+```text
+next_sweep_at
+```
+
+independently of that polling interval.
+
+The current implementation uses approximately:
+
+```text
+15-second local discovery polling
+5-minute durable recurrence sweep cadence
+```
+
+These exact intervals are implementation policy rather than public API.
+
+The invariant is:
+
+```text
+frequent disposable polling
++
+durable database-owned eligibility
+```
+
+### Claim ownership
+
+Discovery is not ownership.
+
+Several workers may read the same due recurrence.
+
+Ownership is established only by a conditional PostgreSQL update which:
+
+```text
+moves next_sweep_at forward
++
+writes a unique sweep_claim_token
++
+records last_sweep_started_at
+```
+
+A competing worker which loses that update performs no recurrence work for that candidate.
+
+This avoids introducing a recurrence-first row-lock order which could conflict with the established:
+
+```text
+template
+    -> recurrence
+```
+
+mutation/generation lock hierarchy.
+
+### Stale recovery
+
+A process may disappear after claiming recurrence work.
+
+Claims therefore have a bounded stale lease.
+
+A later worker may recover recurrence work whose claim has exceeded that lease.
+
+Individual occurrence generation remains idempotent through:
+
+```text
+recurrence_id
++
+occurrence_date
+```
+
+so stale recovery must not create duplicate events.
+
+### Completion fencing
+
+A worker may lose ownership while processing because:
+
+- an administrator edits the recurrence
+- an administrator changes recurrence lifecycle
+- another worker legitimately recovers a stale claim
+
+Sweep completion therefore requires the exact current:
+
+```text
+sweep_claim_token
+```
+
+A stale worker cannot overwrite newer recurrence operational state.
+
+### Source edits and lifecycle changes
+
+A recurrence source edit:
+
+```text
+makes the series immediately sweepable
+clears old operational outcome/diagnostic state
+supersedes an older claim
+```
+
+Deactivation supersedes any existing claim.
+
+Reactivation makes the recurrence immediately eligible again.
+
+Previously-generated events remain unchanged in every case.
+
+### Failure isolation and observability
+
+One recurrence failure must not abort unrelated due recurrence work.
+
+The sweep runner processes claimed series independently.
+
+The latest completed result is persisted as:
+
+```text
+success
+partial_failure
+failure
+skipped
+```
+
+with an optional human-readable diagnostic.
+
+Administrator inspection surfaces this persisted state through recurrence commands.
+
+Console logging remains useful operational presentation, but it is not the sole source of failure history.
+
+### Scheduler lifecycle
+
+The recurrence scheduler:
+
+```text
+runs once immediately at startup
+polls for later due work
+does not overlap local ticks
+stops new polling during shutdown
+waits for an in-flight tick before PostgreSQL is closed
+```
+
+This preserves the same shutdown invariant as the ordinary event scheduler:
+
+```text
+stop new work
+    ->
+drain active work
+    ->
+close shared resources
+```
+
+### Reason
+
+Recurring materialisation is important future work, but it is not attached to an event until generation succeeds.
+
+Giving the recurrence series its own durable lease state preserves restart safety and multi-worker ownership without distorting the event-owned scheduled-action model.
 
 ---
 

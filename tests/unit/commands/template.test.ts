@@ -41,6 +41,22 @@ const generationMocks = vi.hoisted(() => ({
   generateEventFromTemplate: vi.fn(),
 }));
 
+const generatedEventServiceMocks = vi.hoisted(() => ({
+  listGeneratedEventsForTemplate: vi.fn(),
+}));
+
+const recurrenceServiceMocks = vi.hoisted(() => ({
+  createEventTemplateRecurrence: vi.fn(),
+
+  editEventTemplateRecurrence: vi.fn(),
+
+  getEventTemplateRecurrence: vi.fn(),
+
+  listEventTemplateRecurrences: vi.fn(),
+
+  setEventTemplateRecurrenceActive: vi.fn(),
+}));
+
 const publicationMocks = vi.hoisted(() => ({
   publishStoredEvent: vi.fn(),
 }));
@@ -59,6 +75,16 @@ vi.mock(
 vi.mock(
   "../../../src/templates/event-template-generation-service.js",
   () => generationMocks,
+);
+
+vi.mock(
+  "../../../src/templates/event-template-generated-events-service.js",
+  () => generatedEventServiceMocks,
+);
+
+vi.mock(
+  "../../../src/templates/event-template-recurrence-service.js",
+  () => recurrenceServiceMocks,
 );
 
 vi.mock("../../../src/events/event-publication.js", () => publicationMocks);
@@ -131,6 +157,11 @@ describe("/template command", () => {
     expect(definition?.options?.map((option) => option.name)).toEqual([
       "create",
       "generate",
+      "recurrence-create",
+      "recurrence-list",
+      "recurrence-show",
+      "recurrence-edit",
+      "recurrence-set-active",
       "edit",
       "set-ping-roles",
       "set-organisers",
@@ -140,6 +171,7 @@ describe("/template command", () => {
       "reminder-clear",
       "list",
       "show",
+      "show-generated",
       "set-active",
     ]);
 
@@ -197,6 +229,112 @@ describe("/template command", () => {
       "date",
       "time",
     ]);
+
+    const recurrenceCreateDefinition = definition?.options?.find(
+      (option) => option.name === "recurrence-create",
+    );
+
+    expect(recurrenceCreateDefinition).toBeDefined();
+
+    if (
+      !recurrenceCreateDefinition ||
+      !("options" in recurrenceCreateDefinition) ||
+      !recurrenceCreateDefinition.options
+    ) {
+      throw new Error(
+        "Expected /template recurrence-create to be a subcommand with options.",
+      );
+    }
+
+    expect(
+      recurrenceCreateDefinition.options.map((option) => option.name),
+    ).toEqual(["template-id", "frequency", "start-date", "interval"]);
+
+    const recurrenceListDefinition = definition?.options?.find(
+      (option) => option.name === "recurrence-list",
+    );
+
+    expect(recurrenceListDefinition).toBeDefined();
+
+    const recurrenceShowDefinition = definition?.options?.find(
+      (option) => option.name === "recurrence-show",
+    );
+
+    expect(recurrenceShowDefinition).toBeDefined();
+
+    if (
+      !recurrenceShowDefinition ||
+      !("options" in recurrenceShowDefinition) ||
+      !recurrenceShowDefinition.options
+    ) {
+      throw new Error(
+        "Expected /template recurrence-show to be a subcommand with options.",
+      );
+    }
+
+    expect(
+      recurrenceShowDefinition.options.map((option) => option.name),
+    ).toEqual(["template-id"]);
+
+    const recurrenceEditDefinition = definition?.options?.find(
+      (option) => option.name === "recurrence-edit",
+    );
+
+    expect(recurrenceEditDefinition).toBeDefined();
+
+    if (
+      !recurrenceEditDefinition ||
+      !("options" in recurrenceEditDefinition) ||
+      !recurrenceEditDefinition.options
+    ) {
+      throw new Error(
+        "Expected /template recurrence-edit to be a subcommand with options.",
+      );
+    }
+
+    expect(
+      recurrenceEditDefinition.options.map((option) => option.name),
+    ).toEqual(["template-id", "frequency", "start-date", "interval"]);
+
+    const recurrenceSetActiveDefinition = definition?.options?.find(
+      (option) => option.name === "recurrence-set-active",
+    );
+
+    expect(recurrenceSetActiveDefinition).toBeDefined();
+
+    if (
+      !recurrenceSetActiveDefinition ||
+      !("options" in recurrenceSetActiveDefinition) ||
+      !recurrenceSetActiveDefinition.options
+    ) {
+      throw new Error(
+        "Expected /template recurrence-set-active to be a subcommand with options.",
+      );
+    }
+
+    expect(
+      recurrenceSetActiveDefinition.options.map((option) => option.name),
+    ).toEqual(["template-id", "active"]);
+
+    const showGeneratedDefinition = definition?.options?.find(
+      (option) => option.name === "show-generated",
+    );
+
+    expect(showGeneratedDefinition).toBeDefined();
+
+    if (
+      !showGeneratedDefinition ||
+      !("options" in showGeneratedDefinition) ||
+      !showGeneratedDefinition.options
+    ) {
+      throw new Error(
+        "Expected /template show-generated to be a subcommand with options.",
+      );
+    }
+
+    expect(
+      showGeneratedDefinition.options.map((option) => option.name),
+    ).toEqual(["template-id", "include-past"]);
 
     const editDefinition = definition?.options?.find(
       (option) => option.name === "edit",
@@ -602,6 +740,44 @@ describe("/template command", () => {
         targetId: "7",
       }),
     );
+  });
+
+  it("explains why an active recurring template cannot use immediate publication", async () => {
+    templateServiceMocks.editEventTemplate.mockResolvedValue({
+      kind: "invalid_input",
+
+      reason: "active_recurrence_disallows_immediate_publication",
+    });
+
+    const interaction = createInteraction({
+      subcommand: "edit",
+
+      strings: {
+        "publication-mode": "immediate",
+      },
+
+      integers: {
+        "template-id": 7,
+      },
+
+      booleans: {
+        "clear-publish-schedule": true,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    const content = readFirstReplyContent(interaction.editReply);
+
+    expect(content).toContain(
+      "This template has an active recurrence and cannot use Immediate publication.",
+    );
+
+    expect(content).toContain("Recurring occurrences are generated in advance");
+
+    expect(content).toContain("Use Manual or Scheduled publication");
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
   });
 
   it("rejects contradictory template edit clear options before calling the service", async () => {
@@ -1045,6 +1221,600 @@ describe("/template command", () => {
     expect(content).toContain("Event starts soon.");
 
     expect(content).toContain("Generated event publication destination");
+  });
+
+  it("shows generated events with recurrence, publication and source-revision state", async () => {
+    generatedEventServiceMocks.listGeneratedEventsForTemplate.mockResolvedValue(
+      {
+        kind: "found",
+
+        template: {
+          id: 7,
+
+          name: "Sunday Naval",
+
+          updatedAt: new Date("2099-01-04T09:00:00.000Z"),
+        },
+
+        events: [
+          {
+            id: 119,
+
+            name: "Sunday Naval",
+
+            startsAt: new Date("2099-01-06T20:00:00.000Z"),
+
+            status: "open",
+
+            publishedAt: new Date("2099-01-03T20:00:00.000Z"),
+
+            publicationActionStatus: "completed",
+
+            publicationDueAt: new Date("2099-01-03T20:00:00.000Z"),
+
+            recurrenceOccurrenceDate: "2099-01-06",
+
+            templateSourceUpdatedAt: new Date("2099-01-04T09:00:00.000Z"),
+
+            templateRevisionState: "current",
+          },
+
+          {
+            id: 120,
+
+            name: "Sunday Naval",
+
+            startsAt: new Date("2099-01-13T20:00:00.000Z"),
+
+            status: "scheduled",
+
+            publishedAt: null,
+
+            publicationActionStatus: "pending",
+
+            publicationDueAt: new Date("2099-01-10T20:00:00.000Z"),
+
+            recurrenceOccurrenceDate: null,
+
+            templateSourceUpdatedAt: new Date("2098-12-31T09:00:00.000Z"),
+
+            templateRevisionState: "older",
+          },
+        ],
+      },
+    );
+
+    const interaction = createInteraction({
+      subcommand: "show-generated",
+
+      integers: {
+        "template-id": 7,
+      },
+
+      booleans: {
+        "include-past": true,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(
+      generatedEventServiceMocks.listGeneratedEventsForTemplate,
+    ).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      templateId: 7,
+
+      includePast: true,
+    });
+
+    const content = readFirstReplyContent(interaction.editReply);
+
+    expect(content).toContain("## Generated events for Sunday Naval (#7)");
+
+    expect(content).toContain("### Sunday Naval (#119)");
+
+    expect(content).toContain("**Lifecycle:** Open");
+
+    expect(content).toContain("**Generation:** Recurring slot `2099-01-06`");
+
+    expect(content).toContain("**Template snapshot:** Current revision");
+
+    expect(content).toContain("### Sunday Naval (#120)");
+
+    expect(content).toContain("**Publication:** Scheduled for");
+
+    expect(content).toContain("**Generation:** One-off template generation");
+
+    expect(content).toContain("**Template snapshot:** Older revision");
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("defaults generated-event inspection to upcoming events and explains an empty result", async () => {
+    generatedEventServiceMocks.listGeneratedEventsForTemplate.mockResolvedValue(
+      {
+        kind: "found",
+
+        template: {
+          id: 7,
+
+          name: "Sunday Naval",
+
+          updatedAt: new Date("2099-01-04T09:00:00.000Z"),
+        },
+
+        events: [],
+      },
+    );
+
+    const interaction = createInteraction({
+      subcommand: "show-generated",
+
+      integers: {
+        "template-id": 7,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(
+      generatedEventServiceMocks.listGeneratedEventsForTemplate,
+    ).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      templateId: 7,
+
+      includePast: false,
+    });
+
+    const content = readFirstReplyContent(interaction.editReply);
+
+    expect(content).toContain(
+      "No upcoming events generated from this template were found.",
+    );
+
+    expect(content).toContain(
+      "/template show-generated template-id:7 include-past:true",
+    );
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("creates a recurrence from structured frequency and interval options", async () => {
+    recurrenceServiceMocks.createEventTemplateRecurrence.mockResolvedValue({
+      kind: "created",
+
+      recurrence: {
+        id: 41,
+
+        templateId: 7,
+
+        recurrenceRule: "FREQ=WEEKLY;INTERVAL=2",
+
+        startDate: "2026-10-05",
+
+        active: true,
+
+        createdByUserId: ADMIN_USER_ID,
+
+        createdAt: new Date("2026-09-24T20:00:00.000Z"),
+
+        updatedAt: new Date("2026-09-24T20:00:00.000Z"),
+      },
+    });
+
+    const interaction = createInteraction({
+      subcommand: "recurrence-create",
+
+      strings: {
+        frequency: "weekly",
+
+        "start-date": "2026-10-05",
+      },
+
+      integers: {
+        "template-id": 7,
+
+        interval: 2,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(
+      recurrenceServiceMocks.createEventTemplateRecurrence,
+    ).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      templateId: 7,
+
+      recurrenceRule: "FREQ=WEEKLY;INTERVAL=2",
+
+      startDate: "2026-10-05",
+
+      createdByUserId: ADMIN_USER_ID,
+    });
+
+    const content = readFirstReplyContent(interaction.editReply);
+
+    expect(content).toContain("Created recurrence #41");
+
+    expect(content).toContain("Every 2 weeks");
+
+    expect(content).toContain("`2026-10-05`");
+
+    expect(content).toContain("/template show-generated template-id:7");
+
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "event_template.recurrence.create",
+
+        targetType: "event_template",
+
+        targetId: "7",
+      }),
+    );
+  });
+
+  it("lists recurrence series without hiding inactive recurrence or template state", async () => {
+    recurrenceServiceMocks.listEventTemplateRecurrences.mockResolvedValue([
+      {
+        id: 41,
+
+        templateId: 7,
+
+        recurrenceRule: "FREQ=WEEKLY",
+
+        startDate: "2026-10-05",
+
+        active: true,
+
+        nextSweepAt: new Date(),
+
+        lastSweepStartedAt: new Date(),
+
+        lastSweepCompletedAt: new Date(),
+
+        lastSweepOutcome: "failure",
+
+        lastSweepDiagnostic: "invalid_template_timezone",
+
+        createdByUserId: ADMIN_USER_ID,
+
+        createdAt: new Date(),
+
+        updatedAt: new Date(),
+
+        templateName: "Sunday Naval",
+
+        templateTimezone: "Europe/London",
+
+        templateLocalStartTime: "20:00",
+
+        templatePublicationMode: "scheduled",
+
+        templateActive: true,
+      },
+
+      {
+        id: 42,
+
+        templateId: 8,
+
+        recurrenceRule: "FREQ=MONTHLY;INTERVAL=2",
+
+        startDate: "2026-10-12",
+
+        active: false,
+
+        nextSweepAt: new Date(),
+
+        lastSweepStartedAt: null,
+
+        lastSweepCompletedAt: null,
+
+        lastSweepOutcome: null,
+
+        lastSweepDiagnostic: null,
+
+        createdByUserId: ADMIN_USER_ID,
+
+        createdAt: new Date(),
+
+        updatedAt: new Date(),
+
+        templateName: "Monthly Training",
+
+        templateTimezone: "Europe/London",
+
+        templateLocalStartTime: "19:30",
+
+        templatePublicationMode: "manual",
+
+        templateActive: false,
+      },
+    ]);
+
+    const interaction = createInteraction({
+      subcommand: "recurrence-list",
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(
+      recurrenceServiceMocks.listEventTemplateRecurrences,
+    ).toHaveBeenCalledWith(42);
+
+    const content = readFirstReplyContent(interaction.editReply);
+
+    expect(content).toContain("## Template recurrences");
+
+    expect(content).toContain("**Sunday Naval** (#7)");
+
+    expect(content).toContain("Every week");
+
+    expect(content).toContain("last sweep failed");
+
+    expect(content).toContain("**Monthly Training** (#8)");
+
+    expect(content).toContain("Every 2 months");
+
+    expect(content).toContain("recurrence inactive");
+
+    expect(content).toContain("template inactive");
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("shows recurrence source and template context", async () => {
+    recurrenceServiceMocks.getEventTemplateRecurrence.mockResolvedValue({
+      kind: "found",
+
+      recurrence: {
+        id: 41,
+
+        templateId: 7,
+
+        recurrenceRule: "FREQ=WEEKLY",
+
+        startDate: "2026-10-05",
+
+        active: true,
+
+        nextSweepAt: new Date("2099-01-05T12:05:00.000Z"),
+
+        lastSweepStartedAt: new Date("2099-01-05T12:00:00.000Z"),
+
+        lastSweepCompletedAt: new Date("2099-01-05T12:00:03.000Z"),
+
+        lastSweepOutcome: "partial_failure",
+
+        lastSweepDiagnostic: "2099-01-07: invalid_local_occurrence_time",
+
+        createdByUserId: ADMIN_USER_ID,
+
+        createdAt: new Date(),
+
+        updatedAt: new Date(),
+
+        templateName: "Sunday Naval",
+
+        templateTimezone: "Europe/London",
+
+        templateLocalStartTime: "20:00",
+
+        templatePublicationMode: "scheduled",
+
+        templateActive: true,
+      },
+    });
+
+    const interaction = createInteraction({
+      subcommand: "recurrence-show",
+
+      integers: {
+        "template-id": 7,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(
+      recurrenceServiceMocks.getEventTemplateRecurrence,
+    ).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      templateId: 7,
+    });
+
+    const content = readFirstReplyContent(interaction.editReply);
+
+    expect(content).toContain("## Recurrence for Sunday Naval (#7)");
+
+    expect(content).toContain("**Recurrence ID:** #41");
+
+    expect(content).toContain("**Pattern:** Every week");
+
+    expect(content).toContain("**Stored rule:** `FREQ=WEEKLY`");
+
+    expect(content).toContain("**Series anchor date:** `2026-10-05`");
+
+    expect(content).toContain("**Local start:** 20:00 Europe/London");
+
+    expect(content).toContain("**Publication:** Scheduled");
+
+    expect(content).toContain("### Automatic materialisation");
+
+    expect(content).toContain("**Scheduler:** Active");
+
+    expect(content).toContain("**Last sweep:** Partial failure");
+
+    expect(content).toContain("invalid_local_occurrence_time");
+
+    expect(content).toContain("**Next sweep:**");
+
+    expect(content).toContain("/template show-generated template-id:7");
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("allows a recurrence start-date-only edit without replacing its stored rule", async () => {
+    recurrenceServiceMocks.editEventTemplateRecurrence.mockResolvedValue({
+      kind: "updated",
+
+      recurrence: {
+        id: 41,
+
+        templateId: 7,
+
+        recurrenceRule: "FREQ=WEEKLY",
+
+        startDate: "2026-10-12",
+
+        active: true,
+
+        createdByUserId: ADMIN_USER_ID,
+
+        createdAt: new Date(),
+
+        updatedAt: new Date(),
+      },
+    });
+
+    const interaction = createInteraction({
+      subcommand: "recurrence-edit",
+
+      strings: {
+        "start-date": "2026-10-12",
+      },
+
+      integers: {
+        "template-id": 7,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(
+      recurrenceServiceMocks.editEventTemplateRecurrence,
+    ).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      templateId: 7,
+
+      recurrenceRule: undefined,
+
+      startDate: "2026-10-12",
+    });
+
+    const content = readFirstReplyContent(interaction.editReply);
+
+    expect(content).toContain("Updated recurrence #41");
+
+    expect(content).toContain("Existing generated events remain unchanged.");
+
+    expect(content).toContain("/template show-generated template-id:7");
+
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "event_template.recurrence.edit",
+
+        targetType: "event_template",
+
+        targetId: "7",
+      }),
+    );
+  });
+
+  it("requires frequency when replacing a recurrence interval", async () => {
+    const interaction = createInteraction({
+      subcommand: "recurrence-edit",
+
+      integers: {
+        "template-id": 7,
+
+        interval: 2,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(
+      recurrenceServiceMocks.editEventTemplateRecurrence,
+    ).not.toHaveBeenCalled();
+
+    expect(readFirstReplyContent(interaction.editReply)).toContain(
+      "also choose `frequency`",
+    );
+
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("changes recurrence lifecycle without changing already-generated events", async () => {
+    recurrenceServiceMocks.setEventTemplateRecurrenceActive.mockResolvedValue({
+      kind: "updated",
+
+      recurrence: {
+        id: 41,
+
+        templateId: 7,
+
+        recurrenceRule: "FREQ=WEEKLY",
+
+        startDate: "2026-10-05",
+
+        active: false,
+
+        createdByUserId: ADMIN_USER_ID,
+
+        createdAt: new Date(),
+
+        updatedAt: new Date(),
+      },
+    });
+
+    const interaction = createInteraction({
+      subcommand: "recurrence-set-active",
+
+      integers: {
+        "template-id": 7,
+      },
+
+      booleans: {
+        active: false,
+      },
+    });
+
+    await handleTemplateCommand(interaction.interaction);
+
+    expect(
+      recurrenceServiceMocks.setEventTemplateRecurrenceActive,
+    ).toHaveBeenCalledWith({
+      guildDatabaseId: 42,
+
+      templateId: 7,
+
+      active: false,
+    });
+
+    const content = readFirstReplyContent(interaction.editReply);
+
+    expect(content).toContain("is now inactive");
+
+    expect(content).toContain("Existing generated events remain unchanged.");
+
+    expect(content).toContain("/template show-generated template-id:7");
+
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "event_template.recurrence.active.set",
+
+        targetType: "event_template",
+
+        targetId: "7",
+      }),
+    );
   });
 
   it("changes template lifecycle through the service and audits only a real mutation", async () => {

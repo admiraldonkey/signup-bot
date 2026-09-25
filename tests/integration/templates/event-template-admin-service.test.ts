@@ -410,6 +410,120 @@ describe("event template administration service", () => {
     });
   });
 
+  it("prevents an active recurring template from being changed to immediate publication", async () => {
+    // Arrange
+    const fixture = await createSourceFixture(
+      pool,
+      DISCORD_GUILD_ID,
+      "recurrence-publication",
+    );
+
+    const created = await createEventTemplate(buildCreateInput(fixture));
+
+    if (created.kind !== "created") {
+      throw new Error(
+        `Expected template fixture creation to succeed, received "${created.kind}".`,
+      );
+    }
+
+    await pool.query(
+      `
+        INSERT INTO
+          "event_template_recurrences" (
+            "template_id",
+            "recurrence_rule",
+            "start_date",
+            "active",
+            "created_by_user_id"
+          )
+        VALUES (
+          $1,
+          'FREQ=WEEKLY;BYDAY=MO',
+          '2026-10-05',
+          true,
+          $2
+        )
+      `,
+      [created.template.id, ADMIN_USER_ID],
+    );
+
+    // Act
+    const blocked = await editEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      publicationMode: "immediate",
+
+      publishMinutesBeforeStart: null,
+    });
+
+    // Assert
+    expect(blocked).toEqual({
+      kind: "invalid_input",
+
+      reason: "active_recurrence_disallows_immediate_publication",
+    });
+
+    const unchanged = await pool.query<{
+      publication_mode: string;
+    }>(
+      `
+          SELECT
+            "publication_mode"
+          FROM
+            "event_templates"
+          WHERE
+            "id" = $1
+        `,
+      [created.template.id],
+    );
+
+    expect(unchanged.rows).toEqual([
+      {
+        publication_mode: "scheduled",
+      },
+    ]);
+
+    /*
+     * An inactive recurrence may coexist with an immediate reusable template.
+     *
+     * This lets administrators temporarily use the same template for one-off
+     * immediate generation. Reactivating recurrence is guarded separately.
+     */
+    await pool.query(
+      `
+        UPDATE
+          "event_template_recurrences"
+        SET
+          "active" = false
+        WHERE
+          "template_id" = $1
+      `,
+      [created.template.id],
+    );
+
+    const allowed = await editEventTemplate({
+      guildDatabaseId: fixture.guildId,
+
+      templateId: created.template.id,
+
+      publicationMode: "immediate",
+
+      publishMinutesBeforeStart: null,
+    });
+
+    expect(allowed.kind).toBe("updated");
+
+    if (allowed.kind !== "updated") {
+      throw new Error(
+        `Expected immediate publication to become valid after recurrence deactivation, received "${allowed.kind}".`,
+      );
+    }
+
+    expect(allowed.template.publicationMode).toBe("immediate");
+  });
+
   it("rejects cross-guild source changes without modifying the template", async () => {
     // Arrange
     const fixture = await createSourceFixture(pool, DISCORD_GUILD_ID, "main");

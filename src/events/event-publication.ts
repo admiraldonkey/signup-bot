@@ -36,6 +36,7 @@ import {
   calculateOrganiserCoverDeadline,
 } from "../organisers/organiser-scheduling.js";
 import { resumeDueRoleRequestGroupOpeningsAfterPublication } from "../role-requests/role-request-scheduling.js";
+import { resumeDueEventRemindersAfterPublication } from "../reminders/reminder-scheduling.js";
 
 export type EventPublicationFailureReason =
   | "not-found"
@@ -449,15 +450,23 @@ export async function publishStoredEvent(
       });
 
       /*
-       * Publication is the authoritative release point for role-request groups
-       * which became due while this event was deliberately held unpublished.
+       * Publication is the authoritative release point for public work which
+       * became due while this event was deliberately held unpublished.
        *
-       * Wake those durable opening actions in the same PostgreSQL transaction
-       * as publication so we cannot commit "event published" while losing the
-       * corresponding release of already-due groups.
+       * Wake reminder and role-request actions in the same PostgreSQL
+       * transaction as publication so we cannot commit "event published"
+       * while losing the corresponding release of already-due work.
        *
-       * Future groups retain their existing schedule.
+       * Future work retains its existing schedule.
        */
+      await resumeDueEventRemindersAfterPublication(
+        transaction,
+
+        event.id,
+
+        publicationTime,
+      );
+
       await resumeDueRoleRequestGroupOpeningsAfterPublication(
         transaction,
 

@@ -1586,6 +1586,7 @@ async function createDueFailingReminderAction(
           "event_type_id",
           "name",
           "starts_at",
+          "published_at",
           "status",
           "created_by_user_id"
         )
@@ -1594,6 +1595,7 @@ async function createDueFailingReminderAction(
           $2,
           $3,
           NOW() + INTERVAL '1 hour',
+          NOW(),
           'open',
           $4
         )

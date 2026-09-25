@@ -1355,6 +1355,156 @@ export const commandDefinitions = [
 
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("recurrence-create")
+        .setDescription(
+          "Creates an active recurring series for a reusable template.",
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("template-id")
+            .setDescription("Template ID shown by /template list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("frequency")
+            .setDescription("How often the recurrence repeats.")
+            .addChoices(
+              {
+                name: "Daily",
+                value: "daily",
+              },
+              {
+                name: "Weekly",
+                value: "weekly",
+              },
+              {
+                name: "Monthly",
+                value: "monthly",
+              },
+              {
+                name: "Yearly",
+                value: "yearly",
+              },
+            )
+            .setRequired(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("start-date")
+            .setDescription("Local calendar anchor date in YYYY-MM-DD format.")
+            .setMinLength(10)
+            .setMaxLength(10)
+            .setRequired(true),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("interval")
+            .setDescription("Repeat every N frequency units. Defaults to 1.")
+            .setMinValue(1),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("recurrence-list")
+        .setDescription("Lists configured template recurrence series."),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("recurrence-show")
+        .setDescription("Shows the recurrence series for one template.")
+        .addIntegerOption((option) =>
+          option
+            .setName("template-id")
+            .setDescription("Template ID shown by /template list.")
+            .setMinValue(1)
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("recurrence-edit")
+        .setDescription("Edits a template recurrence series.")
+        .addIntegerOption((option) =>
+          option
+            .setName("template-id")
+            .setDescription("Template ID shown by /template list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("frequency")
+            .setDescription(
+              "Replacement frequency. Supply this to replace the pattern.",
+            )
+            .addChoices(
+              {
+                name: "Daily",
+                value: "daily",
+              },
+              {
+                name: "Weekly",
+                value: "weekly",
+              },
+              {
+                name: "Monthly",
+                value: "monthly",
+              },
+              {
+                name: "Yearly",
+                value: "yearly",
+              },
+            ),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("start-date")
+            .setDescription(
+              "Replacement local calendar anchor date in YYYY-MM-DD format.",
+            )
+            .setMinLength(10)
+            .setMaxLength(10),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("interval")
+            .setDescription(
+              "Interval for the replacement frequency. Defaults to 1.",
+            )
+            .setMinValue(1),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("recurrence-set-active")
+        .setDescription(
+          "Activates or deactivates a template recurrence series.",
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("template-id")
+            .setDescription("Template ID shown by /template list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("active")
+            .setDescription(
+              "Whether the recurrence may generate future occurrences.",
+            )
+            .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("edit")
         .setDescription("Edits the reusable core configuration of a template.")
 
@@ -1775,6 +1925,26 @@ export const commandDefinitions = [
             .setDescription("Template ID shown by /template list.")
             .setMinValue(1)
             .setRequired(true),
+        ),
+    )
+
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("show-generated")
+        .setDescription("Lists events already generated from one template.")
+        .addIntegerOption((option) =>
+          option
+            .setName("template-id")
+            .setDescription("Template ID shown by /template list.")
+            .setMinValue(1)
+            .setRequired(true),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("include-past")
+            .setDescription(
+              "Also include generated events whose current start time has passed.",
+            ),
         ),
     )
 

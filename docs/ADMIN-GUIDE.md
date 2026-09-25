@@ -3975,6 +3975,281 @@ An occurrence-specific time override does not edit the reusable template.
 
 ---
 
+# Template Recurrence
+
+A reusable template may have one recurrence series.
+
+Recurrence describes future local calendar slots which the bot automatically materialises into ordinary events.
+
+The model is:
+
+```text
+template
+    +
+recurrence
+    |
+    v
+bounded automatic materialisation
+    |
+    v
+ordinary independent events
+```
+
+The recurrence does not remain live configuration for generated events.
+
+Once an occurrence exists, ordinary event administration applies.
+
+---
+
+# `/template recurrence-create`
+
+Creates an active recurrence series for one template.
+
+Required options are:
+
+```text
+template-id
+frequency
+start-date
+```
+
+Supported administrator-facing frequencies are:
+
+```text
+Daily
+Weekly
+Monthly
+Yearly
+```
+
+`start-date` is the local calendar anchor in:
+
+```text
+YYYY-MM-DD
+```
+
+An optional:
+
+```text
+interval
+```
+
+changes the spacing between occurrences.
+
+For example:
+
+```text
+frequency: Weekly
+start-date: 2026-10-05
+interval: 2
+```
+
+means every two weeks using the anchor date to establish the calendar pattern.
+
+The template must have a reusable local start time.
+
+Automatic recurrence does not support:
+
+```text
+Immediate publication
+```
+
+because occurrences are intentionally materialised before their public lifecycle begins.
+
+Use Manual or Scheduled publication instead.
+
+P1 supports one recurrence series per template.
+
+Creating a recurrence does not alter any event already generated from that template.
+
+---
+
+# `/template recurrence-list`
+
+Lists recurrence series for the server.
+
+The list shows:
+
+- template identity
+- recurrence lifecycle
+- template lifecycle where inactive
+- readable recurrence pattern
+- anchor date
+- local event time and timezone
+- a visible warning when the most recently recorded automatic sweep failed or partially failed
+
+Use:
+
+```text
+/template recurrence-show
+template-id: <template ID>
+```
+
+for complete recurrence and automatic-materialisation state.
+
+---
+
+# `/template recurrence-show`
+
+Shows one recurrence source definition and its current automatic-materialisation status.
+
+The source information includes:
+
+- recurrence ID
+- recurrence lifecycle
+- template lifecycle
+- readable pattern
+- stored canonical recurrence rule
+- anchor date
+- template local start time and timezone
+- publication mode
+
+The automatic-materialisation section reports:
+
+- whether automatic sweeping is active or paused
+- the next durable sweep time while eligible
+- the most recent completed sweep outcome
+- the persisted diagnostic from the most recent failed or partially-failed sweep
+
+Typical outcomes are:
+
+```text
+Success
+Partial failure
+Failure
+Skipped
+```
+
+The stored diagnostic is operational information intended to help identify invalid or unavailable recurrence source state.
+
+Use:
+
+```text
+/template show-generated
+template-id: <template ID>
+```
+
+to inspect the ordinary events which already exist.
+
+---
+
+# `/template recurrence-edit`
+
+Edits recurrence source state for not-yet-generated occurrences.
+
+Supported administrator-facing changes are:
+
+```text
+frequency
+start-date
+interval
+```
+
+Changing only:
+
+```text
+start-date
+```
+
+preserves the currently stored recurrence pattern.
+
+Changing:
+
+```text
+interval
+```
+
+requires also supplying:
+
+```text
+frequency
+```
+
+This makes replacement of the complete simplified pattern explicit rather than silently discarding components from a more advanced stored recurrence rule.
+
+A successful recurrence edit makes the series immediately eligible for another automatic sweep.
+
+It also supersedes any older in-flight sweep claim against the previous recurrence definition.
+
+Existing generated events remain unchanged.
+
+---
+
+# `/template recurrence-set-active`
+
+Activates or deactivates one recurrence series.
+
+When inactive:
+
+```text
+no new recurring occurrences are automatically materialised
+```
+
+Previously generated events remain ordinary events.
+
+They are not cancelled or deleted.
+
+Reactivating the recurrence makes it immediately eligible for automatic sweeping again, provided the reusable template is also valid for recurrence.
+
+An inactive recurrence may coexist with a template using Immediate publication.
+
+It cannot be reactivated until the template is changed back to Manual or Scheduled publication.
+
+---
+
+# Automatic Recurrence Materialisation
+
+The bot maintains a rolling recurrence horizon of exactly:
+
+```text
+10 template-local calendar days
+```
+
+Conceptually:
+
+```text
+today
+through
+today + 9 days
+```
+
+This gives the currently-supported seven-day publication/reminder/role-request lead times three days of materialisation headroom.
+
+Automatic sweep eligibility is durable PostgreSQL state.
+
+The JavaScript polling timer is not authoritative.
+
+A bot restart therefore does not forget that a recurrence needs processing.
+
+The runtime checks for due recurrence work regularly and also performs an immediate check when the bot starts.
+
+Each recurrence is durably claimed before its horizon is processed.
+
+Concurrent bot workers may discover the same series, but only the worker which successfully owns the current database claim may record that sweep's operational result.
+
+Abandoned claims become recoverable after their lease is stale.
+
+Individual occurrence generation remains independently idempotent through immutable recurrence-slot provenance.
+
+Repeated sweeps therefore do not create duplicate events for the same recurrence slot.
+
+One bad recurrence does not stop unrelated recurrence series from being processed.
+
+Its latest failure is persisted on the recurrence and is visible through:
+
+```text
+/template recurrence-list
+/template recurrence-show
+```
+
+For Scheduled templates, generated occurrences create their ordinary durable publication action.
+
+For Manual templates, generated occurrences remain unpublished until explicitly published.
+
+Automatic recurrence never uses Immediate publication.
+
+---
+
 # Generation Snapshot Behaviour
 
 Successful generation creates an ordinary event containing snapshots of the template's current applicable state.
@@ -3995,9 +4270,20 @@ The event retains source provenance through:
 
 ```text
 events.template_id
+events.template_source_updated_at
 ```
 
-but does not continue reading its runtime configuration from the template.
+For newly-generated events, `template_source_updated_at` records the exact reusable-template revision which was snapshotted.
+
+Older generated events created before exact revision tracking may have:
+
+```text
+template_source_updated_at = NULL
+```
+
+Those events remain valid independent snapshots, but their exact historical template revision is intentionally reported as unknown rather than inferred from timestamps.
+
+Generated events do not continue reading their runtime configuration from the template.
 
 Later template changes do not rewrite the generated event.
 
@@ -4073,23 +4359,91 @@ Publication can then be retried using:
 
 ---
 
-# Inspecting Generated Events
+# `/template show-generated`
 
-Once generated, an occurrence is an ordinary event.
+Lists ordinary events which have already been generated from one template.
 
-Current event information is spread across the relevant event-level commands.
-
-Depending on the configured features, useful inspection commands include:
+Use:
 
 ```text
-/event list
-/event reminder-list
-/event role-option-list
-/event role-group-list
-/event role-requests
+/template show-generated
+template-id: <template ID>
 ```
 
-A consolidated `/event show` command is not currently implemented and is tracked as a future administrator-UX improvement.
+By default, the command shows generated events whose current event start time has not yet passed.
+
+The filter uses the event's current:
+
+```text
+events.starts_at
+```
+
+rather than its original recurrence slot.
+
+This means an event which was rescheduled remains classified according to its current event time.
+
+Use:
+
+```text
+/template show-generated
+template-id: <template ID>
+include-past: true
+```
+
+to include historical generated events as well.
+
+For each generated event the command shows:
+
+- Event ID and current event name
+- current start time
+- lifecycle state
+- publication state
+- durable scheduled-publication state where applicable
+- immutable recurrence slot where the event came from automatic recurrence
+- whether the event was generated from the template's current or an older revision
+
+A one-off event produced by `/template generate` has no recurrence slot and is identified as one-off template generation.
+
+Template revision state is reported as:
+
+```text
+Current revision
+Older revision
+Revision unknown
+```
+
+`Current revision` means the event's exact snapshotted:
+
+```text
+events.template_source_updated_at
+```
+
+matches the template's current:
+
+```text
+event_templates.updated_at
+```
+
+`Older revision` means the reusable template has changed since that event was generated.
+
+`Revision unknown` is used when exact source-revision provenance is unavailable, including generated events which predate revision tracking.
+
+The bot does not attempt to infer missing historical provenance from creation timestamps.
+
+Publication information comes from ordinary event-owned state, including:
+
+```text
+events.published_at
+scheduled_actions[action_key = publish_event]
+```
+
+The command does not reconstruct publication state from the template's current publication configuration.
+
+Once generated, an occurrence remains an ordinary event.
+
+Use its Event ID with ordinary `/event` administration commands to inspect or modify that event.
+
+A consolidated `/event show` command is tracked separately as a future administrator-UX improvement.
 
 ---
 
@@ -4192,6 +4546,43 @@ minutes-before
 The resulting reminder must still be meaningful and valid.
 
 The bot does not intentionally send obsolete reminder text after its purpose has already passed.
+
+## Reminders on unpublished events
+
+Persistent reminders may be configured while an event is still unpublished.
+
+A due reminder does not override the event's publication state.
+
+The normal behaviour is:
+
+```text
+reminder due
++
+event unpublished
++
+reference point still future
+    -> wait for event publication
+```
+
+Waiting is durable.
+
+The reminder's scheduled action is parked at its useful reference boundary without consuming the scheduler delivery-retry budget.
+
+If the event publishes while the reminder is still useful:
+
+```text
+reminder due <= publication < reminder reference point
+```
+
+publication wakes the reminder action immediately.
+
+A genuinely future reminder keeps its existing schedule.
+
+If the event remains unpublished until the reminder's reference point is reached, the reminder is marked missed rather than exposing the private event late.
+
+This applies to ordinary event reminders regardless of whether the event was created manually or generated from a template.
+
+An immediate administrator announcement created with `/event announce` remains a separate explicit action and is not treated as a persistent scheduled reminder.
 
 ---
 
